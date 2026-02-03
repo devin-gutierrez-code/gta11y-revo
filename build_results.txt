@@ -1,0 +1,243 @@
+======================================== 
+GTA11Y Build and Deploy Script 
+======================================== 
+ 
+Found MSBuild: C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\MSBuild\Current\Bin\MSBuild.exe 
+ 
+Step 1/3: Restoring NuGet packages... 
+ 
+MSBuild version 18.0.5+e22287bf1 for .NET Framework
+Build started 2/3/2026 12:59:26 AM.
+
+Project "C:\dev\gta11y\GTA.sln" on node 1 (Restore target(s)).
+ValidateSolutionConfiguration:
+  Building solution configuration "Debug|Any CPU".
+_GetAllRestoreProjectPathItems:
+  Determining projects to restore...
+Restore:
+  X.509 certificate chain validation will use the default trust store selected by .NET for code signing.
+  X.509 certificate chain validation will use the default trust store selected by .NET for timestamping.
+  Nothing to do. None of the projects specified contain packages to restore.
+Done Building Project "C:\dev\gta11y\GTA.sln" (Restore target(s)).
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:00.37
+ 
+Step 2/3: Building project... 
+ 
+MSBuild version 18.0.5+e22287bf1 for .NET Framework
+Build started 2/3/2026 12:59:27 AM.
+
+     1>Project "C:\dev\gta11y\GTA.sln" on node 1 (Clean;Build target(s)).
+     1>ValidateSolutionConfiguration:
+         Building solution configuration "Release|x64".
+     1>Project "C:\dev\gta11y\GTA.sln" (1) is building "C:\dev\gta11y\GTA\GTA11Y.csproj" (2) on node 1 (Clean target(s)).
+     2>CoreClean:
+         Deleting file "C:\dev\gta11y\GTA\bin\x64\Release\GrandTheftAccessibility.dll".
+         Deleting file "C:\dev\gta11y\GTA\bin\x64\Release\GrandTheftAccessibility.pdb".
+         Deleting file "C:\dev\gta11y\GTA\bin\x64\Release\CSCore.dll".
+         Deleting file "C:\dev\gta11y\GTA\bin\x64\Release\NAudio.dll".
+         Deleting file "C:\dev\gta11y\GTA\bin\x64\Release\Newtonsoft.Json.dll".
+         Deleting file "C:\dev\gta11y\GTA\bin\x64\Release\ScriptHookVDotNet3.dll".
+         Deleting file "C:\dev\gta11y\GTA\bin\x64\Release\TolkDotNet.dll".
+         Deleting file "C:\dev\gta11y\GTA\bin\x64\Release\CSCore.xml".
+         Deleting file "C:\dev\gta11y\GTA\bin\x64\Release\NAudio.xml".
+         Deleting file "C:\dev\gta11y\GTA\bin\x64\Release\Newtonsoft.Json.xml".
+         Deleting file "C:\dev\gta11y\GTA\obj\x64\Release\GTA11Y.csproj.AssemblyReference.cache".
+         Deleting file "C:\dev\gta11y\GTA\obj\x64\Release\GTA11Y.csproj.CoreCompileInputs.cache".
+         Deleting file "C:\dev\gta11y\GTA\obj\x64\Release\GrandTheftAccessibility.dll".
+         Deleting file "C:\dev\gta11y\GTA\obj\x64\Release\GrandTheftAccessibility.pdb".
+         Deleting file "C:\dev\gta11y\GTA\obj\x64\Release\GTA11Y.csproj.Up2Date".
+     2>Done Building Project "C:\dev\gta11y\GTA\GTA11Y.csproj" (Clean target(s)).
+     1>Project "C:\dev\gta11y\GTA.sln" (1) is building "C:\dev\gta11y\GTA\GTA11Y.csproj" (2:2) on node 1 (default targets).
+     2>GenerateTargetFrameworkMonikerAttribute:
+       Skipping target "GenerateTargetFrameworkMonikerAttribute" because all output files are up-to-date with respect to the input files.
+     2>C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\MSBuild\Current\Bin\Microsoft.CSharp.CurrentVersion.targets(130,9): warning MSB3884: Could not find rule set file "MinimumRecommendedRules.ruleset". [C:\dev\gta11y\GTA\GTA11Y.csproj]
+       CoreCompile:
+         Setting DOTNET_ROOT to 'C:\Program Files\dotnet'
+         C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\MSBuild\Current\Bin\Roslyn\csc.exe /noconfig /nowarn:1701,1702 /fullpaths /nostdlib+ /platform:x64 /errorreport:prompt /define:TRACE /highentropyva+ /reference:C:\dev\gta11y\packages\CSCore.1.2.1.2\lib\net35-client\CSCore.dll /reference:"C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8\Microsoft.CSharp.dll" /reference:"C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8\mscorlib.dll" /reference:C:\dev\gta11y\packages\NAudio.1.10.0\lib\net35\NAudio.dll /reference:C:\dev\gta11y\packages\Newtonsoft.Json.12.0.3\lib\net45\Newtonsoft.Json.dll /reference:C:\dev\gta11y\lib\ScriptHookVDotNet3.dll /reference:"C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8\System.Core.dll" /reference:"C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8\System.Data.DataSetExtensions.dll" /reference:"C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8\System.Data.dll" /reference:"C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8\System.dll" /reference:"C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8\System.Drawing.dll" /reference:"C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8\System.Net.Http.dll" /reference:"C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8\System.Speech.dll" /reference:"C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8\System.Windows.Forms.dll" /reference:"C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8\System.Xml.dll" /reference:"C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8\System.Xml.Linq.dll" /reference:C:\dev\gta11y\lib\TolkDotNet.dll /debug:pdbonly /filealign:512 /optimize+ /out:obj\x64\Release\GrandTheftAccessibility.dll /subsystemversion:6.00 /target:library /utf8output /deterministic+ /langversion:7.3 GTA11Y.cs setting.cs VehicleSpawn.cs Location.cs Properties\AssemblyInfo.cs Result.cs "obj\x64\Release\.NETFramework,Version=v4.8.AssemblyAttributes.cs"
+         Compilation request GTA11Y, PathToTool=C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\MSBuild\Current\Bin\Roslyn\csc.exe
+         CommandLine = ' /noconfig'
+         BuildResponseFile = '/nowarn:1701,1702 /fullpaths /nostdlib+ /platform:x64 /errorreport:prompt /define:TRACE /highentropyva+ /reference:C:\dev\gta11y\packages\CSCore.1.2.1.2\lib\net35-client\CSCore.dll /reference:"C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8\Microsoft.CSharp.dll" /reference:"C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8\mscorlib.dll" /reference:C:\dev\gta11y\packages\NAudio.1.10.0\lib\net35\NAudio.dll /reference:C:\dev\gta11y\packages\Newtonsoft.Json.12.0.3\lib\net45\Newtonsoft.Json.dll /reference:C:\dev\gta11y\lib\ScriptHookVDotNet3.dll /reference:"C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8\System.Core.dll" /reference:"C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8\System.Data.DataSetExtensions.dll" /reference:"C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8\System.Data.dll" /reference:"C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8\System.dll" /reference:"C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8\System.Drawing.dll" /reference:"C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8\System.Net.Http.dll" /reference:"C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8\System.Speech.dll" /reference:"C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8\System.Windows.Forms.dll" /reference:"C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8\System.Xml.dll" /reference:"C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.8\System.Xml.Linq.dll" /reference:C:\dev\gta11y\lib\TolkDotNet.dll /debug:pdbonly /filealign:512 /optimize+ /out:obj\x64\Release\GrandTheftAccessibility.dll /subsystemversion:6.00 /target:library /utf8output /deterministic+ /langversion:7.3 GTA11Y.cs setting.cs VehicleSpawn.cs Location.cs Properties\AssemblyInfo.cs Result.cs "obj\x64\Release\.NETFramework,Version=v4.8.AssemblyAttributes.cs"'
+         Attempting to create process 'C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\MSBuild\Current\Bin\Roslyn\VBCSCompiler.exe' "-pipename:u6ck7Ebku9uwM7JRtR3PaRjgYAJCdPJKr8XxD_6SIoU"
+         Setting DOTNET_ROOT to 'C:\Program Files\dotnet'
+         Successfully created process with process id 20868
+         Attempt to open named pipe 'u6ck7Ebku9uwM7JRtR3PaRjgYAJCdPJKr8XxD_6SIoU'
+         Attempt to connect named pipe 'u6ck7Ebku9uwM7JRtR3PaRjgYAJCdPJKr8XxD_6SIoU'
+         Named pipe 'u6ck7Ebku9uwM7JRtR3PaRjgYAJCdPJKr8XxD_6SIoU' connected
+         Begin writing request for GTA11Y
+         End writing request for GTA11Y
+         Begin reading response for GTA11Y
+         End reading response for GTA11Y
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(566,9): warning CS0618: 'Game.IsLoading' is obsolete: '`Game.IsLoading` is obsolete because Script Hook V changed the way SHV scripts start inv1.0.3351.0 (SHV version and not game version) and they never be able to start before the game finished showing the loading screen since SHV v1.0.3351.0+. It is advised not to use `Game.IsLoading`at all.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(600,24): warning CS0618: 'Player.WantedLevel.get' is obsolete: 'Use `GTA.Wanted.WantedLevel` instead via the property `GTA.Player.Wanted`.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(602,20): warning CS0618: 'Player.WantedLevel.get' is obsolete: 'Use `GTA.Wanted.WantedLevel` instead via the property `GTA.Player.Wanted`.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(635,6): warning CS0618: 'Ped.CanBeKnockedOffBike' is obsolete: 'Use Ped.KnockOffVehicleType instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(645,6): warning CS0618: 'Ped.CanBeKnockedOffBike' is obsolete: 'Use Ped.KnockOffVehicleType instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(700,6): warning CS0618: 'Player.IgnoredByPolice.set' is obsolete: 'Use `GTA.Wanted.SetPoliceIgnorePlayer` instead via the property `GTA.Player.Wanted`.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(704,6): warning CS0618: 'Player.IgnoredByPolice.set' is obsolete: 'Use `GTA.Wanted.SetPoliceIgnorePlayer` instead via the property `GTA.Player.Wanted`.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(709,6): warning CS0618: 'Player.WantedLevel.set' is obsolete: 'Use the combination of `SetWantedLevel` and `ApplyWantedLevelChangeNow` of `GTA.Wanted` instead via the property `GTA.Player.Wanted`.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(807,44): warning CS0618: 'Ped.IsGettingIntoVehicle' is obsolete: 'Use IsEnteringVehicle instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(827,18): warning CS0618: 'World.CurrentTimeOfDay' is obsolete: 'World.CurrentTimeOfDay is obsolete, use GTA.Chrono.GameClock.Today instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(1875,24): warning CS0618: 'World.GetGroundHeight(Vector3)' is obsolete: 'Use GetGroundHeight(Vector3, out float, GetGroundHeightMode) instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(1898,30): warning CS0618: 'World.GetGroundHeight(Vector3)' is obsolete: 'Use GetGroundHeight(Vector3, out float, GetGroundHeightMode) instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(2092,51): warning CS0618: 'Player.WantedLevel.get' is obsolete: 'Use `GTA.Wanted.WantedLevel` instead via the property `GTA.Player.Wanted`.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(2141,28): warning CS0618: 'World.GetGroundHeight(Vector3)' is obsolete: 'Use GetGroundHeight(Vector3, out float, GetGroundHeightMode) instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(2142,29): warning CS0618: 'World.GetGroundHeight(Vector3)' is obsolete: 'Use GetGroundHeight(Vector3, out float, GetGroundHeightMode) instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(2143,30): warning CS0618: 'World.GetGroundHeight(Vector3)' is obsolete: 'Use GetGroundHeight(Vector3, out float, GetGroundHeightMode) instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(3205,20): warning CS0618: 'World.CurrentTimeOfDay' is obsolete: 'World.CurrentTimeOfDay is obsolete, use GTA.Chrono.GameClock.Today instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(3242,6): warning CS0618: 'Audio.PlaySoundFrontend(string, string)' is obsolete: 'Use ScriptSoundId.PlaySoundFrontend or Audio.PlaySoundFrontendAndForget instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(3332,10): warning CS0618: 'Ped.AlwaysKeepTask' is obsolete: 'Ped.AlwaysKeepTask is obsolete because it does not indicate that it only affects when the ped is marked as no longer needed. Use Ped.KeepTaskWhenMarkedAsNoLongerNeeded instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(3335,10): warning CS0618: 'TaskInvoker.FightAgainst(Ped)' is obsolete: 'Use TaskInvoker.Combat instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(3336,10): warning CS0618: 'Ped.AlwaysKeepTask' is obsolete: 'Ped.AlwaysKeepTask is obsolete because it does not indicate that it only affects when the ped is marked as no longer needed. Use Ped.KeepTaskWhenMarkedAsNoLongerNeeded instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(3368,12): warning CS0618: 'Player.WantedLevel.get' is obsolete: 'Use `GTA.Wanted.WantedLevel` instead via the property `GTA.Player.Wanted`.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(3369,9): warning CS0618: 'Player.WantedLevel.set' is obsolete: 'Use the combination of `SetWantedLevel` and `ApplyWantedLevelChangeNow` of `GTA.Wanted` instead via the property `GTA.Player.Wanted`.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(3369,9): warning CS0618: 'Player.WantedLevel.get' is obsolete: 'Use `GTA.Wanted.WantedLevel` instead via the property `GTA.Player.Wanted`.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(3374,8): warning CS0618: 'Player.WantedLevel.set' is obsolete: 'Use the combination of `SetWantedLevel` and `ApplyWantedLevelChangeNow` of `GTA.Wanted` instead via the property `GTA.Player.Wanted`.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(3423,26): warning CS0618: 'World.GetGroundHeight(Vector2)' is obsolete: 'Use GetGroundHeight(Vector3, out float, GetGroundHeightMode) instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(3504,6): warning CS0618: 'Audio.PlaySoundFrontend(string, string)' is obsolete: 'Use ScriptSoundId.PlaySoundFrontend or Audio.PlaySoundFrontendAndForget instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(3643,6): warning CS0618: 'Audio.PlaySoundFrontend(string, string)' is obsolete: 'Use ScriptSoundId.PlaySoundFrontend or Audio.PlaySoundFrontendAndForget instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(3784,6): warning CS0618: 'Audio.PlaySoundFrontend(string, string)' is obsolete: 'Use ScriptSoundId.PlaySoundFrontend or Audio.PlaySoundFrontendAndForget instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(3801,6): warning CS0618: 'Audio.PlaySoundFrontend(string, string)' is obsolete: 'Use ScriptSoundId.PlaySoundFrontend or Audio.PlaySoundFrontendAndForget instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(4194,17): warning CS0168: The variable 'e' is declared but never used [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(4229,23): warning CS0168: The variable 'e' is declared but never used [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(4199,11): warning CS0219: The variable 'current' is assigned but its value is never used [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(20,15): warning CS0169: The field 'GTA11Y.health' is never used [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(157,18): warning CS0414: The field 'GTA11Y.lastAnnouncedInteractable' is assigned but its value is never used [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(67,15): warning CS0414: The field 'GTA11Y.sameDistanceCount' is assigned but its value is never used [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(133,17): warning CS0414: The field 'GTA11Y.lastVehicleHealth' is assigned but its value is never used [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(61,16): warning CS0414: The field 'GTA11Y.navAssistDebug' is assigned but its value is never used [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(231,15): warning CS0414: The field 'GTA11Y.detectionRadiusIndex' is assigned but its value is never used [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(40,15): warning CS0414: The field 'GTA11Y.driveMenuIndex' is assigned but its value is never used [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(62,34): warning CS0414: The field 'GTA11Y.navDebugLog' is assigned but its value is never used [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(303,16): warning CS0414: The field 'GTA11Y.climbing' is assigned but its value is never used [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(66,17): warning CS0414: The field 'GTA11Y.lastNavHitDistance' is assigned but its value is never used [C:\dev\gta11y\GTA\GTA11Y.csproj]
+     2>C:\dev\gta11y\GTA\GTA11Y.cs(144,17): warning CS0414: The field 'GTA11Y.lastStamina' is assigned but its value is never used [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         CompilerServer: server - server processed compilation - GTA11Y
+       _CopyFilesMarkedCopyLocal:
+         Copying file from "C:\dev\gta11y\packages\CSCore.1.2.1.2\lib\net35-client\CSCore.dll" to "C:\dev\gta11y\GTA\bin\x64\Release\CSCore.dll".
+         Copying file from "C:\dev\gta11y\packages\Newtonsoft.Json.12.0.3\lib\net45\Newtonsoft.Json.dll" to "C:\dev\gta11y\GTA\bin\x64\Release\Newtonsoft.Json.dll".
+         Copying file from "C:\dev\gta11y\lib\TolkDotNet.dll" to "C:\dev\gta11y\GTA\bin\x64\Release\TolkDotNet.dll".
+         Copying file from "C:\dev\gta11y\lib\ScriptHookVDotNet3.dll" to "C:\dev\gta11y\GTA\bin\x64\Release\ScriptHookVDotNet3.dll".
+         Copying file from "C:\dev\gta11y\packages\CSCore.1.2.1.2\lib\net35-client\CSCore.xml" to "C:\dev\gta11y\GTA\bin\x64\Release\CSCore.xml".
+         Copying file from "C:\dev\gta11y\packages\NAudio.1.10.0\lib\net35\NAudio.dll" to "C:\dev\gta11y\GTA\bin\x64\Release\NAudio.dll".
+         Copying file from "C:\dev\gta11y\packages\NAudio.1.10.0\lib\net35\NAudio.xml" to "C:\dev\gta11y\GTA\bin\x64\Release\NAudio.xml".
+         Copying file from "C:\dev\gta11y\packages\Newtonsoft.Json.12.0.3\lib\net45\Newtonsoft.Json.xml" to "C:\dev\gta11y\GTA\bin\x64\Release\Newtonsoft.Json.xml".
+         Creating "C:\dev\gta11y\GTA\obj\x64\Release\GTA11Y.csproj.Up2Date" because "AlwaysCreate" was specified.
+         Touching "C:\dev\gta11y\GTA\obj\x64\Release\GTA11Y.csproj.Up2Date".
+       CopyFilesToOutputDirectory:
+         Copying file from "C:\dev\gta11y\GTA\obj\x64\Release\GrandTheftAccessibility.dll" to "C:\dev\gta11y\GTA\bin\x64\Release\GrandTheftAccessibility.dll".
+         GTA11Y -> C:\dev\gta11y\GTA\bin\x64\Release\GrandTheftAccessibility.dll
+         Copying file from "C:\dev\gta11y\GTA\obj\x64\Release\GrandTheftAccessibility.pdb" to "C:\dev\gta11y\GTA\bin\x64\Release\GrandTheftAccessibility.pdb".
+     2>Done Building Project "C:\dev\gta11y\GTA\GTA11Y.csproj" (default targets).
+     1>Done Building Project "C:\dev\gta11y\GTA.sln" (Clean;Build target(s)).
+
+Build succeeded.
+
+       "C:\dev\gta11y\GTA.sln" (Clean;Build target) (1) ->
+       "C:\dev\gta11y\GTA\GTA11Y.csproj" (default target) (2:2) ->
+       (ResolveCodeAnalysisRuleSet target) -> 
+         C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\MSBuild\Current\Bin\Microsoft.CSharp.CurrentVersion.targets(130,9): warning MSB3884: Could not find rule set file "MinimumRecommendedRules.ruleset". [C:\dev\gta11y\GTA\GTA11Y.csproj]
+
+
+       "C:\dev\gta11y\GTA.sln" (Clean;Build target) (1) ->
+       "C:\dev\gta11y\GTA\GTA11Y.csproj" (default target) (2:2) ->
+       (CoreCompile target) -> 
+         C:\dev\gta11y\GTA\GTA11Y.cs(566,9): warning CS0618: 'Game.IsLoading' is obsolete: '`Game.IsLoading` is obsolete because Script Hook V changed the way SHV scripts start inv1.0.3351.0 (SHV version and not game version) and they never be able to start before the game finished showing the loading screen since SHV v1.0.3351.0+. It is advised not to use `Game.IsLoading`at all.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(600,24): warning CS0618: 'Player.WantedLevel.get' is obsolete: 'Use `GTA.Wanted.WantedLevel` instead via the property `GTA.Player.Wanted`.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(602,20): warning CS0618: 'Player.WantedLevel.get' is obsolete: 'Use `GTA.Wanted.WantedLevel` instead via the property `GTA.Player.Wanted`.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(635,6): warning CS0618: 'Ped.CanBeKnockedOffBike' is obsolete: 'Use Ped.KnockOffVehicleType instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(645,6): warning CS0618: 'Ped.CanBeKnockedOffBike' is obsolete: 'Use Ped.KnockOffVehicleType instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(700,6): warning CS0618: 'Player.IgnoredByPolice.set' is obsolete: 'Use `GTA.Wanted.SetPoliceIgnorePlayer` instead via the property `GTA.Player.Wanted`.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(704,6): warning CS0618: 'Player.IgnoredByPolice.set' is obsolete: 'Use `GTA.Wanted.SetPoliceIgnorePlayer` instead via the property `GTA.Player.Wanted`.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(709,6): warning CS0618: 'Player.WantedLevel.set' is obsolete: 'Use the combination of `SetWantedLevel` and `ApplyWantedLevelChangeNow` of `GTA.Wanted` instead via the property `GTA.Player.Wanted`.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(807,44): warning CS0618: 'Ped.IsGettingIntoVehicle' is obsolete: 'Use IsEnteringVehicle instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(827,18): warning CS0618: 'World.CurrentTimeOfDay' is obsolete: 'World.CurrentTimeOfDay is obsolete, use GTA.Chrono.GameClock.Today instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(1875,24): warning CS0618: 'World.GetGroundHeight(Vector3)' is obsolete: 'Use GetGroundHeight(Vector3, out float, GetGroundHeightMode) instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(1898,30): warning CS0618: 'World.GetGroundHeight(Vector3)' is obsolete: 'Use GetGroundHeight(Vector3, out float, GetGroundHeightMode) instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(2092,51): warning CS0618: 'Player.WantedLevel.get' is obsolete: 'Use `GTA.Wanted.WantedLevel` instead via the property `GTA.Player.Wanted`.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(2141,28): warning CS0618: 'World.GetGroundHeight(Vector3)' is obsolete: 'Use GetGroundHeight(Vector3, out float, GetGroundHeightMode) instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(2142,29): warning CS0618: 'World.GetGroundHeight(Vector3)' is obsolete: 'Use GetGroundHeight(Vector3, out float, GetGroundHeightMode) instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(2143,30): warning CS0618: 'World.GetGroundHeight(Vector3)' is obsolete: 'Use GetGroundHeight(Vector3, out float, GetGroundHeightMode) instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(3205,20): warning CS0618: 'World.CurrentTimeOfDay' is obsolete: 'World.CurrentTimeOfDay is obsolete, use GTA.Chrono.GameClock.Today instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(3242,6): warning CS0618: 'Audio.PlaySoundFrontend(string, string)' is obsolete: 'Use ScriptSoundId.PlaySoundFrontend or Audio.PlaySoundFrontendAndForget instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(3332,10): warning CS0618: 'Ped.AlwaysKeepTask' is obsolete: 'Ped.AlwaysKeepTask is obsolete because it does not indicate that it only affects when the ped is marked as no longer needed. Use Ped.KeepTaskWhenMarkedAsNoLongerNeeded instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(3335,10): warning CS0618: 'TaskInvoker.FightAgainst(Ped)' is obsolete: 'Use TaskInvoker.Combat instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(3336,10): warning CS0618: 'Ped.AlwaysKeepTask' is obsolete: 'Ped.AlwaysKeepTask is obsolete because it does not indicate that it only affects when the ped is marked as no longer needed. Use Ped.KeepTaskWhenMarkedAsNoLongerNeeded instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(3368,12): warning CS0618: 'Player.WantedLevel.get' is obsolete: 'Use `GTA.Wanted.WantedLevel` instead via the property `GTA.Player.Wanted`.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(3369,9): warning CS0618: 'Player.WantedLevel.set' is obsolete: 'Use the combination of `SetWantedLevel` and `ApplyWantedLevelChangeNow` of `GTA.Wanted` instead via the property `GTA.Player.Wanted`.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(3369,9): warning CS0618: 'Player.WantedLevel.get' is obsolete: 'Use `GTA.Wanted.WantedLevel` instead via the property `GTA.Player.Wanted`.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(3374,8): warning CS0618: 'Player.WantedLevel.set' is obsolete: 'Use the combination of `SetWantedLevel` and `ApplyWantedLevelChangeNow` of `GTA.Wanted` instead via the property `GTA.Player.Wanted`.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(3423,26): warning CS0618: 'World.GetGroundHeight(Vector2)' is obsolete: 'Use GetGroundHeight(Vector3, out float, GetGroundHeightMode) instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(3504,6): warning CS0618: 'Audio.PlaySoundFrontend(string, string)' is obsolete: 'Use ScriptSoundId.PlaySoundFrontend or Audio.PlaySoundFrontendAndForget instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(3643,6): warning CS0618: 'Audio.PlaySoundFrontend(string, string)' is obsolete: 'Use ScriptSoundId.PlaySoundFrontend or Audio.PlaySoundFrontendAndForget instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(3784,6): warning CS0618: 'Audio.PlaySoundFrontend(string, string)' is obsolete: 'Use ScriptSoundId.PlaySoundFrontend or Audio.PlaySoundFrontendAndForget instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(3801,6): warning CS0618: 'Audio.PlaySoundFrontend(string, string)' is obsolete: 'Use ScriptSoundId.PlaySoundFrontend or Audio.PlaySoundFrontendAndForget instead.' [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(4194,17): warning CS0168: The variable 'e' is declared but never used [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(4229,23): warning CS0168: The variable 'e' is declared but never used [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(4199,11): warning CS0219: The variable 'current' is assigned but its value is never used [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(20,15): warning CS0169: The field 'GTA11Y.health' is never used [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(157,18): warning CS0414: The field 'GTA11Y.lastAnnouncedInteractable' is assigned but its value is never used [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(67,15): warning CS0414: The field 'GTA11Y.sameDistanceCount' is assigned but its value is never used [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(133,17): warning CS0414: The field 'GTA11Y.lastVehicleHealth' is assigned but its value is never used [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(61,16): warning CS0414: The field 'GTA11Y.navAssistDebug' is assigned but its value is never used [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(231,15): warning CS0414: The field 'GTA11Y.detectionRadiusIndex' is assigned but its value is never used [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(40,15): warning CS0414: The field 'GTA11Y.driveMenuIndex' is assigned but its value is never used [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(62,34): warning CS0414: The field 'GTA11Y.navDebugLog' is assigned but its value is never used [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(303,16): warning CS0414: The field 'GTA11Y.climbing' is assigned but its value is never used [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(66,17): warning CS0414: The field 'GTA11Y.lastNavHitDistance' is assigned but its value is never used [C:\dev\gta11y\GTA\GTA11Y.csproj]
+         C:\dev\gta11y\GTA\GTA11Y.cs(144,17): warning CS0414: The field 'GTA11Y.lastStamina' is assigned but its value is never used [C:\dev\gta11y\GTA\GTA11Y.csproj]
+
+    45 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.25
+ 
+BUILD SUCCESSFUL 
+======================================== 
+Step 3/3: Deploying to GTA V... 
+======================================== 
+========================================
+GTA11Y Deployment Script
+========================================
+
+Source Directory: "C:\dev\gta11y\"
+Build Directory: "C:\dev\gta11y\GTA\bin\x64\Release"
+Game Directory: "C:\Program Files (x86)\Steam\steamapps\common\Grand Theft Auto V"
+Scripts Directory: "C:\Program Files (x86)\Steam\steamapps\common\Grand Theft Auto V\scripts"
+
+Copying main DLL...
+- GrandTheftAccessibility.dll copied
+
+Copying dependency DLLs...
+- NAudio.dll copied
+- CSCore.dll copied
+- Newtonsoft.Json.dll copied
+
+Copying Tolk libraries...
+- TolkDotNet.dll copied
+- Tolk.dll copied
+
+Copying audio files...
+- tped.wav copied
+- tvehicle.wav copied
+- tprop.wav copied
+
+Copying hashes database...
+- hashes.txt copied
+
+========================================
+Deployment completed successfully
+========================================
+
+Launching GTA V via Steam...
+
+Game launch initiated.
+You can close this window.
+
+Press any key to continue . . . 
+ 
+Complete build_results.txt 

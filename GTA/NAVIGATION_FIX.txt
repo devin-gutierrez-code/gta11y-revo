@@ -1,0 +1,83 @@
+=== GTA11Y Navigation Assist v3.0 - Multi-Directional + Waypoint + Enemy Detection ===
+Updated: January 29, 2026
+
+NEW FEATURES IN v3.0:
+=====================
+
+1. WAYPOINT TRACKING SYSTEM (NumPad Decimal Key)
+   - Press NumPad Decimal when a waypoint is set to toggle tracking
+   - Announces: "Waypoint tracking. X meters [direction]. Facing [heading]"
+   - Continuous directional beeps guide you to the waypoint
+   - Beep panning: Left ear = turn left, Right ear = turn right, Center = going straight
+   - Beep interval: Faster when closer, slower when farther (200ms-1000ms)
+   - Beep pitch: Higher when facing waypoint, lower when facing away
+   - Auto-announces "Arrived at waypoint" within 10m
+   - Auto-announces "Waypoint cleared" if waypoint is removed
+   - Press again to stop tracking: "Waypoint tracking stopped"
+   - If no waypoint set, just announces current heading as before
+
+2. ENEMY DETECTION SYSTEM (Automatic)
+   - Scans for hostile peds every 2 seconds within 100m
+   - Detects: Peds in combat against player, peds with Hate/Dislike relationship
+   - Announces: "X hostile(s) detected" when enemies found
+   - Continuous tracking beeps for closest enemy (every 300ms)
+   - Directional audio: Panned left/right based on enemy position
+   - Pitch: Higher when enemy is closer (more urgent)
+   - Harsh sawtooth waveform distinguishes from other beeps
+   - Auto-removes dead enemies from tracking
+
+3. MULTI-DIRECTIONAL NAVIGATION (Existing, Enhanced)
+   - Detects obstacles in LEFT, CENTER, RIGHT zones
+   - Full stereo panning for spatial awareness
+   - Speed-based detection range and intervals in vehicles
+
+AUDIO OUTPUTS SUMMARY:
+======================
+| System           | Waveform  | Frequency    | Pan              |
+|------------------|-----------|--------------|------------------|
+| Nav - Peds       | Triangle  | 150-400 Hz   | By direction     |
+| Nav - Vehicles   | Sawtooth  | 300-800 Hz   | By direction     |
+| Nav - World      | Square    | 200-600 Hz   | By direction     |
+| Waypoint         | Sine      | 200-600 Hz   | By direction     |
+| Enemy            | Sawtooth  | 400-800 Hz   | By direction     |
+
+CONTROLS:
+=========
+NumPad Decimal:
+- No waypoint: Announces "facing [direction]"
+- Waypoint exists: Toggles waypoint tracking on/off
+- First press: "Waypoint tracking. 500 meters North. Facing East"
+- Second press: "Waypoint tracking stopped. Facing East"
+
+WAYPOINT BEEP BEHAVIOR:
+=======================
+- Distance interval: 200ms (close) to 1000ms (far)
+- Pitch feedback:
+  - Facing directly at waypoint: 600 Hz (high, positive)
+  - Facing away: 200 Hz (low, turn around)
+  - Perpendicular: 400 Hz (medium)
+- Panning:
+  - Waypoint to your left: Left speaker
+  - Waypoint to your right: Right speaker
+  - Waypoint ahead: Both speakers
+
+ENEMY DETECTION CRITERIA:
+=========================
+- Ped.IsInCombatAgainst(Player)
+- Relationship == Hate or Dislike
+- Currently in combat AND shooting at player
+
+TECHNICAL NOTES:
+================
+- World.WaypointBlip used to get waypoint position
+- Function.Call<bool>(Hash.IS_WAYPOINT_ACTIVE) checks if waypoint exists
+- trackedEnemies list maintains hostile peds between scans
+- Dead enemies auto-removed from tracking list
+- All new audio uses mono SignalGenerator for PanningSampleProvider compatibility
+
+FILES MODIFIED:
+===============
+- GTA11Y.cs: Added waypoint tracking and enemy detection systems
+- New member variables for audio outputs and tracking state
+- Enhanced NumPad Decimal key handler
+- New tick-based systems in onTick method
