@@ -10,7 +10,7 @@ namespace GrandTheftAccessibility
 {
     class VehicleSpawn : IComparable
     {
-    public string name;
+        public string name;
         public VehicleHash id;
 
         public int CompareTo(object obj)
@@ -27,6 +27,6 @@ namespace GrandTheftAccessibility
             if (name == "")
                 this.name = Function.Call<string>(Hash.GET_DISPLAY_NAME_FROM_VEHICLE_MODEL, id);
         }
-    
+
     }
 }
