@@ -12,7 +12,7 @@ namespace GrandTheftAccessibility
         public int value;
         public string id;
 
-public Setting(string id, string displayName, int value)
+        public Setting(string id, string displayName, int value)
         {
             this.id = id;
             this.displayName = displayName;

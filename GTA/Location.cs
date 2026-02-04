@@ -8,7 +8,7 @@ namespace GrandTheftAccessibility
 {
     class Location
     {
-    public string name;
+        public string name;
         public GTA.Math.Vector3 coords;
         public Location(string name, GTA.Math.Vector3 coords)
         {
@@ -16,6 +16,6 @@ namespace GrandTheftAccessibility
             this.coords = coords;
 
         }
-    
+
     }
 }
