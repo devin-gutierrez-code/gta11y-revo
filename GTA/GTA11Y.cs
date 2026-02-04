@@ -95,6 +95,54 @@ namespace GrandTheftAccessibility
         private WaveOutEvent outNavBehind;
         private SignalGenerator navBeepBehind;
 
+        // ============================================
+        // SMART STEERING ASSISTS SYSTEM
+        // ============================================
+        private long steeringAssistTicks = 0;
+        private bool steeringAssistActive = false;
+        private float smoothedSteerCorrection = 0f;
+        private long lastAssistAnnounceTicks = 0;
+
+        // Collision prediction tracking
+        private float threatTimeToCollision = 999f;
+        private string threatDirection = "none";
+        private string threatType = "none";
+
+        // Cached values for continuous input application (must be applied every tick)
+        private float cachedSteerCorrection = 0f;
+        private float cachedBrakeMagnitude = 0f;
+        private int cachedAvoidDirection = 0;
+        private bool cachedIsFullMode = false;
+
+        // Audio feedback
+        private WaveOutEvent outSteerAssist;
+        private SignalGenerator steerAssistBeep;
+
+        // Thresholds (seconds to collision)
+        private const float STEER_SMOOTHING_RATE = 8.0f; // Units per second (frame-rate independent)
+        private const float BRAKE_THRESHOLD_FULL = 2.5f;
+        private const float BRAKE_THRESHOLD_ASSIST = 1.5f;
+        private const float STEER_THRESHOLD_FULL = 4.0f;
+        private const float STEER_THRESHOLD_ASSIST = 2.5f;
+
+        // ============================================
+        // FRAME-RATE INDEPENDENT TIMING
+        // ============================================
+        private long lastTickTime = 0;
+        private float deltaTime = 0.016f; // Default ~60fps, updated each tick
+
+        // ============================================
+        // SHAPE CASTING CONFIGURATION
+        // ============================================
+        // Multi-ray cone pattern for better terrain/obstacle detection
+        // Horizontal ray spread angles (degrees) - covers wider detection area
+        private static readonly float[] SHAPE_CAST_H_ANGLES_FAST = { 0f, -15f, 15f, -30f, 30f };
+        private static readonly float[] SHAPE_CAST_H_ANGLES_SLOW = { 0f, -22f, 22f };
+        // Vertical ray spread angles (degrees) - negative = downward for terrain
+        private static readonly float[] SHAPE_CAST_V_ANGLES = { 0f, -10f, 10f };
+        // Speed threshold for switching between fast/slow ray patterns (m/s)
+        private const float SHAPE_CAST_SPEED_THRESHOLD = 15f;
+
         // Waypoint guidance system
         private WaveOutEvent outWaypoint;
         private SignalGenerator waypointBeep;
@@ -230,6 +278,43 @@ namespace GrandTheftAccessibility
         // Detection Radius Setting (0=10m, 1=25m, 2=50m, 3=100m)
         private int detectionRadiusIndex = 1; // Default 25m
         private float[] detectionRadiusOptions = { 10f, 25f, 50f, 100f };
+
+        // ============================================
+        // AIM AUTOLOCK SYSTEM
+        // ============================================
+        private Entity autolockTarget = null;
+        private bool autolockActive = false;
+        private int autolockPartIndex = 0;
+        private long autolockPartCycleTicks = 0;
+        private bool autolockPartCycleLeft = false;
+        private bool autolockPartCycleRight = false;
+        private Entity lastAnnouncedTarget = null;
+        private long autolockReleaseTicks = 0;        // When LT was released
+        private const long AUTOLOCK_GRACE_PERIOD = 3000000; // 300ms in ticks (100ns units)
+
+        // Audio for part cycling
+        private WaveOutEvent outPartCycle;
+        private SignalGenerator partCycleBeep;
+
+        // Ped body parts (bone ID, display name)
+        private static readonly (int boneId, string name)[] PED_TARGET_PARTS = {
+            (31086, "Head"),           // SKEL_Head
+            (24818, "Torso"),          // SKEL_Spine3
+            (61163, "Left Arm"),       // SKEL_L_UpperArm
+            (40269, "Right Arm"),      // SKEL_R_UpperArm
+            (58271, "Left Leg"),       // SKEL_L_Thigh
+            (51826, "Right Leg")       // SKEL_R_Thigh
+        };
+
+        // Vehicle parts (bone name, display name)
+        private static readonly (string bone, string name)[] VEHICLE_TARGET_PARTS = {
+            ("engine", "Engine"),
+            ("petrolcap", "Gas Tank"),
+            ("wheel_lf", "Front Left Wheel"),
+            ("wheel_rf", "Front Right Wheel"),
+            ("wheel_lr", "Rear Left Wheel"),
+            ("wheel_rr", "Rear Right Wheel")
+        };
 
         // Double-tap detection for NumPad Decimal
         private long lastDecimalPressTicks = 0;
@@ -558,11 +643,30 @@ namespace GrandTheftAccessibility
             }
             catch { } // File may not exist yet
 
+            // Aim Autolock audio
+            outPartCycle = new WaveOutEvent();
+            partCycleBeep = new SignalGenerator(44100, 1) { Gain = 0.1, Frequency = 800, Type = SignalGeneratorType.Square };
+
+            // Steering assist audio
+            outSteerAssist = new WaveOutEvent();
+            steerAssistBeep = new SignalGenerator(44100, 1) { Gain = 0.1, Frequency = 500, Type = SignalGeneratorType.Sin };
+
             setupSettings();
         }
 
         private void onTick(object sender, EventArgs e)
         {
+            // Calculate delta time for frame-rate independent calculations
+            long currentTime = DateTime.Now.Ticks;
+            if (lastTickTime > 0)
+            {
+                // Convert ticks to seconds (1 tick = 100 nanoseconds)
+                deltaTime = (currentTime - lastTickTime) / 10000000f;
+                // Clamp to reasonable range (1fps to 500fps)
+                deltaTime = Math.Max(0.002f, Math.Min(1.0f, deltaTime));
+            }
+            lastTickTime = currentTime;
+
             if (!Game.IsLoading)
             {
                 if (Game.Player.Character.HeightAboveGround - z > 1f || Game.Player.Character.HeightAboveGround - z < -1f)
@@ -874,9 +978,23 @@ namespace GrandTheftAccessibility
                         wep.Hash != WeaponHash.Flashlight && wep.Hash != WeaponHash.SwitchBlade && wep.Hash != WeaponHash.PoolCue &&
                         wep.Hash != WeaponHash.Wrench && wep.Hash != WeaponHash.BattleAxe && wep.Hash != WeaponHash.StoneHatchet)
                     {
-                        int ammoInClip = wep.AmmoInClip;
-                        int totalAmmo = wep.Ammo - ammoInClip;
-                        ammoInfo = ", " + ammoInClip + " in magazine, " + totalAmmo + " total";
+                        // Get ammo using native - pass weapon hash as int, not uint
+                        OutputArgument outAmmo = new OutputArgument();
+                        bool success = Function.Call<bool>(Hash.GET_AMMO_IN_CLIP, Game.Player.Character, (int)wep.Hash, outAmmo);
+                        int ammoInClip = success ? outAmmo.GetResult<int>() : 0;
+
+                        // Fallback: if native returns 0 but we have ammo, estimate from total
+                        int totalAmmo = Function.Call<int>(Hash.GET_AMMO_IN_PED_WEAPON, Game.Player.Character, (int)wep.Hash);
+                        int maxClip = wep.MaxAmmoInClip;
+
+                        if (ammoInClip == 0 && totalAmmo > 0 && maxClip > 0)
+                        {
+                            // Estimate: assume clip is full or has remainder
+                            ammoInClip = Math.Min(totalAmmo, maxClip);
+                        }
+
+                        int reserveAmmo = Math.Max(0, totalAmmo - ammoInClip);
+                        ammoInfo = ", " + ammoInClip + " in magazine, " + reserveAmmo + " reserve";
                         lastAmmoInClip = ammoInClip;
                         lowAmmoWarningGiven = false;
                     }
@@ -889,7 +1007,19 @@ namespace GrandTheftAccessibility
                 {
                     Weapon wep = Game.Player.Character.Weapons.Current;
                     int maxClip = wep.MaxAmmoInClip;
-                    int currentClip = wep.AmmoInClip;
+
+                    // Use native function for reliable ammo reading
+                    OutputArgument outAmmo = new OutputArgument();
+                    bool success = Function.Call<bool>(Hash.GET_AMMO_IN_CLIP, Game.Player.Character, (int)wep.Hash, outAmmo);
+                    int currentClip = success ? outAmmo.GetResult<int>() : 0;
+
+                    // Fallback if native fails
+                    if (currentClip == 0 && maxClip > 0)
+                    {
+                        int totalAmmo = Function.Call<int>(Hash.GET_AMMO_IN_PED_WEAPON, Game.Player.Character, (int)wep.Hash);
+                        if (totalAmmo > 0)
+                            currentClip = Math.Min(totalAmmo, maxClip);
+                    }
 
                     if (maxClip > 0 && lastAmmoInClip > 0)
                     {
@@ -935,6 +1065,82 @@ namespace GrandTheftAccessibility
                         out3.Stop();
                         tprop.Position = 0;
                         out3.Play();
+                    }
+                }
+
+                // ============================================
+                // AIM AUTOLOCK SYSTEM
+                // ============================================
+                if (getSetting("aimAutolock") == 1)
+                {
+                    bool isAiming = GTA.GameplayCamera.IsAimCamActive;
+                    Entity currentTarget = Game.Player.TargetedEntity;
+                    bool isHomingLauncher = Game.Player.Character.Weapons.Current.Hash == WeaponHash.HomingLauncher;
+
+                    if (isAiming && !isHomingLauncher)
+                    {
+                        // Check if we're re-aiming within grace period with existing target
+                        bool reacquiringTarget = !autolockActive && autolockTarget != null &&
+                            autolockTarget.Exists() && !autolockTarget.IsDead &&
+                            (DateTime.Now.Ticks - autolockReleaseTicks) < AUTOLOCK_GRACE_PERIOD;
+
+                        if (reacquiringTarget)
+                        {
+                            // Re-activate lock on the same target, snap camera to it
+                            autolockActive = true;
+                            // Instant snap to target position (use higher lerp factor)
+                            UpdateAutolockAim(true); // Pass true for instant snap
+                        }
+                        // New target acquired - only update if game has a valid target
+                        else if (currentTarget != null && !currentTarget.IsDead && currentTarget != autolockTarget)
+                        {
+                            autolockTarget = currentTarget;
+                            autolockPartIndex = 0;
+                            autolockActive = true;
+
+                            if (currentTarget != lastAnnouncedTarget)
+                            {
+                                lastAnnouncedTarget = currentTarget;
+                                AnnounceAutolockTarget(currentTarget);
+                            }
+                        }
+
+                        // Active tracking - maintain lock even if game's TargetedEntity becomes null
+                        // This is critical for vehicles which lose soft-lock more easily than peds
+                        if (autolockActive && autolockTarget != null && autolockTarget.Exists() && !autolockTarget.IsDead)
+                        {
+                            // Disable right stick camera controls to prevent player from moving aim off target
+                            // Only disable look controls - do NOT disable aim (25) as it causes toggle issues
+                            Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 1, true);   // Look Left/Right
+                            Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 2, true);   // Look Up/Down
+                            Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 220, true); // Script Right Axis X
+                            Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 221, true); // Script Right Axis Y
+
+                            UpdateAutolockAim(false);
+                            HandlePartCycling();
+                        }
+                        else if (autolockTarget != null && (!autolockTarget.Exists() || autolockTarget.IsDead))
+                        {
+                            // Target no longer valid (destroyed/dead), clear lock
+                            autolockActive = false;
+                            autolockTarget = null;
+                        }
+                    }
+                    else
+                    {
+                        // LT released - start grace period but keep target reference
+                        if (autolockActive)
+                        {
+                            autolockActive = false;
+                            autolockReleaseTicks = DateTime.Now.Ticks;
+                            // Don't clear autolockTarget - keep it for grace period
+                        }
+                        // Clear target only after grace period expires
+                        else if (autolockTarget != null &&
+                            (DateTime.Now.Ticks - autolockReleaseTicks) >= AUTOLOCK_GRACE_PERIOD)
+                        {
+                            autolockTarget = null;
+                        }
                     }
                 }
 
@@ -1110,52 +1316,111 @@ namespace GrandTheftAccessibility
                         float rayHeight = inVehicle ? 0.5f : 1.0f;
                         GTA.Math.Vector3 startPos = playerPos + new GTA.Math.Vector3(0, 0, rayHeight);
 
-                        // Center ray (forward)
-                        RaycastResult rayCenter = World.Raycast(startPos, startPos + (forwardVec * maxRange), IntersectFlags.Map, Game.Player.Character);
-                        if (rayCenter.DidHit)
-                        {
-                            float d = World.GetDistance(startPos, rayCenter.HitPosition);
-                            if (d >= minDist && d < distCenter) { distCenter = d; typeCenter = "world"; nameCenter = "Wall/Building"; }
-                        }
+                        // Check if shape casting is enabled
+                        bool useShapeCast = getSetting("shapeCasting") == 1;
 
-                        // Left ray (45 degrees left of forward)
-                        GTA.Math.Vector3 leftDir = GTA.Math.Vector3.Normalize(forwardVec - rightVec);
-                        RaycastResult rayLeft = World.Raycast(startPos, startPos + (leftDir * maxRange), IntersectFlags.Map, Game.Player.Character);
-                        if (rayLeft.DidHit)
+                        if (useShapeCast)
                         {
-                            float d = World.GetDistance(startPos, rayLeft.HitPosition);
-                            if (d >= minDist && d < distLeft) { distLeft = d; typeLeft = "world"; nameLeft = "Wall/Building"; }
-                        }
+                            // --- SHAPE CASTING MODE: Multi-ray cone pattern for better coverage ---
+                            GTA.Math.Vector3 hitPos;
 
-                        // Right ray (45 degrees right of forward)
-                        GTA.Math.Vector3 rightDir = GTA.Math.Vector3.Normalize(forwardVec + rightVec);
-                        RaycastResult rayRight = World.Raycast(startPos, startPos + (rightDir * maxRange), IntersectFlags.Map, Game.Player.Character);
-                        if (rayRight.DidHit)
+                            // Center zone - shape cast forward
+                            float centerDist = PerformShapeCast(startPos, forwardVec, rightVec, maxRange,
+                                IntersectFlags.Map, Game.Player.Character, out hitPos, vehicleSpeed);
+                            if (centerDist > 0 && centerDist >= minDist && centerDist < distCenter)
+                            {
+                                distCenter = centerDist; typeCenter = "world"; nameCenter = "Obstacle";
+                            }
+
+                            // Left zone - shape cast left-diagonal (45 degrees)
+                            GTA.Math.Vector3 leftDir = GTA.Math.Vector3.Normalize(forwardVec - rightVec);
+                            float leftDist = PerformShapeCast(startPos, leftDir, rightVec, maxRange,
+                                IntersectFlags.Map, Game.Player.Character, out hitPos, vehicleSpeed);
+                            if (leftDist > 0 && leftDist >= minDist && leftDist < distLeft)
+                            {
+                                distLeft = leftDist; typeLeft = "world"; nameLeft = "Obstacle";
+                            }
+
+                            // Right zone - shape cast right-diagonal (45 degrees)
+                            GTA.Math.Vector3 rightDir = GTA.Math.Vector3.Normalize(forwardVec + rightVec);
+                            float rightDist = PerformShapeCast(startPos, rightDir, rightVec, maxRange,
+                                IntersectFlags.Map, Game.Player.Character, out hitPos, vehicleSpeed);
+                            if (rightDist > 0 && rightDist >= minDist && rightDist < distRight)
+                            {
+                                distRight = rightDist; typeRight = "world"; nameRight = "Obstacle";
+                            }
+                        }
+                        else
                         {
-                            float d = World.GetDistance(startPos, rayRight.HitPosition);
-                            if (d >= minDist && d < distRight) { distRight = d; typeRight = "world"; nameRight = "Wall/Building"; }
+                            // --- STANDARD MODE: Single ray per direction ---
+                            // Center ray (forward)
+                            RaycastResult rayCenter = World.Raycast(startPos, startPos + (forwardVec * maxRange), IntersectFlags.Map, Game.Player.Character);
+                            if (rayCenter.DidHit)
+                            {
+                                float d = World.GetDistance(startPos, rayCenter.HitPosition);
+                                if (d >= minDist && d < distCenter) { distCenter = d; typeCenter = "world"; nameCenter = "Wall/Building"; }
+                            }
+
+                            // Left ray (45 degrees left of forward)
+                            GTA.Math.Vector3 leftDir = GTA.Math.Vector3.Normalize(forwardVec - rightVec);
+                            RaycastResult rayLeft = World.Raycast(startPos, startPos + (leftDir * maxRange), IntersectFlags.Map, Game.Player.Character);
+                            if (rayLeft.DidHit)
+                            {
+                                float d = World.GetDistance(startPos, rayLeft.HitPosition);
+                                if (d >= minDist && d < distLeft) { distLeft = d; typeLeft = "world"; nameLeft = "Wall/Building"; }
+                            }
+
+                            // Right ray (45 degrees right of forward)
+                            GTA.Math.Vector3 rightDir = GTA.Math.Vector3.Normalize(forwardVec + rightVec);
+                            RaycastResult rayRight = World.Raycast(startPos, startPos + (rightDir * maxRange), IntersectFlags.Map, Game.Player.Character);
+                            if (rayRight.DidHit)
+                            {
+                                float d = World.GetDistance(startPos, rayRight.HitPosition);
+                                if (d >= minDist && d < distRight) { distRight = d; typeRight = "world"; nameRight = "Wall/Building"; }
+                            }
                         }
 
                         // Side rays (90 degrees) - only when in vehicle for tight spaces
                         if (inVehicle)
                         {
                             float sideRange = Math.Min(maxRange, 8f); // Side detection max 8m
-
-                            // Pure left ray
                             GTA.Math.Vector3 pureLeft = new GTA.Math.Vector3(-rightVec.X, -rightVec.Y, 0);
-                            RaycastResult raySideLeft = World.Raycast(startPos, startPos + (pureLeft * sideRange), IntersectFlags.Map, Game.Player.Character);
-                            if (raySideLeft.DidHit)
-                            {
-                                float d = World.GetDistance(startPos, raySideLeft.HitPosition);
-                                if (d >= minDist && d < distLeft) { distLeft = d; typeLeft = "world"; nameLeft = "Side Wall"; }
-                            }
 
-                            // Pure right ray
-                            RaycastResult raySideRight = World.Raycast(startPos, startPos + (rightVec * sideRange), IntersectFlags.Map, Game.Player.Character);
-                            if (raySideRight.DidHit)
+                            if (useShapeCast)
                             {
-                                float d = World.GetDistance(startPos, raySideRight.HitPosition);
-                                if (d >= minDist && d < distRight) { distRight = d; typeRight = "world"; nameRight = "Side Wall"; }
+                                // Shape cast for side detection
+                                GTA.Math.Vector3 hitPos;
+                                float sideLeftDist = PerformShapeCast(startPos, pureLeft, rightVec, sideRange,
+                                    IntersectFlags.Map, Game.Player.Character, out hitPos, vehicleSpeed);
+                                if (sideLeftDist > 0 && sideLeftDist >= minDist && sideLeftDist < distLeft)
+                                {
+                                    distLeft = sideLeftDist; typeLeft = "world"; nameLeft = "Side Obstacle";
+                                }
+
+                                float sideRightDist = PerformShapeCast(startPos, rightVec, rightVec, sideRange,
+                                    IntersectFlags.Map, Game.Player.Character, out hitPos, vehicleSpeed);
+                                if (sideRightDist > 0 && sideRightDist >= minDist && sideRightDist < distRight)
+                                {
+                                    distRight = sideRightDist; typeRight = "world"; nameRight = "Side Obstacle";
+                                }
+                            }
+                            else
+                            {
+                                // Pure left ray
+                                RaycastResult raySideLeft = World.Raycast(startPos, startPos + (pureLeft * sideRange), IntersectFlags.Map, Game.Player.Character);
+                                if (raySideLeft.DidHit)
+                                {
+                                    float d = World.GetDistance(startPos, raySideLeft.HitPosition);
+                                    if (d >= minDist && d < distLeft) { distLeft = d; typeLeft = "world"; nameLeft = "Side Wall"; }
+                                }
+
+                                // Pure right ray
+                                RaycastResult raySideRight = World.Raycast(startPos, startPos + (rightVec * sideRange), IntersectFlags.Map, Game.Player.Character);
+                                if (raySideRight.DidHit)
+                                {
+                                    float d = World.GetDistance(startPos, raySideRight.HitPosition);
+                                    if (d >= minDist && d < distRight) { distRight = d; typeRight = "world"; nameRight = "Side Wall"; }
+                                }
                             }
                         }
 
@@ -1163,11 +1428,25 @@ namespace GrandTheftAccessibility
                         if (isMovingBackwards)
                         {
                             GTA.Math.Vector3 behindDir = new GTA.Math.Vector3(-forwardVec.X, -forwardVec.Y, 0);
-                            RaycastResult rayBehind = World.Raycast(startPos, startPos + (behindDir * maxRange), IntersectFlags.Map, Game.Player.Character);
-                            if (rayBehind.DidHit)
+
+                            if (useShapeCast)
                             {
-                                float d = World.GetDistance(startPos, rayBehind.HitPosition);
-                                if (d >= minDist && d < distBehind) { distBehind = d; typeBehind = "world"; nameBehind = "Wall Behind"; }
+                                GTA.Math.Vector3 hitPos;
+                                float behindDist = PerformShapeCast(startPos, behindDir, rightVec, maxRange,
+                                    IntersectFlags.Map, Game.Player.Character, out hitPos, vehicleSpeed);
+                                if (behindDist > 0 && behindDist >= minDist && behindDist < distBehind)
+                                {
+                                    distBehind = behindDist; typeBehind = "world"; nameBehind = "Obstacle Behind";
+                                }
+                            }
+                            else
+                            {
+                                RaycastResult rayBehind = World.Raycast(startPos, startPos + (behindDir * maxRange), IntersectFlags.Map, Game.Player.Character);
+                                if (rayBehind.DidHit)
+                                {
+                                    float d = World.GetDistance(startPos, rayBehind.HitPosition);
+                                    if (d >= minDist && d < distBehind) { distBehind = d; typeBehind = "world"; nameBehind = "Wall Behind"; }
+                                }
                             }
                         }
 
@@ -1294,6 +1573,49 @@ namespace GrandTheftAccessibility
                             var behindPanned = new PanningSampleProvider(behindSample) { Pan = 0f };
                             outNavBehind.Init(behindPanned);
                             outNavBehind.Play();
+                        }
+                    }
+                }
+
+                // ============================================
+                // SMART STEERING ASSISTS SYSTEM
+                // Modes: 0=Off, 1=Assistive (nudges), 2=Full (takes over)
+                // IMPORTANT: Detection runs periodically, but inputs MUST be applied every tick
+                // ============================================
+                int steeringAssistMode = getSetting("steeringAssist");
+                if (steeringAssistMode > 0 && Game.Player.Character.IsInVehicle() && !isAutodriving)
+                {
+                    Vehicle playerVeh = Game.Player.Character.CurrentVehicle;
+                    if (playerVeh != null)
+                    {
+                        float vehicleSpeed = playerVeh.Speed;
+                        cachedIsFullMode = (steeringAssistMode == 2);
+
+                        // Only active when moving (>2 m/s)
+                        if (vehicleSpeed > 2f)
+                        {
+                            // DETECTION: Process at 30-50ms intervals based on speed
+                            float speedFactor = Math.Min(vehicleSpeed / 30f, 1f);
+                            long assistInterval = (long)(500000 - (speedFactor * 200000));
+
+                            if (DateTime.Now.Ticks - steeringAssistTicks > assistInterval)
+                            {
+                                steeringAssistTicks = DateTime.Now.Ticks;
+                                ProcessSteeringAssist(playerVeh, cachedIsFullMode);
+                            }
+
+                            // INPUT APPLICATION: Must happen EVERY tick for inputs to work!
+                            if (steeringAssistActive)
+                            {
+                                ApplyCachedSteeringInputs(playerVeh);
+                            }
+                        }
+                        else if (steeringAssistActive)
+                        {
+                            steeringAssistActive = false;
+                            smoothedSteerCorrection = 0f;
+                            cachedSteerCorrection = 0f;
+                            cachedBrakeMagnitude = 0f;
                         }
                     }
                 }
@@ -3412,6 +3734,16 @@ namespace GrandTheftAccessibility
                             float radius = detectionRadiusOptions[currentVal];
                             Tolk.Speak("Detection Radius: " + (int)radius + " meters");
                         }
+                        // Special handling for steering assist (cycles through Off/Assistive/Full)
+                        else if (settingsMenu[settingsMenuIndex].id == "steeringAssist")
+                        {
+                            int currentVal = settingsMenu[settingsMenuIndex].value;
+                            currentVal = (currentVal + 1) % 3; // Cycle 0->1->2->0
+                            settingsMenu[settingsMenuIndex].value = currentVal;
+
+                            string modeText = currentVal == 0 ? "Off" : (currentVal == 1 ? "Assistive" : "Full");
+                            Tolk.Speak("Steering Assist Mode: " + modeText);
+                        }
                         else
                         {
                             // Normal on/off toggle for other settings
@@ -3526,45 +3858,12 @@ namespace GrandTheftAccessibility
                         if (settingsMenuIndex > 0)
                         {
                             settingsMenuIndex--;
-                            if (settingsMenu[settingsMenuIndex].id == "detectionRadius")
-                            {
-                                int radiusIndex = settingsMenu[settingsMenuIndex].value;
-                                if (radiusIndex < 0 || radiusIndex >= detectionRadiusOptions.Length)
-                                    radiusIndex = 1;
-                                Tolk.Speak("Detection Radius: " + (int)detectionRadiusOptions[radiusIndex] + " meters");
-                            }
-                            else
-                            {
-                                string toggle = "";
-                                if (settingsMenu[settingsMenuIndex].value == 0)
-                                    toggle = "Off";
-                                if (settingsMenu[settingsMenuIndex].value == 1)
-                                    toggle = "On";
-                                Tolk.Speak(settingsMenu[settingsMenuIndex].displayName + toggle);
-                            }
-
+                            SpeakCurrentSetting();
                         }
-
                         else
                         {
                             settingsMenuIndex = settingsMenu.Count - 1;
-                            if (settingsMenu[settingsMenuIndex].id == "detectionRadius")
-                            {
-                                int radiusIndex = settingsMenu[settingsMenuIndex].value;
-                                if (radiusIndex < 0 || radiusIndex >= detectionRadiusOptions.Length)
-                                    radiusIndex = 1;
-                                Tolk.Speak("Detection Radius: " + (int)detectionRadiusOptions[radiusIndex] + " meters");
-                            }
-                            else
-                            {
-                                string toggle = "";
-                                if (settingsMenu[settingsMenuIndex].value == 0)
-                                    toggle = "Off";
-                                if (settingsMenu[settingsMenuIndex].value == 1)
-                                    toggle = "On";
-                                Tolk.Speak(settingsMenu[settingsMenuIndex].displayName + toggle);
-                            }
-
+                            SpeakCurrentSetting();
                         }
                     }
 
@@ -3667,44 +3966,12 @@ namespace GrandTheftAccessibility
                         if (settingsMenuIndex < settingsMenu.Count - 1)
                         {
                             settingsMenuIndex++;
-                            if (settingsMenu[settingsMenuIndex].id == "detectionRadius")
-                            {
-                                int radiusIndex = settingsMenu[settingsMenuIndex].value;
-                                if (radiusIndex < 0 || radiusIndex >= detectionRadiusOptions.Length)
-                                    radiusIndex = 1;
-                                Tolk.Speak("Detection Radius: " + (int)detectionRadiusOptions[radiusIndex] + " meters");
-                            }
-                            else
-                            {
-                                string toggle = "";
-                                if (settingsMenu[settingsMenuIndex].value == 0)
-                                    toggle = "Off";
-                                if (settingsMenu[settingsMenuIndex].value == 1)
-                                    toggle = "On";
-                                Tolk.Speak(settingsMenu[settingsMenuIndex].displayName + toggle);
-                            }
-
+                            SpeakCurrentSetting();
                         }
                         else
                         {
                             settingsMenuIndex = 0;
-                            if (settingsMenu[settingsMenuIndex].id == "detectionRadius")
-                            {
-                                int radiusIndex = settingsMenu[settingsMenuIndex].value;
-                                if (radiusIndex < 0 || radiusIndex >= detectionRadiusOptions.Length)
-                                    radiusIndex = 1;
-                                Tolk.Speak("Detection Radius: " + (int)detectionRadiusOptions[radiusIndex] + " meters");
-                            }
-                            else
-                            {
-                                string toggle = "";
-                                if (settingsMenu[settingsMenuIndex].value == 0)
-                                    toggle = "Off";
-                                if (settingsMenu[settingsMenuIndex].value == 1)
-                                    toggle = "On";
-                                Tolk.Speak(settingsMenu[settingsMenuIndex].displayName + toggle);
-                            }
-
+                            SpeakCurrentSetting();
                         }
                     }
 
@@ -4177,7 +4444,7 @@ namespace GrandTheftAccessibility
         {
             Dictionary<string, int> dictionary = new Dictionary<string, int>();
             string json;
-            string[] ids = { "announceHeadings", "announceZones", "announceTime", "altitudeIndicator", "targetPitchIndicator", "navigationAssist", "pickupDetection", "coverDetection", "waterHazardDetection", "vehicleHealthFeedback", "staminaFeedback", "interactableDetection", "trafficAwareness", "wantedLevelDetails", "slopeTerrainFeedback", "turnByTurnNavigation", "detectionRadius", "radioOff", "warpInsideVehicle", "onscreen", "speed", "godMode", "policeIgnore", "vehicleGodMode", "infiniteAmmo", "neverWanted", "superJump", "runFaster", "swimFaster", "exsplosiveAmmo", "fireAmmo", "explosiveMelee" };
+            string[] ids = { "announceHeadings", "announceZones", "announceTime", "altitudeIndicator", "targetPitchIndicator", "navigationAssist", "pickupDetection", "coverDetection", "waterHazardDetection", "vehicleHealthFeedback", "staminaFeedback", "interactableDetection", "trafficAwareness", "wantedLevelDetails", "slopeTerrainFeedback", "turnByTurnNavigation", "detectionRadius", "radioOff", "warpInsideVehicle", "onscreen", "speed", "godMode", "policeIgnore", "vehicleGodMode", "infiniteAmmo", "neverWanted", "superJump", "runFaster", "swimFaster", "exsplosiveAmmo", "fireAmmo", "explosiveMelee", "aimAutolock", "steeringAssist", "shapeCasting" };
             System.IO.StreamWriter fileOut;
 
             if (!System.IO.Directory.Exists(@Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments) + "/Rockstar Games/GTA V/ModSettings"))
@@ -4274,6 +4541,503 @@ namespace GrandTheftAccessibility
             fileOut.Close();
         }
 
+        // ============================================
+        // AIM AUTOLOCK HELPER METHODS
+        // ============================================
+
+        /// <summary>
+        /// Announces the locked target via Tolk screen reader
+        /// </summary>
+        private void AnnounceAutolockTarget(Entity target)
+        {
+            if (target == null) return;
+            string announcement = "";
+
+            if (target.EntityType == EntityType.Ped)
+            {
+                Ped ped = (Ped)target;
+                int pedType = Function.Call<int>(Hash.GET_PED_TYPE, ped);
+                string pedTypeName = GetPedTypeName(pedType);
+                announcement = pedTypeName + ", targeting " + PED_TARGET_PARTS[autolockPartIndex].name;
+            }
+            else if (target.EntityType == EntityType.Vehicle)
+            {
+                Vehicle vehicle = (Vehicle)target;
+                string vehName = vehicle.LocalizedName;
+                if (string.IsNullOrEmpty(vehName) || vehName == "NULL")
+                    vehName = vehicle.DisplayName;
+
+                int occupantCount = 0;
+                if (vehicle.Driver != null && vehicle.Driver.IsAlive) occupantCount++;
+                for (int seat = 0; seat < vehicle.PassengerCapacity; seat++)
+                {
+                    Ped passenger = vehicle.GetPedOnSeat((VehicleSeat)seat);
+                    if (passenger != null && passenger.IsAlive) occupantCount++;
+                }
+
+                string occupantStr = occupantCount > 0
+                    ? " with " + occupantCount + " occupant" + (occupantCount > 1 ? "s" : "")
+                    : " (empty)";
+                announcement = vehName + occupantStr + ", targeting " + VEHICLE_TARGET_PARTS[autolockPartIndex].name;
+            }
+
+            if (!string.IsNullOrEmpty(announcement))
+                Tolk.Speak(announcement, true);
+        }
+
+        /// <summary>
+        /// Converts GTA ped type ID to human-readable name
+        /// </summary>
+        private string GetPedTypeName(int pedType)
+        {
+            switch (pedType)
+            {
+                case 6: return "Cop";
+                case 21: return "Security guard";
+                case 23: return "SWAT";
+                case 24: return "FIB agent";
+                case 27: return "Bodyguard";
+                case 28: return "Army";
+                case 29: return "Paramedic";
+                case 30: return "Firefighter";
+                case 1: return "Male civilian";
+                case 2: return "Female civilian";
+                case 3: case 4: case 5: return "Gang member";
+                default: return "Person";
+            }
+        }
+
+        /// <summary>
+        /// Updates camera/aim to track the current target part
+        /// </summary>
+        /// <param name="instantSnap">If true, instantly snap to target instead of smooth lerp</param>
+        private void UpdateAutolockAim(bool instantSnap = false)
+        {
+            if (autolockTarget == null || autolockTarget.IsDead) return;
+
+            GTA.Math.Vector3 targetPos = GetTargetPartPosition();
+            if (targetPos == GTA.Math.Vector3.Zero) return;
+
+            GTA.Math.Vector3 camPos = GTA.GameplayCamera.Position;
+            GTA.Math.Vector3 direction = GTA.Math.Vector3.Normalize(targetPos - camPos);
+
+            float targetHeading = (float)(Math.Atan2(direction.X, direction.Y) * (180.0 / Math.PI));
+            float targetPitch = (float)(Math.Asin(direction.Z) * (180.0 / Math.PI));
+
+            float currentHeading = GTA.GameplayCamera.RelativeHeading;
+            float currentPitch = GTA.GameplayCamera.RelativePitch;
+
+            float headingDelta = targetHeading - Game.Player.Character.Heading - currentHeading;
+            float pitchDelta = targetPitch - currentPitch;
+
+            while (headingDelta > 180) headingDelta -= 360;
+            while (headingDelta < -180) headingDelta += 360;
+
+            // Use instant snap (1.0) when re-acquiring target, smooth lerp during normal tracking
+            // Frame-rate independent: ~10 units per second tracking speed
+            float lerpFactor = instantSnap ? 1.0f : Math.Min(1.0f, 10.0f * deltaTime);
+            float adjustedHeading = currentHeading + (headingDelta * lerpFactor);
+            float adjustedPitch = Math.Max(-70f, Math.Min(70f, currentPitch + (pitchDelta * lerpFactor)));
+
+            Function.Call(Hash.SET_GAMEPLAY_CAM_RELATIVE_HEADING, adjustedHeading);
+            Function.Call(Hash.SET_GAMEPLAY_CAM_RELATIVE_PITCH, adjustedPitch, 1f);
+        }
+
+        /// <summary>
+        /// Gets the world position of the currently selected target part
+        /// </summary>
+        private GTA.Math.Vector3 GetTargetPartPosition()
+        {
+            if (autolockTarget == null) return GTA.Math.Vector3.Zero;
+
+            try
+            {
+                if (autolockTarget.EntityType == EntityType.Ped)
+                {
+                    Ped ped = (Ped)autolockTarget;
+                    int boneId = PED_TARGET_PARTS[autolockPartIndex].boneId;
+                    GTA.Math.Vector3 bonePos = Function.Call<GTA.Math.Vector3>(
+                        Hash.GET_PED_BONE_COORDS, ped, boneId, 0f, 0f, 0f);
+                    return bonePos != GTA.Math.Vector3.Zero ? bonePos : ped.Position;
+                }
+                else if (autolockTarget.EntityType == EntityType.Vehicle)
+                {
+                    Vehicle vehicle = (Vehicle)autolockTarget;
+                    string boneName = VEHICLE_TARGET_PARTS[autolockPartIndex].bone;
+                    int boneIndex = Function.Call<int>(Hash.GET_ENTITY_BONE_INDEX_BY_NAME, vehicle, boneName);
+
+                    if (boneIndex != -1)
+                    {
+                        GTA.Math.Vector3 bonePos = Function.Call<GTA.Math.Vector3>(
+                            Hash.GET_WORLD_POSITION_OF_ENTITY_BONE, vehicle, boneIndex);
+                        if (bonePos != GTA.Math.Vector3.Zero) return bonePos;
+                    }
+                    return vehicle.Position;
+                }
+            }
+            catch { }
+
+            return autolockTarget.Position;
+        }
+
+        /// <summary>
+        /// Handles right stick input for cycling through target parts
+        /// </summary>
+        private void HandlePartCycling()
+        {
+            if (autolockTarget == null) return;
+            if (DateTime.Now.Ticks - autolockPartCycleTicks < 2000000) return; // 200ms debounce
+
+            // Use GET_DISABLED_CONTROL_NORMAL since we disabled the control action
+            // This still reads the input value even though default game action is suppressed
+            float rightStickX = Function.Call<float>(Hash.GET_DISABLED_CONTROL_NORMAL, 0, 220);
+
+            int maxParts = autolockTarget.EntityType == EntityType.Ped
+                ? PED_TARGET_PARTS.Length
+                : VEHICLE_TARGET_PARTS.Length;
+
+            bool changed = false;
+
+            if (rightStickX < -0.5f && !autolockPartCycleLeft)
+            {
+                autolockPartCycleLeft = true;
+                autolockPartIndex = (autolockPartIndex - 1 + maxParts) % maxParts;
+                changed = true;
+            }
+            else if (rightStickX >= -0.5f)
+            {
+                autolockPartCycleLeft = false;
+            }
+
+            if (rightStickX > 0.5f && !autolockPartCycleRight)
+            {
+                autolockPartCycleRight = true;
+                autolockPartIndex = (autolockPartIndex + 1) % maxParts;
+                changed = true;
+            }
+            else if (rightStickX <= 0.5f)
+            {
+                autolockPartCycleRight = false;
+            }
+
+            if (changed)
+            {
+                autolockPartCycleTicks = DateTime.Now.Ticks;
+
+                outPartCycle.Stop();
+                partCycleBeep.Frequency = 600 + (autolockPartIndex * 80);
+                var sample = partCycleBeep.Take(TimeSpan.FromSeconds(0.05));
+                outPartCycle.Init(sample);
+                outPartCycle.Play();
+
+                string partName = autolockTarget.EntityType == EntityType.Ped
+                    ? PED_TARGET_PARTS[autolockPartIndex].name
+                    : VEHICLE_TARGET_PARTS[autolockPartIndex].name;
+                Tolk.Speak(partName, true);
+            }
+        }
+
+        // ============================================
+        // SMART STEERING ASSISTS HELPER METHODS
+        // ============================================
+
+        /// <summary>
+        /// Main processing method for steering assist - scans for threats and applies corrections
+        /// </summary>
+        private void ProcessSteeringAssist(Vehicle playerVeh, bool isFullMode)
+        {
+            GTA.Math.Vector3 playerPos = playerVeh.Position;
+            GTA.Math.Vector3 forwardVec = playerVeh.ForwardVector;
+            GTA.Math.Vector3 rightVec = playerVeh.RightVector;
+            float vehicleSpeed = playerVeh.Speed;
+
+            // Detection range scales with speed (10m to 40m)
+            float speedFactor = Math.Min(vehicleSpeed / 30f, 1f);
+            float detectionRange = 10f + (speedFactor * 30f);
+
+            float closestTTC = float.MaxValue;
+            string closestDir = "none";
+            string closestType = "none";
+            int avoidDirection = 0;
+
+            // Scan nearby peds
+            Ped[] nearbyPeds = World.GetNearbyPeds(playerPos, detectionRange);
+            foreach (Ped ped in nearbyPeds)
+            {
+                if (ped == Game.Player.Character || ped.IsDead) continue;
+                float ttc = CalculateTTC(playerVeh, ped.Position, ped.Velocity);
+                if (ttc < closestTTC)
+                {
+                    closestTTC = ttc;
+                    closestType = "pedestrian";
+                    closestDir = GetThreatDirection(playerVeh, ped.Position);
+                    avoidDirection = GetAvoidDirection(playerVeh, ped.Position);
+                }
+            }
+
+            // Scan nearby vehicles
+            Vehicle[] nearbyVehs = World.GetNearbyVehicles(playerPos, detectionRange);
+            foreach (Vehicle veh in nearbyVehs)
+            {
+                if (veh == playerVeh) continue;
+                float ttc = CalculateTTC(playerVeh, veh.Position, veh.Velocity);
+                if (ttc < closestTTC)
+                {
+                    closestTTC = ttc;
+                    closestType = "vehicle";
+                    closestDir = GetThreatDirection(playerVeh, veh.Position);
+                    avoidDirection = GetAvoidDirection(playerVeh, veh.Position);
+                }
+            }
+
+            // Raycast for world geometry
+            GTA.Math.Vector3 startPos = playerPos + new GTA.Math.Vector3(0, 0, 0.5f);
+            float rayRange = Math.Min(detectionRange, vehicleSpeed * 2.5f);
+
+            RaycastResult rayCenter = World.Raycast(startPos, startPos + (forwardVec * rayRange),
+                IntersectFlags.Map | IntersectFlags.Objects, playerVeh);
+            if (rayCenter.DidHit)
+            {
+                float dist = World.GetDistance(startPos, rayCenter.HitPosition);
+                float ttc = dist / Math.Max(vehicleSpeed, 1f);
+                if (ttc < closestTTC)
+                {
+                    closestTTC = ttc;
+                    closestType = "obstacle";
+                    closestDir = "ahead";
+                    avoidDirection = GetClearerSide(playerVeh, rayRange);
+                }
+            }
+
+            // Store for reference
+            threatTimeToCollision = closestTTC;
+            threatDirection = closestDir;
+            threatType = closestType;
+
+            // Apply controls if threat detected
+            float steerThreshold = isFullMode ? STEER_THRESHOLD_FULL : STEER_THRESHOLD_ASSIST;
+            float brakeThreshold = isFullMode ? BRAKE_THRESHOLD_FULL : BRAKE_THRESHOLD_ASSIST;
+
+            if (closestTTC < steerThreshold || closestTTC < brakeThreshold)
+            {
+                steeringAssistActive = true;
+                ApplySteeringAssist(playerVeh, closestTTC, avoidDirection, isFullMode, steerThreshold, brakeThreshold);
+            }
+            else if (steeringAssistActive)
+            {
+                steeringAssistActive = false;
+                smoothedSteerCorrection = 0f;
+            }
+        }
+
+        /// <summary>
+        /// Calculates time to collision based on relative velocity
+        /// </summary>
+        private float CalculateTTC(Vehicle playerVeh, GTA.Math.Vector3 targetPos, GTA.Math.Vector3 targetVel)
+        {
+            GTA.Math.Vector3 relPos = targetPos - playerVeh.Position;
+            GTA.Math.Vector3 relVel = targetVel - playerVeh.Velocity;
+
+            if (relPos.Length() < 0.1f) return 0.1f;
+
+            float closingSpeed = -GTA.Math.Vector3.Dot(GTA.Math.Vector3.Normalize(relPos), relVel);
+            if (closingSpeed <= 0) return float.MaxValue;
+
+            float distance = relPos.Length();
+            float collisionRadius = 4f;
+
+            if (distance < collisionRadius) return 0.1f;
+            return (distance - collisionRadius) / closingSpeed;
+        }
+
+        /// <summary>
+        /// Determines the direction of a threat relative to the vehicle
+        /// </summary>
+        private string GetThreatDirection(Vehicle playerVeh, GTA.Math.Vector3 threatPos)
+        {
+            GTA.Math.Vector3 toThreat = GTA.Math.Vector3.Normalize(threatPos - playerVeh.Position);
+            float dotForward = GTA.Math.Vector3.Dot(playerVeh.ForwardVector, toThreat);
+            float dotRight = GTA.Math.Vector3.Dot(playerVeh.RightVector, toThreat);
+
+            if (dotForward > 0.5f) return "ahead";
+            if (dotRight > 0.3f) return "right";
+            if (dotRight < -0.3f) return "left";
+            return "ahead";
+        }
+
+        /// <summary>
+        /// Determines which direction to steer to avoid a threat
+        /// Returns: -1 for left, 0 for straight (brake only), 1 for right
+        /// </summary>
+        private int GetAvoidDirection(Vehicle playerVeh, GTA.Math.Vector3 threatPos)
+        {
+            GTA.Math.Vector3 toThreat = GTA.Math.Vector3.Normalize(threatPos - playerVeh.Position);
+            float dotRight = GTA.Math.Vector3.Dot(playerVeh.RightVector, toThreat);
+
+            if (dotRight > 0.2f) return -1;  // Threat on right, steer left
+            if (dotRight < -0.2f) return 1;  // Threat on left, steer right
+            return GetClearerSide(playerVeh, 15f);
+        }
+
+        /// <summary>
+        /// Uses raycasts to determine which side has more clearance
+        /// Returns: -1 for left clearer, 1 for right clearer, 0 for equal
+        /// </summary>
+        private int GetClearerSide(Vehicle playerVeh, float checkDist)
+        {
+            GTA.Math.Vector3 startPos = playerVeh.Position + new GTA.Math.Vector3(0, 0, 0.5f);
+            GTA.Math.Vector3 forwardVec = playerVeh.ForwardVector;
+            GTA.Math.Vector3 rightVec = playerVeh.RightVector;
+
+            GTA.Math.Vector3 leftDir = GTA.Math.Vector3.Normalize(forwardVec - rightVec);
+            GTA.Math.Vector3 rightDir = GTA.Math.Vector3.Normalize(forwardVec + rightVec);
+
+            RaycastResult leftRay = World.Raycast(startPos, startPos + leftDir * checkDist,
+                IntersectFlags.Everything, playerVeh);
+            RaycastResult rightRay = World.Raycast(startPos, startPos + rightDir * checkDist,
+                IntersectFlags.Everything, playerVeh);
+
+            float leftClear = leftRay.DidHit ? World.GetDistance(startPos, leftRay.HitPosition) : checkDist;
+            float rightClear = rightRay.DidHit ? World.GetDistance(startPos, rightRay.HitPosition) : checkDist;
+
+            if (leftClear > rightClear + 2f) return -1;
+            if (rightClear > leftClear + 2f) return 1;
+            return 0;
+        }
+
+        /// <summary>
+        /// Calculates and CACHES steering/braking values. Does NOT apply inputs directly.
+        /// Inputs must be applied every tick via ApplyCachedSteeringInputs().
+        /// </summary>
+        private void ApplySteeringAssist(Vehicle playerVeh, float ttc, int avoidDir, bool isFullMode, float steerThreshold, float brakeThreshold)
+        {
+            // Calculate steering magnitude (0 to 1)
+            float steerUrgency = Math.Max(0f, 1f - (ttc / steerThreshold));
+            float maxSteer = isFullMode ? 1.0f : 0.5f;
+            float targetSteer = avoidDir * steerUrgency * steerUrgency * maxSteer;
+
+            // Smooth the steering using frame-rate independent lerp
+            // Formula: current += (target - current) * (1 - e^(-rate * deltaTime))
+            // Approximation for small deltaTime: current += (target - current) * rate * deltaTime
+            float smoothFactor = Math.Min(1.0f, STEER_SMOOTHING_RATE * deltaTime);
+            smoothedSteerCorrection += (targetSteer - smoothedSteerCorrection) * smoothFactor;
+
+            // Calculate brake magnitude
+            float brakeUrgency = Math.Max(0f, 1f - (ttc / brakeThreshold));
+            float brakeMag = brakeUrgency * brakeUrgency;
+
+            // Emergency stop - increase brake magnitude
+            if (ttc < 0.8f)
+            {
+                brakeMag = 1.0f;
+            }
+
+            // Cache values for per-tick application
+            cachedSteerCorrection = smoothedSteerCorrection;
+            cachedBrakeMagnitude = brakeMag;
+            cachedAvoidDirection = avoidDir;
+
+            // Audio/speech feedback
+            if (DateTime.Now.Ticks - lastAssistAnnounceTicks > 20000000)
+            {
+                lastAssistAnnounceTicks = DateTime.Now.Ticks;
+
+                outSteerAssist.Stop();
+                steerAssistBeep.Frequency = 400 + (int)(steerUrgency * 600);
+                var sample = steerAssistBeep.Take(TimeSpan.FromSeconds(0.08));
+                outSteerAssist.Init(sample);
+                outSteerAssist.Play();
+
+                if (brakeMag > 0.5f || Math.Abs(smoothedSteerCorrection) > 0.3f)
+                {
+                    string action = brakeMag > 0.5f ? "Braking" : "Steering";
+                    Tolk.Speak(action + ", " + threatType + " " + threatDirection, true);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Applies cached steering/braking inputs. MUST be called every tick for inputs to work!
+        /// GTA V's SET_CONTROL_NORMAL only applies for a single frame.
+        /// </summary>
+        private void ApplyCachedSteeringInputs(Vehicle playerVeh)
+        {
+            // _SET_CONTROL_NORMAL hash: 0xE8A25867FBA3B05E
+            // Control IDs: 59=Steer, 71=Accelerate, 72=Brake, 76=Handbrake
+
+            // Apply steering
+            if (Math.Abs(cachedSteerCorrection) > 0.05f)
+            {
+                if (cachedIsFullMode)
+                {
+                    // Full mode: override player steering
+                    Function.Call((Hash)0xE8A25867FBA3B05E, 0, 59, cachedSteerCorrection);
+                }
+                else
+                {
+                    // Assistive mode: blend with player input
+                    float playerSteer = Function.Call<float>(Hash.GET_CONTROL_NORMAL, 0, 59);
+                    float blended = Math.Max(-1f, Math.Min(1f, playerSteer + cachedSteerCorrection * 0.7f));
+                    Function.Call((Hash)0xE8A25867FBA3B05E, 0, 59, blended);
+                }
+            }
+
+            // Apply braking
+            if (cachedBrakeMagnitude > 0.1f)
+            {
+                Function.Call((Hash)0xE8A25867FBA3B05E, 0, 72, cachedBrakeMagnitude);
+
+                // In full mode with strong braking, also cut throttle
+                if (cachedIsFullMode && cachedBrakeMagnitude > 0.5f)
+                {
+                    Function.Call((Hash)0xE8A25867FBA3B05E, 0, 71, 0f);
+                }
+            }
+
+            // Emergency measures for imminent collision
+            if (cachedBrakeMagnitude >= 1.0f)
+            {
+                Function.Call((Hash)0xE8A25867FBA3B05E, 0, 76, 1.0f); // Handbrake
+                Function.Call((Hash)0xE8A25867FBA3B05E, 0, 71, 0f);   // Cut throttle
+
+                // In Full mode, if collision is truly unavoidable, force stop
+                if (cachedIsFullMode && threatTimeToCollision < 0.3f && playerVeh != null)
+                {
+                    playerVeh.Velocity = GTA.Math.Vector3.Zero;
+                    if (DateTime.Now.Ticks - lastAssistAnnounceTicks > 10000000)
+                    {
+                        Tolk.Speak("Emergency halt!", true);
+                        lastAssistAnnounceTicks = DateTime.Now.Ticks;
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Speaks the current setting value with proper handling for multi-value settings
+        /// </summary>
+        private void SpeakCurrentSetting()
+        {
+            if (settingsMenu[settingsMenuIndex].id == "detectionRadius")
+            {
+                int radiusIndex = settingsMenu[settingsMenuIndex].value;
+                if (radiusIndex < 0 || radiusIndex >= detectionRadiusOptions.Length)
+                    radiusIndex = 1;
+                Tolk.Speak("Detection Radius: " + (int)detectionRadiusOptions[radiusIndex] + " meters");
+            }
+            else if (settingsMenu[settingsMenuIndex].id == "steeringAssist")
+            {
+                int mode = settingsMenu[settingsMenuIndex].value;
+                string modeText = mode == 0 ? "Off" : (mode == 1 ? "Assistive" : "Full");
+                Tolk.Speak("Steering Assist Mode: " + modeText);
+            }
+            else
+            {
+                string toggle = settingsMenu[settingsMenuIndex].value == 0 ? "Off" : "On";
+                Tolk.Speak(settingsMenu[settingsMenuIndex].displayName + toggle);
+            }
+        }
+
         string idToName(string id)
         {
             string result = "None";
@@ -4337,6 +5101,12 @@ namespace GrandTheftAccessibility
                 result = "Fire Ammo. ";
             if (id == "explosiveMelee")
                 result = "Explosive Melee. ";
+            if (id == "aimAutolock")
+                result = "Aim Autolock & Target Tracking. ";
+            if (id == "steeringAssist")
+                result = "Steering Assist Mode: ";
+            if (id == "shapeCasting")
+                result = "Enhanced Obstacle Detection (Shape Casting). ";
             if (id == "announceTime")
                 result = "Time of Day Announcements. ";
             if (id == "announceHeadings")
@@ -4400,6 +5170,83 @@ namespace GrandTheftAccessibility
                 default: // world, prop
                     return SignalGeneratorType.Square; // Standard
             }
+        }
+
+        // ============================================
+        // SHAPE CASTING HELPER METHODS
+        // ============================================
+
+        /// <summary>
+        /// Performs a multi-ray "shape cast" that simulates sphere/capsule collision detection.
+        /// Returns the closest hit distance, or -1 if no hit.
+        /// </summary>
+        private float PerformShapeCast(GTA.Math.Vector3 startPos, GTA.Math.Vector3 forwardVec,
+            GTA.Math.Vector3 rightVec, float maxRange, IntersectFlags flags, Entity exclude,
+            out GTA.Math.Vector3 hitPosition, float vehicleSpeed = 0f)
+        {
+            hitPosition = GTA.Math.Vector3.Zero;
+            float closestDist = float.MaxValue;
+
+            // Calculate up vector for vertical rays
+            GTA.Math.Vector3 upVec = new GTA.Math.Vector3(0, 0, 1);
+
+            // Select ray pattern based on speed - more rays at higher speeds
+            float[] hAngles = vehicleSpeed > SHAPE_CAST_SPEED_THRESHOLD
+                ? SHAPE_CAST_H_ANGLES_FAST
+                : SHAPE_CAST_H_ANGLES_SLOW;
+
+            foreach (float hAngle in hAngles)
+            {
+                foreach (float vAngle in SHAPE_CAST_V_ANGLES)
+                {
+                    // Skip extreme combinations (far diagonal corners) for performance
+                    if (Math.Abs(hAngle) > 20f && Math.Abs(vAngle) > 5f)
+                        continue;
+
+                    // Calculate ray direction with horizontal and vertical rotation
+                    GTA.Math.Vector3 rayDir = RotateVector(forwardVec, rightVec, upVec, hAngle, vAngle);
+
+                    RaycastResult ray = World.Raycast(startPos, startPos + (rayDir * maxRange),
+                        flags, exclude);
+
+                    if (ray.DidHit)
+                    {
+                        float dist = World.GetDistance(startPos, ray.HitPosition);
+                        if (dist < closestDist)
+                        {
+                            closestDist = dist;
+                            hitPosition = ray.HitPosition;
+                        }
+
+                        // Early termination: if we found something very close, stop scanning
+                        if (dist < maxRange * 0.2f)
+                        {
+                            return closestDist;
+                        }
+                    }
+                }
+            }
+
+            return closestDist < float.MaxValue ? closestDist : -1f;
+        }
+
+        /// <summary>
+        /// Rotates a vector by horizontal (yaw) and vertical (pitch) angles in degrees.
+        /// </summary>
+        private GTA.Math.Vector3 RotateVector(GTA.Math.Vector3 forward, GTA.Math.Vector3 right,
+            GTA.Math.Vector3 up, float horizontalDegrees, float verticalDegrees)
+        {
+            // Convert to radians
+            float hRad = horizontalDegrees * (float)(Math.PI / 180.0);
+            float vRad = verticalDegrees * (float)(Math.PI / 180.0);
+
+            // Horizontal rotation (around up axis): blend forward and right
+            GTA.Math.Vector3 hRotated = forward * (float)Math.Cos(hRad) + right * (float)Math.Sin(hRad);
+            hRotated = GTA.Math.Vector3.Normalize(hRotated);
+
+            // Vertical rotation (around right axis): blend horizontal result with up
+            GTA.Math.Vector3 result = hRotated * (float)Math.Cos(vRad) + up * (float)Math.Sin(vRad);
+            return GTA.Math.Vector3.Normalize(result);
         }
 
     }
