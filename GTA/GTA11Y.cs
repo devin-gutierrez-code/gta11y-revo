@@ -400,6 +400,11 @@ namespace GrandTheftAccessibility
         private int autodriveFlagMenuIndex = 0; // Which flag is selected in menu
         private bool[] autodriveFlags = new bool[32]; // Individual flag states
 
+        // Auto-navigation mode tracking: "drive", "fly", "walk"
+        private string autonavMode = "drive";
+        // Aircraft autopilot cruise altitude (meters above ground)
+        private float autopilotAltitude = 200f;
+
         // Driving style flag names (bit 0-31)
         private string[] autodriveFlagNames = {
             "Stop before vehicles",           // 0 - 1
@@ -1112,69 +1117,183 @@ namespace GrandTheftAccessibility
                 }
 
                 // ============================================
-                // AUTO-DRIVE MONITORING
+                // AUTO-NAVIGATION MONITORING (drive, fly, walk)
                 // ============================================
                 if (isAutodriving)
                 {
-                    // Check if player exited vehicle
-                    if (!Game.Player.Character.IsInVehicle())
+                    if (autonavMode == "walk")
                     {
-                        isAutodriving = false;
-                        autodriveWanderMode = false;
-                        Tolk.Speak("Auto-drive stopped. You exited the vehicle.");
-                    }
-                    else if (autodriveWanderMode)
-                    {
-                        // WANDER MODE - just announce current location periodically
-                        if (DateTime.Now.Ticks - autodriveCheckTicks > 150000000) // 15 seconds
+                        // AUTO-WALK MONITORING
+                        // Cancel if player entered a vehicle
+                        if (Game.Player.Character.IsInVehicle())
                         {
-                            autodriveCheckTicks = DateTime.Now.Ticks;
+                            isAutodriving = false;
+                            autodriveWanderMode = false;
+                            autonavMode = "drive";
+                            Tolk.Speak("Auto-walk stopped. You entered a vehicle.");
+                        }
+                        else if (autodriveWanderMode)
+                        {
+                            // Wander mode - periodic location updates
+                            if (DateTime.Now.Ticks - autodriveCheckTicks > 150000000) // 15 seconds
+                            {
+                                autodriveCheckTicks = DateTime.Now.Ticks;
+                                string currentStreet = World.GetStreetName(Game.Player.Character.Position);
+                                string currentZone = World.GetZoneLocalizedName(Game.Player.Character.Position);
+                                Tolk.Speak("Walking through " + currentStreet + ", " + currentZone + ".", true);
+                            }
+                        }
+                        else
+                        {
+                            // Waypoint mode - check arrival
+                            GTA.Math.Vector3 playerPos = Game.Player.Character.Position;
+                            float currentDist = World.GetDistance(playerPos, autodriveDestination);
 
-                            // Announce current street/zone
-                            string currentStreet = World.GetStreetName(Game.Player.Character.Position);
-                            string currentZone = World.GetZoneLocalizedName(Game.Player.Character.Position);
-                            float speed = Game.Player.Character.CurrentVehicle != null ?
-                                Game.Player.Character.CurrentVehicle.Speed * 2.23694f : 0f;
+                            if (currentDist < 10f)
+                            {
+                                isAutodriving = false;
+                                Game.Player.Character.Task.ClearAll();
+                                autonavMode = "drive";
+                                Tolk.Speak("Arrived at destination.");
+                            }
+                            else if (DateTime.Now.Ticks - autodriveCheckTicks > 100000000) // 10 seconds
+                            {
+                                autodriveCheckTicks = DateTime.Now.Ticks;
+                                if (currentDist < autodriveStartDistance * 0.9f)
+                                {
+                                    Tolk.Speak((int)currentDist + " meters remaining.", true);
+                                }
+                            }
+                        }
+                    }
+                    else if (autonavMode == "fly")
+                    {
+                        // AIRCRAFT AUTOPILOT MONITORING
+                        if (!Game.Player.Character.IsInVehicle())
+                        {
+                            isAutodriving = false;
+                            autodriveWanderMode = false;
+                            autonavMode = "drive";
+                            Tolk.Speak("Autopilot disengaged. You exited the aircraft.");
+                        }
+                        else if (autodriveWanderMode)
+                        {
+                            // Hovering/circling - periodic altitude and location updates
+                            if (DateTime.Now.Ticks - autodriveCheckTicks > 150000000) // 15 seconds
+                            {
+                                autodriveCheckTicks = DateTime.Now.Ticks;
+                                string currentZone = World.GetZoneLocalizedName(Game.Player.Character.Position);
+                                float altAboveGround = Game.Player.Character.HeightAboveGround;
+                                float speed = Game.Player.Character.CurrentVehicle != null ?
+                                    Game.Player.Character.CurrentVehicle.Speed * 2.23694f : 0f;
+                                Tolk.Speak("Flying over " + currentZone + ". " + (int)altAboveGround + " meters altitude. " + (int)speed + " mph.", true);
+                            }
+                        }
+                        else
+                        {
+                            // Waypoint mode - check arrival
+                            GTA.Math.Vector3 playerPos = Game.Player.Character.Position;
+                            float currentDist = World.GetDistance(playerPos, autodriveDestination);
+                            // Use 2D distance for aircraft (ignore altitude difference for arrival)
+                            float horizontalDist = (float)Math.Sqrt(
+                                Math.Pow(playerPos.X - autodriveDestination.X, 2) +
+                                Math.Pow(playerPos.Y - autodriveDestination.Y, 2));
 
-                            Tolk.Speak("Wandering through " + currentStreet + ", " + currentZone + ". " + (int)speed + " mph.", true);
+                            if (horizontalDist < 75f)
+                            {
+                                isAutodriving = false;
+                                Game.Player.Character.Task.ClearAll();
+                                autonavMode = "drive";
+                                Tolk.Speak("Arrived at destination. Autopilot disengaged.");
+                            }
+                            else if (DateTime.Now.Ticks - autodriveCheckTicks > 100000000) // 10 seconds
+                            {
+                                autodriveCheckTicks = DateTime.Now.Ticks;
+                                if (currentDist < autodriveStartDistance * 0.9f)
+                                {
+                                    float speed = Game.Player.Character.CurrentVehicle != null ?
+                                        Game.Player.Character.CurrentVehicle.Speed : 0f;
+                                    float altAboveGround = Game.Player.Character.HeightAboveGround;
+
+                                    if (speed > 1f)
+                                    {
+                                        int etaSeconds = (int)(horizontalDist / speed);
+                                        if (etaSeconds > 60)
+                                        {
+                                            int mins = etaSeconds / 60;
+                                            Tolk.Speak((int)horizontalDist + " meters remaining. Altitude: " + (int)altAboveGround + " meters. About " + mins + " minute" + (mins > 1 ? "s" : "") + ".", true);
+                                        }
+                                        else if (horizontalDist > 100f)
+                                        {
+                                            Tolk.Speak((int)horizontalDist + " meters remaining. Altitude: " + (int)altAboveGround + " meters.", true);
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     else
                     {
-                        // WAYPOINT MODE - Check distance to destination
-                        GTA.Math.Vector3 playerPos = Game.Player.Character.Position;
-                        float currentDist = World.GetDistance(playerPos, autodriveDestination);
-
-                        // Arrival detection (within 25 meters)
-                        if (currentDist < 25f)
+                        // GROUND VEHICLE AUTO-DRIVE MONITORING (existing behavior)
+                        if (!Game.Player.Character.IsInVehicle())
                         {
                             isAutodriving = false;
-                            Game.Player.Character.Task.ClearAll();
-                            Tolk.Speak("Arrived at destination. You have control.");
+                            autodriveWanderMode = false;
+                            Tolk.Speak("Auto-drive stopped. You exited the vehicle.");
                         }
-                        // Progress announcements every 10 seconds
-                        else if (DateTime.Now.Ticks - autodriveCheckTicks > 100000000) // 10 seconds
+                        else if (autodriveWanderMode)
                         {
-                            autodriveCheckTicks = DateTime.Now.Ticks;
-
-                            // Only announce if we've made significant progress
-                            if (currentDist < autodriveStartDistance * 0.9f) // At least 10% progress
+                            // WANDER MODE - just announce current location periodically
+                            if (DateTime.Now.Ticks - autodriveCheckTicks > 150000000) // 15 seconds
                             {
-                                // Calculate ETA based on current speed
-                                float speed = Game.Player.Character.CurrentVehicle != null ?
-                                    Game.Player.Character.CurrentVehicle.Speed : 0f;
+                                autodriveCheckTicks = DateTime.Now.Ticks;
 
-                                if (speed > 1f)
+                                // Announce current street/zone
+                                string currentStreet = World.GetStreetName(Game.Player.Character.Position);
+                                string currentZone = World.GetZoneLocalizedName(Game.Player.Character.Position);
+                                float speed = Game.Player.Character.CurrentVehicle != null ?
+                                    Game.Player.Character.CurrentVehicle.Speed * 2.23694f : 0f;
+
+                                Tolk.Speak("Wandering through " + currentStreet + ", " + currentZone + ". " + (int)speed + " mph.", true);
+                            }
+                        }
+                        else
+                        {
+                            // WAYPOINT MODE - Check distance to destination
+                            GTA.Math.Vector3 playerPos = Game.Player.Character.Position;
+                            float currentDist = World.GetDistance(playerPos, autodriveDestination);
+
+                            // Arrival detection (within 25 meters)
+                            if (currentDist < 25f)
+                            {
+                                isAutodriving = false;
+                                Game.Player.Character.Task.ClearAll();
+                                Tolk.Speak("Arrived at destination. You have control.");
+                            }
+                            // Progress announcements every 10 seconds
+                            else if (DateTime.Now.Ticks - autodriveCheckTicks > 100000000) // 10 seconds
+                            {
+                                autodriveCheckTicks = DateTime.Now.Ticks;
+
+                                // Only announce if we've made significant progress
+                                if (currentDist < autodriveStartDistance * 0.9f) // At least 10% progress
                                 {
-                                    int etaSeconds = (int)(currentDist / speed);
-                                    if (etaSeconds > 60)
+                                    // Calculate ETA based on current speed
+                                    float speed = Game.Player.Character.CurrentVehicle != null ?
+                                        Game.Player.Character.CurrentVehicle.Speed : 0f;
+
+                                    if (speed > 1f)
                                     {
-                                        int mins = etaSeconds / 60;
-                                        Tolk.Speak((int)currentDist + " meters remaining. About " + mins + " minute" + (mins > 1 ? "s" : "") + ".", true);
-                                    }
-                                    else if (currentDist > 100f)
-                                    {
-                                        Tolk.Speak((int)currentDist + " meters remaining.", true);
+                                        int etaSeconds = (int)(currentDist / speed);
+                                        if (etaSeconds > 60)
+                                        {
+                                            int mins = etaSeconds / 60;
+                                            Tolk.Speak((int)currentDist + " meters remaining. About " + mins + " minute" + (mins > 1 ? "s" : "") + ".", true);
+                                        }
+                                        else if (currentDist > 100f)
+                                        {
+                                            Tolk.Speak((int)currentDist + " meters remaining.", true);
+                                        }
                                     }
                                 }
                             }
@@ -4064,7 +4183,7 @@ namespace GrandTheftAccessibility
                         }
                     }
 
-                    // Auto-Drive menu - NumPad2 stops autodrive (when driving)
+                    // Auto-Drive menu - NumPad2 stops auto-navigation (when active)
                     if (mainMenuIndex == 3)
                     {
                         if (isAutodriving)
@@ -4072,7 +4191,13 @@ namespace GrandTheftAccessibility
                             isAutodriving = false;
                             autodriveWanderMode = false;
                             Game.Player.Character.Task.ClearAll();
-                            Tolk.Speak("Auto-drive stopped. You have control.");
+                            if (autonavMode == "fly")
+                                Tolk.Speak("Autopilot disengaged. You have control.");
+                            else if (autonavMode == "walk")
+                                Tolk.Speak("Auto-walk cancelled. You have control.");
+                            else
+                                Tolk.Speak("Auto-drive cancelled. You have control.");
+                            autonavMode = "drive";
                         }
                         else
                         {
@@ -4497,9 +4622,9 @@ namespace GrandTheftAccessibility
                 }
 
                 // ============================================
-                // AUTO-DRIVE SPEED CONTROL (Arrow Keys)
+                // AUTO-NAVIGATION SPEED CONTROL (Arrow Keys)
                 // Left arrow = decrease speed, Right arrow = increase speed
-                // Only active in Auto-Drive menu (works while driving too)
+                // Only active in Auto-Drive menu when not actively navigating
                 // Speed granularity: 5 mph increments
                 // ============================================
                 if (e.KeyCode == Keys.Left && !keyState[13])
@@ -4530,7 +4655,7 @@ namespace GrandTheftAccessibility
                         // Convert current m/s to mph, round to nearest 5, add 5, convert back
                         int currentMph = (int)Math.Round(autodriveSpeed * 2.23694);
                         int snappedMph = ((int)Math.Round(currentMph / 5.0)) * 5;
-                        int newMph = Math.Min(225, snappedMph + 5);
+                        int newMph = snappedMph + 5;
                         autodriveSpeed = (float)(newMph / 2.23694);
                         Tolk.Speak("Speed: " + newMph + " mph");
 
@@ -4543,8 +4668,34 @@ namespace GrandTheftAccessibility
                 }
 
                 // ============================================
-                // AUTO-DRIVE START (NumPad Multiply)
-                // Starts driving to waypoint or wandering
+                // AUTOPILOT ALTITUDE CONTROL (Up/Down Arrow Keys)
+                // Up arrow = increase altitude, Down arrow = decrease altitude
+                // Only active in Auto-Drive menu when not actively navigating
+                // ============================================
+                if (e.KeyCode == Keys.Up && !keyState[16])
+                {
+                    keyState[16] = true;
+                    if (mainMenuIndex == 3 && !isAutodriving)
+                    {
+                        autopilotAltitude = autopilotAltitude + 25f;
+                        Tolk.Speak("Flight altitude: " + (int)autopilotAltitude + " meters");
+                    }
+                }
+
+                if (e.KeyCode == Keys.Down && !keyState[17])
+                {
+                    keyState[17] = true;
+                    if (mainMenuIndex == 3 && !isAutodriving)
+                    {
+                        autopilotAltitude = Math.Max(25f, autopilotAltitude - 25f);
+                        Tolk.Speak("Flight altitude: " + (int)autopilotAltitude + " meters");
+                    }
+                }
+
+                // ============================================
+                // AUTO-NAVIGATION START (NumPad Multiply)
+                // Starts auto-drive, aircraft autopilot, or auto-walk
+                // depending on whether player is in vehicle, aircraft, or on foot
                 // ============================================
                 if (e.KeyCode == Keys.Multiply && !keyState[15])
                 {
@@ -4552,85 +4703,248 @@ namespace GrandTheftAccessibility
 
                     if (isAutodriving)
                     {
-                        // Cancel if already driving
+                        // Cancel any active auto-navigation
                         isAutodriving = false;
                         autodriveWanderMode = false;
                         Game.Player.Character.Task.ClearAll();
-                        Tolk.Speak("Auto-drive cancelled. You have control.");
+                        if (autonavMode == "fly")
+                            Tolk.Speak("Autopilot disengaged. You have control.");
+                        else if (autonavMode == "walk")
+                            Tolk.Speak("Auto-walk cancelled. You have control.");
+                        else
+                            Tolk.Speak("Auto-drive cancelled. You have control.");
+                        autonavMode = "drive";
                     }
-                    else if (!Game.Player.Character.IsInVehicle())
+                    else if (Game.Player.Character.IsInVehicle())
                     {
-                        Tolk.Speak("You must be in a vehicle to use auto-drive");
-                    }
-                    else
-                    {
-                        // Calculate driving style from flags
-                        int drivingStyle = GetDrivingStyleFromFlags();
-
-                        // Start the driving task
                         Vehicle veh = Game.Player.Character.CurrentVehicle;
                         Ped driver = Game.Player.Character;
-
-                        // Set driver ability for better AI driving
-                        Function.Call(Hash.SET_DRIVER_ABILITY, driver, 1.0f);
-                        Function.Call(Hash.SET_DRIVER_AGGRESSIVENESS, driver, 0.5f);
+                        int vehClass = Function.Call<int>(Hash.GET_VEHICLE_CLASS, veh);
 
                         // Check if waypoint exists
                         bool hasWaypoint = Function.Call<bool>(Hash.IS_WAYPOINT_ACTIVE);
-                        Tolk.Speak("Waypoint check: " + (hasWaypoint ? "yes" : "no"), true);
 
-                        if (hasWaypoint)
+                        // vehClass 15 = Helicopters, 16 = Planes
+                        if (vehClass == 15 || vehClass == 16)
                         {
-                            // WAYPOINT MODE - Drive to waypoint
-                            int waypointBlipHandle = Function.Call<int>(Hash.GET_FIRST_BLIP_INFO_ID, 8);
-                            GTA.Math.Vector3 waypointPos = Function.Call<GTA.Math.Vector3>(Hash.GET_BLIP_INFO_ID_COORD, waypointBlipHandle);
+                            // ============================================
+                            // AIRCRAFT AUTOPILOT
+                            // ============================================
+                            autonavMode = "fly";
+                            bool isHeli = (vehClass == 15);
 
-                            // Get ground Z at waypoint for proper height
-                            float groundZ = World.GetGroundHeight(new GTA.Math.Vector2(waypointPos.X, waypointPos.Y));
-                            if (groundZ > 0) waypointPos.Z = groundZ;
-
-                            autodriveDestination = waypointPos;
-
-                            // Calculate distance
-                            GTA.Math.Vector3 playerPos = Game.Player.Character.Position;
-                            autodriveStartDistance = World.GetDistance(playerPos, waypointPos);
-
-                            // Use TASK_VEHICLE_DRIVE_TO_COORD_LONGRANGE for long distances
-                            Function.Call(Hash.TASK_VEHICLE_DRIVE_TO_COORD_LONGRANGE,
-                                driver, veh,
-                                waypointPos.X, waypointPos.Y, waypointPos.Z,
-                                autodriveSpeed, drivingStyle, 20f); // 20m stop distance
-
-                            isAutodriving = true;
-                            autodriveWanderMode = false;
-                            autodriveCheckTicks = DateTime.Now.Ticks;
-
-                            int speedMph = (int)Math.Round(autodriveSpeed * 2.23694);
-                            string steerAssistMsg = getSetting("steeringAssist") > 0 ? " Steering assist disabled." : "";
-                            Tolk.Speak("Auto-driving to waypoint at " + speedMph + " mph. " + (int)autodriveStartDistance + " meters." + steerAssistMsg);
-                        }
-                        else
-                        {
-                            // WANDER MODE - Drive randomly
-                            Tolk.Speak("No waypoint, starting wander", true);
-                            try
+                            if (hasWaypoint)
                             {
-                                Function.Call(Hash.TASK_VEHICLE_DRIVE_WANDER,
-                                    driver, veh,
-                                    autodriveSpeed, drivingStyle);
+                                int waypointBlipHandle = Function.Call<int>(Hash.GET_FIRST_BLIP_INFO_ID, 8);
+                                GTA.Math.Vector3 waypointPos = Function.Call<GTA.Math.Vector3>(Hash.GET_BLIP_INFO_ID_COORD, waypointBlipHandle);
+
+                                // Set target altitude above ground level
+                                float groundZ = World.GetGroundHeight(new GTA.Math.Vector2(waypointPos.X, waypointPos.Y));
+                                if (groundZ > 0)
+                                    waypointPos.Z = groundZ + autopilotAltitude;
+                                else
+                                    waypointPos.Z = autopilotAltitude;
+
+                                autodriveDestination = waypointPos;
+
+                                GTA.Math.Vector3 playerPos = Game.Player.Character.Position;
+                                autodriveStartDistance = World.GetDistance(playerPos, waypointPos);
+
+                                if (isHeli)
+                                {
+                                    // TASK_HELI_MISSION: ped, vehicle, targetVeh(0), targetPed(0), x, y, z, missionType, speed, radius, heading, maxAlt, minAlt, slowDownDist, behaviorFlags
+                                    // MissionType 4 = go to coord
+                                    Function.Call(Hash.TASK_HELI_MISSION,
+                                        driver, veh, 0, 0,
+                                        waypointPos.X, waypointPos.Y, waypointPos.Z,
+                                        4,                    // mission type: go to coord
+                                        autodriveSpeed,       // cruise speed
+                                        20f,                  // target radius
+                                        -1f,                  // heading (-1 = any)
+                                        (int)(waypointPos.Z + 100), // max altitude
+                                        (int)(waypointPos.Z - 50),  // min altitude
+                                        -1f,                  // slow down distance
+                                        0);                   // behavior flags
+                                }
+                                else
+                                {
+                                    // TASK_PLANE_MISSION: ped, vehicle, targetVeh(0), targetPed(0), x, y, z, missionType, speed, radius, heading, maxAlt, minAlt, precise
+                                    // MissionType 4 = go to coord
+                                    Function.Call(Hash.TASK_PLANE_MISSION,
+                                        driver, veh, 0, 0,
+                                        waypointPos.X, waypointPos.Y, waypointPos.Z,
+                                        4,                    // mission type: go to coord
+                                        autodriveSpeed,       // cruise speed
+                                        20f,                  // target radius
+                                        -1f,                  // heading (-1 = any)
+                                        (int)(waypointPos.Z + 100), // max altitude
+                                        (int)(waypointPos.Z - 50),  // min altitude
+                                        true);                // precise
+                                }
+
+                                isAutodriving = true;
+                                autodriveWanderMode = false;
+                                autodriveCheckTicks = DateTime.Now.Ticks;
+
+                                int speedMph = (int)Math.Round(autodriveSpeed * 2.23694);
+                                string acType = isHeli ? "Helicopter" : "Plane";
+                                Tolk.Speak(acType + " autopilot engaged. Flying to waypoint at " + speedMph + " mph. " + (int)autodriveStartDistance + " meters. Altitude: " + (int)autopilotAltitude + " meters.");
+                            }
+                            else
+                            {
+                                // No waypoint - circle/cruise in current area
+                                GTA.Math.Vector3 currentPos = Game.Player.Character.Position;
+                                float currentAlt = currentPos.Z;
+                                if (currentAlt < autopilotAltitude)
+                                    currentAlt = autopilotAltitude;
+
+                                autodriveDestination = new GTA.Math.Vector3(currentPos.X, currentPos.Y, currentAlt);
+
+                                if (isHeli)
+                                {
+                                    // Hover in place for helicopters
+                                    Function.Call(Hash.TASK_HELI_MISSION,
+                                        driver, veh, 0, 0,
+                                        currentPos.X, currentPos.Y, currentAlt,
+                                        4, autodriveSpeed, 50f, -1f,
+                                        (int)(currentAlt + 100), (int)(currentAlt - 50),
+                                        -1f, 0);
+                                }
+                                else
+                                {
+                                    // Circle for planes
+                                    Function.Call(Hash.TASK_PLANE_MISSION,
+                                        driver, veh, 0, 0,
+                                        currentPos.X, currentPos.Y, currentAlt,
+                                        4, autodriveSpeed, 200f, -1f,
+                                        (int)(currentAlt + 100), (int)(currentAlt - 50),
+                                        false);
+                                }
 
                                 isAutodriving = true;
                                 autodriveWanderMode = true;
                                 autodriveCheckTicks = DateTime.Now.Ticks;
 
                                 int speedMph = (int)Math.Round(autodriveSpeed * 2.23694);
-                                string steerAssistMsg = getSetting("steeringAssist") > 0 ? " Steering assist disabled." : "";
-                                Tolk.Speak("Wandering at " + speedMph + " mph." + steerAssistMsg);
+                                string acType = isHeli ? "Helicopter hovering" : "Plane circling";
+                                Tolk.Speak(acType + " at " + speedMph + " mph. Set a waypoint for a destination.");
                             }
-                            catch (Exception ex)
+                        }
+                        else
+                        {
+                            // ============================================
+                            // GROUND VEHICLE AUTO-DRIVE (existing behavior)
+                            // ============================================
+                            autonavMode = "drive";
+                            int drivingStyle = GetDrivingStyleFromFlags();
+
+                            // Set driver ability for better AI driving
+                            Function.Call(Hash.SET_DRIVER_ABILITY, driver, 1.0f);
+                            Function.Call(Hash.SET_DRIVER_AGGRESSIVENESS, driver, 0.5f);
+
+                            if (hasWaypoint)
                             {
-                                Tolk.Speak("Wander error: " + ex.Message);
+                                // WAYPOINT MODE - Drive to waypoint
+                                int waypointBlipHandle = Function.Call<int>(Hash.GET_FIRST_BLIP_INFO_ID, 8);
+                                GTA.Math.Vector3 waypointPos = Function.Call<GTA.Math.Vector3>(Hash.GET_BLIP_INFO_ID_COORD, waypointBlipHandle);
+
+                                // Get ground Z at waypoint for proper height
+                                float groundZ = World.GetGroundHeight(new GTA.Math.Vector2(waypointPos.X, waypointPos.Y));
+                                if (groundZ > 0) waypointPos.Z = groundZ;
+
+                                autodriveDestination = waypointPos;
+
+                                // Calculate distance
+                                GTA.Math.Vector3 playerPos = Game.Player.Character.Position;
+                                autodriveStartDistance = World.GetDistance(playerPos, waypointPos);
+
+                                // Use TASK_VEHICLE_DRIVE_TO_COORD_LONGRANGE for long distances
+                                Function.Call(Hash.TASK_VEHICLE_DRIVE_TO_COORD_LONGRANGE,
+                                    driver, veh,
+                                    waypointPos.X, waypointPos.Y, waypointPos.Z,
+                                    autodriveSpeed, drivingStyle, 20f); // 20m stop distance
+
+                                isAutodriving = true;
+                                autodriveWanderMode = false;
+                                autodriveCheckTicks = DateTime.Now.Ticks;
+
+                                int speedMph = (int)Math.Round(autodriveSpeed * 2.23694);
+                                string steerAssistMsg = getSetting("steeringAssist") > 0 ? " Steering assist disabled." : "";
+                                Tolk.Speak("Auto-driving to waypoint at " + speedMph + " mph. " + (int)autodriveStartDistance + " meters." + steerAssistMsg);
                             }
+                            else
+                            {
+                                // WANDER MODE - Drive randomly
+                                try
+                                {
+                                    Function.Call(Hash.TASK_VEHICLE_DRIVE_WANDER,
+                                        driver, veh,
+                                        autodriveSpeed, drivingStyle);
+
+                                    isAutodriving = true;
+                                    autodriveWanderMode = true;
+                                    autodriveCheckTicks = DateTime.Now.Ticks;
+
+                                    int speedMph = (int)Math.Round(autodriveSpeed * 2.23694);
+                                    string steerAssistMsg = getSetting("steeringAssist") > 0 ? " Steering assist disabled." : "";
+                                    Tolk.Speak("Wandering at " + speedMph + " mph." + steerAssistMsg);
+                                }
+                                catch (Exception ex)
+                                {
+                                    Tolk.Speak("Wander error: " + ex.Message);
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // ============================================
+                        // ON-FOOT AUTO-WALK
+                        // ============================================
+                        autonavMode = "walk";
+                        Ped player = Game.Player.Character;
+                        bool hasWaypoint = Function.Call<bool>(Hash.IS_WAYPOINT_ACTIVE);
+
+                        if (hasWaypoint)
+                        {
+                            int waypointBlipHandle = Function.Call<int>(Hash.GET_FIRST_BLIP_INFO_ID, 8);
+                            GTA.Math.Vector3 waypointPos = Function.Call<GTA.Math.Vector3>(Hash.GET_BLIP_INFO_ID_COORD, waypointBlipHandle);
+
+                            // Get ground Z at waypoint
+                            float groundZ = World.GetGroundHeight(new GTA.Math.Vector2(waypointPos.X, waypointPos.Y));
+                            if (groundZ > 0) waypointPos.Z = groundZ;
+
+                            autodriveDestination = waypointPos;
+
+                            GTA.Math.Vector3 playerPos = player.Position;
+                            autodriveStartDistance = World.GetDistance(playerPos, waypointPos);
+
+                            // TASK_GO_TO_COORD_ANY_MEANS: ped, x, y, z, speed, p5, p6, walkingStyle, p8
+                            // Speed: 1.0 = walk, 2.0 = jog/run
+                            float walkSpeed = Math.Min(autodriveSpeed, 4f); // Cap walk speed to reasonable limit (4 m/s = fast run)
+                            Function.Call(Hash.TASK_GO_TO_COORD_ANY_MEANS,
+                                player,
+                                waypointPos.X, waypointPos.Y, waypointPos.Z,
+                                walkSpeed,
+                                0, 0, 0, 0f);
+
+                            isAutodriving = true;
+                            autodriveWanderMode = false;
+                            autodriveCheckTicks = DateTime.Now.Ticks;
+
+                            Tolk.Speak("Auto-walking to waypoint. " + (int)autodriveStartDistance + " meters.");
+                        }
+                        else
+                        {
+                            // Wander on foot
+                            Function.Call(Hash.TASK_WANDER_STANDARD,
+                                player, 10f, 0);
+
+                            isAutodriving = true;
+                            autodriveWanderMode = true;
+                            autodriveCheckTicks = DateTime.Now.Ticks;
+
+                            Tolk.Speak("Wandering on foot.");
                         }
                     }
                 }
@@ -4676,6 +4990,10 @@ namespace GrandTheftAccessibility
                 keyState[14] = false;
             if (e.KeyCode == Keys.Multiply && keyState[15])
                 keyState[15] = false;
+            if (e.KeyCode == Keys.Up && keyState[16])
+                keyState[16] = false;
+            if (e.KeyCode == Keys.Down && keyState[17])
+                keyState[17] = false;
             if (e.KeyCode == Keys.NumPad0 && keyState[19])
                 keyState[19] = false;
 
@@ -4908,7 +5226,13 @@ namespace GrandTheftAccessibility
             {
                 if (isAutodriving)
                 {
-                    string modeStr = autodriveWanderMode ? "wandering" : "driving to waypoint";
+                    string modeStr;
+                    if (autonavMode == "fly")
+                        modeStr = autodriveWanderMode ? "hovering" : "flying to waypoint";
+                    else if (autonavMode == "walk")
+                        modeStr = autodriveWanderMode ? "wandering on foot" : "walking to waypoint";
+                    else
+                        modeStr = autodriveWanderMode ? "wandering" : "driving to waypoint";
                     result = result + "Currently " + modeStr + ". Press NumPad 2 to cancel.";
                 }
                 else
@@ -4916,7 +5240,7 @@ namespace GrandTheftAccessibility
                     // Show current flag and state, plus speed
                     string flagState = autodriveFlags[autodriveFlagMenuIndex] ? "ON" : "OFF";
                     int speedMph = (int)Math.Round(autodriveSpeed * 2.23694); // Convert m/s to mph
-                    result = result + "Flag " + (autodriveFlagMenuIndex + 1) + " of 32: " + autodriveFlagNames[autodriveFlagMenuIndex] + ", " + flagState + ". Speed: " + speedMph + " mph. NumPad Multiply to start. Arrows to adjust speed. Drives to waypoint if set, otherwise wanders.";
+                    result = result + "Flag " + (autodriveFlagMenuIndex + 1) + " of 32: " + autodriveFlagNames[autodriveFlagMenuIndex] + ", " + flagState + ". Speed: " + speedMph + " mph. Flight altitude: " + (int)autopilotAltitude + " meters. NumPad Multiply to start. Left/Right arrows adjust speed. Up/Down arrows adjust flight altitude. Works in vehicles, aircraft, and on foot.";
                 }
             }
             // Settings menu
