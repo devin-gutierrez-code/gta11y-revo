@@ -2,13 +2,23 @@
 using GTA.Native;
 using System;
 using System.Drawing;
+using System.Drawing.Imaging;
 using System.Windows.Forms;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.WindowsRuntime;
+using System.IO;
+using System.IO.MemoryMappedFiles;
 using DavyKager;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
 using Newtonsoft.Json;
+using Windows.Graphics.Imaging;
+using Windows.Media.Ocr;
+using Windows.Storage.Streams;
 
 namespace GrandTheftAccessibility
 {
@@ -113,6 +123,42 @@ namespace GrandTheftAccessibility
         private float cachedBrakeMagnitude = 0f;
         private int cachedAvoidDirection = 0;
         private bool cachedIsFullMode = false;
+        private bool cachedIsBraking = false; // True when system is actively braking (blocks throttle in full mode)
+        private bool wasObstacleInBrakeZone = false; // Track if obstacle was in brake zone last frame (for first-contact detection)
+
+        // Nav assist distances shared with drive assist for improved obstacle avoidance
+        private float navAssistDistLeft = 999f;
+        private float navAssistDistCenter = 999f;
+        private float navAssistDistRight = 999f;
+        private float navAssistDistBehind = 999f;
+        private string navAssistTypeLeft = "none";
+        private string navAssistTypeCenter = "none";
+        private string navAssistTypeRight = "none";
+        private string navAssistTypeBehind = "none";
+
+        // Nav assist detected entities - shared for drive assist to use actual velocities for TTC
+        private Vehicle navAssistVehicleCenter = null;
+        private Vehicle navAssistVehicleLeft = null;
+        private Vehicle navAssistVehicleRight = null;
+        private Vehicle navAssistVehicleBehind = null;
+        private Ped navAssistPedCenter = null;
+        private Ped navAssistPedLeft = null;
+        private Ped navAssistPedRight = null;
+
+        // Vehicle spatial awareness for handbrake turn assistance
+        private float cachedHandbrakeMagnitude = 0f;  // Handbrake input for corrective turns
+        private bool vehicleIsSkewed = false;          // True if vehicle angle doesn't match road direction
+        private float vehicleSkewAngle = 0f;           // Angle difference between vehicle heading and road heading
+
+        // Auto-teleport to road tracking
+        private float lastValidRoadDistance = 999f;    // Distance to last valid same-direction road node
+        private long offRoadStartTicks = 0;            // When we started being far from road (for 5-second timer)
+        private bool wasCloseToRoad = true;            // Track if we were recently close to road
+        private const float ROAD_CLOSE_THRESHOLD_BASE = 15f; // Base max distance to be considered "on road"
+        private const float ROAD_FAR_THRESHOLD_BASE = 10f;   // Base distance for timer (increased from 8)
+        private const long ROAD_TELEPORT_DELAY_TICKS = 50000000; // 5 seconds in ticks
+        private const long ROAD_TELEPORT_COOLDOWN_TICKS = 30000000; // 3 second cooldown between teleports
+        private long lastTeleportTicks = 0;              // Last time we teleported
 
         // Audio feedback
         private WaveOutEvent outSteerAssist;
@@ -120,10 +166,28 @@ namespace GrandTheftAccessibility
 
         // Thresholds (seconds to collision)
         private const float STEER_SMOOTHING_RATE = 8.0f; // Units per second (frame-rate independent)
-        private const float BRAKE_THRESHOLD_FULL = 2.5f;
-        private const float BRAKE_THRESHOLD_ASSIST = 1.5f;
+        private const float BRAKE_THRESHOLD_FULL = 1.5f;       // Only brake when collision is very imminent
+        private const float BRAKE_THRESHOLD_ASSIST = 1.0f;
+        private const float MIN_BRAKE_DISTANCE = 3f;          // Don't brake for obstacles closer than 3m (too late anyway)
+        private const float MIN_BRAKE_DISTANCE_FULL = 5f;     // Full mode has slightly more buffer
         private const float STEER_THRESHOLD_FULL = 4.0f;
         private const float STEER_THRESHOLD_ASSIST = 2.5f;
+        private const float BASE_COLLISION_RADIUS = 2.5f;     // Base collision radius, scaled by vehicle size
+
+        // Reverse driving support
+        private bool isReversing = false;                     // True when vehicle is moving backward
+
+        // Road-following pathfinding
+        private float roadSteerCorrection = 0f;       // Steering needed to stay on road
+        private float smoothedRoadCorrection = 0f;    // Smoothed road correction
+        private bool isOnValidRoad = false;           // Whether we found a valid road node
+        private float roadHeadingDelta = 0f;          // Difference between vehicle heading and road heading
+
+        // Waypoint-aware drive assist
+        private GTA.Math.Vector3 cachedWaypointPos = GTA.Math.Vector3.Zero;  // Cached target position
+        private float cachedWaypointHeading = 0f;      // Heading direction TO the waypoint (for road node preference)
+        private bool hasActiveWaypoint = false;        // Whether there's an active waypoint/mission to guide toward
+        private long waypointUpdateTicks = 0;          // Last time waypoint was updated
 
         // ============================================
         // FRAME-RATE INDEPENDENT TIMING
@@ -332,7 +396,7 @@ namespace GrandTheftAccessibility
         private GTA.Math.Vector3 autodriveDestination = GTA.Math.Vector3.Zero;
         private long autodriveCheckTicks = 0;
         private float autodriveStartDistance = 0f;
-        private float autodriveSpeed = 20f; // Speed in m/s (adjustable with arrow keys)
+        private float autodriveSpeed = 20.1168f; // Speed in m/s (adjustable with arrow keys, 45 mph)
         private int autodriveFlagMenuIndex = 0; // Which flag is selected in menu
         private bool[] autodriveFlags = new bool[32]; // Individual flag states
 
@@ -384,10 +448,233 @@ namespace GrandTheftAccessibility
             return result;
         }
 
+        // Updates the autodrive task with new speed/flags while driving
+        private void UpdateAutodriveSpeed()
+        {
+            if (!isAutodriving) return;
+
+            Vehicle veh = Game.Player.Character.CurrentVehicle;
+            if (veh == null) return;
+
+            Ped driver = Game.Player.Character;
+            int drivingStyle = GetDrivingStyleFromFlags();
+
+            if (autodriveWanderMode)
+            {
+                // Restart wander task with new speed/flags
+                Function.Call(Hash.TASK_VEHICLE_DRIVE_WANDER,
+                    driver, veh,
+                    autodriveSpeed, drivingStyle);
+            }
+            else
+            {
+                // Restart waypoint task with new speed/flags
+                Function.Call(Hash.TASK_VEHICLE_DRIVE_TO_COORD_LONGRANGE,
+                    driver, veh,
+                    autodriveDestination.X, autodriveDestination.Y, autodriveDestination.Z,
+                    autodriveSpeed, drivingStyle, 20f);
+            }
+        }
+
         private bool[] headings = new bool[8];
         private bool climbing = false;
         private bool shifting = false;
 
+        // ============================================
+        // PHONE & MENU ACCESSIBILITY SYSTEM
+        // ============================================
+        private bool wasPhoneOut = false;
+        private bool wasPauseMenuActive = false;
+        private int lastPhoneAppIndex = -1;
+        private int lastContactIndex = -1;
+        private int lastPauseMenuState = -1;
+        private int lastPauseMenuTab = -1;        // Track current pause menu tab
+        private int lastPauseMenuSelection = -1;  // Track current pause menu selection
+        private long phoneCheckTicks = 0;
+        private long menuCheckTicks = 0;
+        private long phoneOpenedTicks = 0;      // When phone was first detected as open
+        private long menuOpenedTicks = 0;       // When menu was first detected as open
+        private bool phoneAnnouncedOpen = false; // Have we announced phone open yet?
+        private bool menuAnnouncedOpen = false;  // Have we announced menu open yet?
+        private const long PHONE_OPEN_DELAY = 8000000;  // 800ms delay for phone animation
+        private const long MENU_OPEN_DELAY = 5000000;   // 500ms delay for menu animation
+
+        // Debug logging for menu/phone state
+        private int lastLoggedMenuState = -999;
+        private int lastLoggedPhoneRenderId = -999;
+        private bool lastLoggedCanPhoneBeSeen = false;
+
+        // Background thread for pause menu/phone detection
+        // This runs independently of the game tick, so it works even when paused
+        private Thread menuMonitorThread = null;
+        private volatile bool menuMonitorRunning = false;
+        private volatile bool bgMenuWasOpen = false;
+        private volatile bool bgPhoneWasOpen = false;
+        private string bgLastOcrText = "";
+
+        // Global keyboard hook for OCR during pause menu
+        private IntPtr globalKeyboardHook = IntPtr.Zero;
+        private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
+        private LowLevelKeyboardProc keyboardProcDelegate; // Must keep reference to prevent GC
+        private const int WH_KEYBOARD_LL = 13;
+        private const int WM_KEYDOWN = 0x0100;
+        private const int VK_F12 = 0x7B; // F12 key for manual OCR trigger
+
+        // ============================================
+        // SHARED MEMORY FOR EXTERNAL MENU HELPER
+        // Communicates game state to external process
+        // ============================================
+        private const string SHARED_MEMORY_NAME = "GTA11Y_GameState";
+        private const int SHARED_MEMORY_SIZE = 256;
+        private MemoryMappedFile sharedMemory = null;
+        private MemoryMappedViewAccessor sharedMemoryAccessor = null;
+
+        // Shared memory structure offsets:
+        // Offset 0: byte - isPauseMenuActive (0 or 1)
+        // Offset 1: byte - pauseMenuState (0-10 for different tabs)
+        // Offset 2: byte - isPhoneVisible (0 or 1)
+        // Offset 3: byte - pauseMenuSelection (current selection index)
+        // Offset 4: uint - timestamp (last update tick count)
+        // Offset 8-207: string - last spoken text (200 chars max, null terminated)
+
+        // Phone app names (indices match game's internal app ordering)
+        private static readonly string[] PHONE_APPS = {
+            "Contacts",      // 0
+            "Job List",      // 1
+            "Text Messages", // 2
+            "Emails",        // 3
+            "Snapmatic",     // 4
+            "Internet",      // 5
+            "Quick GPS",     // 6
+            "Settings",      // 7
+            "Trackify"       // 8 (Trevor only)
+        };
+
+        // Known contacts lookup - populated with main story contacts
+        private static readonly Dictionary<int, string> KNOWN_CONTACTS = new Dictionary<int, string>()
+        {
+            // Main Characters
+            {0, "Michael"},
+            {1, "Franklin"},
+            {2, "Trevor"},
+            // Common Contacts (approximate indices, may vary)
+            {3, "Amanda"},
+            {4, "Jimmy"},
+            {5, "Tracey"},
+            {6, "Lester"},
+            {7, "Lamar"},
+            {8, "Ron"},
+            {9, "Wade"},
+            {10, "Dave Norton"},
+            {11, "Simeon"},
+            {12, "Devin Weston"},
+            {13, "Solomon Richards"},
+            {14, "Denise"},
+            {15, "Tonya"},
+            {16, "Tanisha"},
+            {17, "Martin Madrazo"},
+            {18, "Emergency Services"},
+            {19, "Downtown Cab Co"},
+            {20, "Merryweather"},
+            {21, "Pegasus"},
+            {22, "Mors Mutual"},
+            {23, "Mechanic"}
+        };
+
+        // Pause menu tab names
+        private static readonly string[] PAUSE_MENU_TABS = {
+            "Map",
+            "Brief",
+            "Stats",
+            "Settings",
+            "Game",
+            "Gallery",
+            "Social"
+        };
+
+        // ============================================
+        // WINDOWS OCR SYSTEM
+        // ============================================
+        private OcrEngine ocrEngine = null;
+        private bool ocrInitialized = false;
+        private bool ocrInProgress = false;
+        private long lastOcrTicks = 0;
+        private string lastOcrText = "";
+        private const long OCR_COOLDOWN_TICKS = 5000000; // 500ms between OCR attempts
+
+        // OCR region constants (percentage of screen)
+        // Phone region - the phone appears in CENTER-RIGHT of screen when character holds it
+        private const float PHONE_REGION_LEFT = 0.35f;    // 35% from left
+        private const float PHONE_REGION_TOP = 0.15f;     // 15% from top
+        private const float PHONE_REGION_WIDTH = 0.40f;   // 40% of screen width
+        private const float PHONE_REGION_HEIGHT = 0.70f;  // 70% of screen height
+
+        // Pause menu typically covers most of the screen
+        private const float MENU_REGION_LEFT = 0.05f;     // 5% from left
+        private const float MENU_REGION_TOP = 0.05f;      // 5% from top
+        private const float MENU_REGION_WIDTH = 0.90f;    // 90% of screen width
+        private const float MENU_REGION_HEIGHT = 0.90f;   // 90% of screen height
+
+        // Debug flag for OCR - set to true to log to file
+        private bool ocrDebug = true;
+        private bool ocrSaveScreenshots = true; // Save screenshots to debug OCR regions
+        private string ocrLogPath = null; // Will be set to scripts folder path
+        private int ocrScreenshotCount = 0;
+
+        // DllImports for screen capture
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll")]
+        private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetDesktopWindow();
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetWindowDC(IntPtr hWnd);
+
+        [DllImport("gdi32.dll")]
+        private static extern bool BitBlt(IntPtr hdcDest, int xDest, int yDest, int wDest, int hDest,
+            IntPtr hdcSrc, int xSrc, int ySrc, int Rop);
+
+        [DllImport("user32.dll")]
+        private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+        [DllImport("user32.dll")]
+        private static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint nFlags);
+
+        [DllImport("user32.dll")]
+        private static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
+
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out RECT pvAttribute, int cbAttribute);
+
+        // Global keyboard hook imports
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr GetModuleHandle(string lpModuleName);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RECT
+        {
+            public int Left;
+            public int Top;
+            public int Right;
+            public int Bottom;
+        }
+
+        private const int SRCCOPY = 0x00CC0020;
+        private const uint PW_RENDERFULLCONTENT = 0x00000002; // Windows 8.1+ - captures DirectX content
+        private const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
 
         private const double north = 0;
         private const double northnortheast = 22.5;
@@ -412,8 +699,13 @@ namespace GrandTheftAccessibility
             this.Tick += onTick;
             this.KeyUp += onKeyUp;
             this.KeyDown += onKeyDown;
+            this.Aborted += onAborted;
             Tolk.Load();
             Tolk.Speak("Mod Ready");
+
+            // Initialize shared memory for external MenuHelper communication
+            // This allows the external process to read game state even when scripts pause
+            InitializeSharedMemory();
 
             currentWeapon = Game.Player.Character.Weapons.Current.Hash.ToString();
             string[] lines = System.IO.File.ReadAllLines("scripts/hashes.txt");
@@ -488,7 +780,7 @@ namespace GrandTheftAccessibility
             autodriveFlags[8] = true;  // Use blinkers
             autodriveFlags[9] = true;  // Allow going wrong way
             autodriveFlags[19] = true; // Reckless / Allow overtaking
-            autodriveSpeed = 20f;      // Default ~45 mph
+            autodriveSpeed = 20.1168f;  // Default 45 mph
 
 
             tped = new AudioFileReader(@"scripts/tped.wav");
@@ -656,6 +948,12 @@ namespace GrandTheftAccessibility
 
         private void onTick(object sender, EventArgs e)
         {
+            // ============================================
+            // PAUSE MENU ACCESSIBILITY
+            // Prevent game from pausing so we can read menu items
+            // ============================================
+            HandlePauseMenuAccessibility();
+
             // Calculate delta time for frame-rate independent calculations
             long currentTime = DateTime.Now.Ticks;
             if (lastTickTime > 0)
@@ -836,7 +1134,7 @@ namespace GrandTheftAccessibility
                             string currentStreet = World.GetStreetName(Game.Player.Character.Position);
                             string currentZone = World.GetZoneLocalizedName(Game.Player.Character.Position);
                             float speed = Game.Player.Character.CurrentVehicle != null ?
-                                Game.Player.Character.CurrentVehicle.Speed * 2.237f : 0f;
+                                Game.Player.Character.CurrentVehicle.Speed * 2.23694f : 0f;
 
                             Tolk.Speak("Wandering through " + currentStreet + ", " + currentZone + ". " + (int)speed + " mph.", true);
                         }
@@ -1098,6 +1396,20 @@ namespace GrandTheftAccessibility
                             autolockPartIndex = 0;
                             autolockActive = true;
 
+                            // Find the first visible part (default parts like engine/torso should always be visible)
+                            // This ensures we don't start locked onto an obscured part
+                            int maxParts = currentTarget.EntityType == EntityType.Ped
+                                ? PED_TARGET_PARTS.Length
+                                : VEHICLE_TARGET_PARTS.Length;
+                            for (int i = 0; i < maxParts; i++)
+                            {
+                                if (IsPartVisible(i))
+                                {
+                                    autolockPartIndex = i;
+                                    break;
+                                }
+                            }
+
                             if (currentTarget != lastAnnouncedTarget)
                             {
                                 lastAnnouncedTarget = currentTarget;
@@ -1229,8 +1541,15 @@ namespace GrandTheftAccessibility
                         string typeLeft = "none", typeCenter = "none", typeRight = "none", typeBehind = "none";
                         string nameLeft = "", nameCenter = "", nameRight = "", nameBehind = "";
 
+                        // Entity references for drive assist (allows proper TTC calculation with actual velocities)
+                        Vehicle vehLeft = null, vehCenter = null, vehRight = null, vehBehind = null;
+                        Ped pedLeft = null, pedCenter = null, pedRight = null;
+
                         // Minimum distance to avoid self-detection
                         float minDist = inVehicle ? 1.5f : 0.5f;
+
+                        // Check if drive assist is enabled - enables rear detection even when going forward
+                        bool driveAssistEnabled = inVehicle && getSetting("steeringAssist") > 0;
 
                         // --- SCAN NEARBY PEDS ---
                         Ped[] nearbyPeds = World.GetNearbyPeds(playerPos, maxRange + 2f);
@@ -1256,22 +1575,22 @@ namespace GrandTheftAccessibility
                             if (dotForward > 0.5f)
                             {
                                 // CENTER zone
-                                if (dist < distCenter) { distCenter = dist; typeCenter = "ped"; nameCenter = "Pedestrian"; }
+                                if (dist < distCenter) { distCenter = dist; typeCenter = "ped"; nameCenter = "Pedestrian"; pedCenter = ped; vehCenter = null; }
                             }
-                            else if (dotForward < -0.5f && isMovingBackwards)
+                            else if (dotForward < -0.5f && (isMovingBackwards || driveAssistEnabled))
                             {
-                                // BEHIND zone (only when moving backwards)
+                                // BEHIND zone (when moving backwards OR drive assist needs spatial awareness)
                                 if (dist < distBehind) { distBehind = dist; typeBehind = "ped"; nameBehind = "Pedestrian"; }
                             }
                             else if (dotForward > -0.2f) // Not behind us
                             {
                                 if (dotRight < -0.3f && dist < distLeft)
                                 {
-                                    distLeft = dist; typeLeft = "ped"; nameLeft = "Pedestrian";
+                                    distLeft = dist; typeLeft = "ped"; nameLeft = "Pedestrian"; pedLeft = ped; vehLeft = null;
                                 }
                                 else if (dotRight > 0.3f && dist < distRight)
                                 {
-                                    distRight = dist; typeRight = "ped"; nameRight = "Pedestrian";
+                                    distRight = dist; typeRight = "ped"; nameRight = "Pedestrian"; pedRight = ped; vehRight = null;
                                 }
                             }
                         }
@@ -1292,22 +1611,22 @@ namespace GrandTheftAccessibility
 
                             if (dotForward > 0.5f)
                             {
-                                if (dist < distCenter) { distCenter = dist; typeCenter = "vehicle"; nameCenter = veh.LocalizedName; }
+                                if (dist < distCenter) { distCenter = dist; typeCenter = "vehicle"; nameCenter = veh.LocalizedName; vehCenter = veh; pedCenter = null; }
                             }
-                            else if (dotForward < -0.5f && isMovingBackwards)
+                            else if (dotForward < -0.5f && (isMovingBackwards || driveAssistEnabled))
                             {
-                                // BEHIND zone (only when moving backwards)
-                                if (dist < distBehind) { distBehind = dist; typeBehind = "vehicle"; nameBehind = veh.LocalizedName; }
+                                // BEHIND zone (when moving backwards OR drive assist needs spatial awareness)
+                                if (dist < distBehind) { distBehind = dist; typeBehind = "vehicle"; nameBehind = veh.LocalizedName; vehBehind = veh; }
                             }
                             else if (dotForward > -0.2f)
                             {
                                 if (dotRight < -0.3f && dist < distLeft)
                                 {
-                                    distLeft = dist; typeLeft = "vehicle"; nameLeft = veh.LocalizedName;
+                                    distLeft = dist; typeLeft = "vehicle"; nameLeft = veh.LocalizedName; vehLeft = veh; pedLeft = null;
                                 }
                                 else if (dotRight > 0.3f && dist < distRight)
                                 {
-                                    distRight = dist; typeRight = "vehicle"; nameRight = veh.LocalizedName;
+                                    distRight = dist; typeRight = "vehicle"; nameRight = veh.LocalizedName; vehRight = veh; pedRight = null;
                                 }
                             }
                         }
@@ -1424,8 +1743,9 @@ namespace GrandTheftAccessibility
                             }
                         }
 
-                        // Behind ray (only when moving backwards)
-                        if (isMovingBackwards)
+                        // Behind ray - active when moving backwards OR when drive assist is enabled (for spatial awareness)
+                        // Drive assist uses rear detection for handbrake turns and angle correction
+                        if (isMovingBackwards || driveAssistEnabled)
                         {
                             GTA.Math.Vector3 behindDir = new GTA.Math.Vector3(-forwardVec.X, -forwardVec.Y, 0);
 
@@ -1512,10 +1832,12 @@ namespace GrandTheftAccessibility
                         // PLAY BEEPS WITH STEREO PANNING
                         // Different waveforms for different entity types
                         // Frequency based on distance (closer = higher pitch)
+                        // Only play beeps if navAssistBeeps setting is enabled
                         // ============================================
+                        bool playBeeps = getSetting("navAssistBeeps") == 1;
 
                         // LEFT beep (panned left)
-                        if (beepLeft)
+                        if (beepLeft && playBeeps)
                         {
                             float normDist = Math.Max(0f, distLeft) / maxRange;
                             outNavLeft.Stop();
@@ -1530,7 +1852,7 @@ namespace GrandTheftAccessibility
                         }
 
                         // CENTER beep (both speakers)
-                        if (beepCenter)
+                        if (beepCenter && playBeeps)
                         {
                             float normDist = Math.Max(0f, distCenter) / maxRange;
                             outNavCenter.Stop();
@@ -1545,7 +1867,7 @@ namespace GrandTheftAccessibility
                         }
 
                         // RIGHT beep (panned right)
-                        if (beepRight)
+                        if (beepRight && playBeeps)
                         {
                             float normDist = Math.Max(0f, distRight) / maxRange;
                             outNavRight.Stop();
@@ -1560,7 +1882,7 @@ namespace GrandTheftAccessibility
                         }
 
                         // BEHIND beep (center pan, one octave lower frequency)
-                        if (beepBehind)
+                        if (beepBehind && playBeeps)
                         {
                             float normDist = Math.Max(0f, distBehind) / maxRange;
                             outNavBehind.Stop();
@@ -1574,6 +1896,25 @@ namespace GrandTheftAccessibility
                             outNavBehind.Init(behindPanned);
                             outNavBehind.Play();
                         }
+
+                        // Store nav assist distances for drive assist integration
+                        navAssistDistLeft = distLeft;
+                        navAssistDistCenter = distCenter;
+                        navAssistDistRight = distRight;
+                        navAssistDistBehind = distBehind;
+                        navAssistTypeLeft = typeLeft;
+                        navAssistTypeCenter = typeCenter;
+                        navAssistTypeRight = typeRight;
+                        navAssistTypeBehind = typeBehind;
+
+                        // Store entity references for drive assist to use actual velocities
+                        navAssistVehicleLeft = vehLeft;
+                        navAssistVehicleCenter = vehCenter;
+                        navAssistVehicleRight = vehRight;
+                        navAssistVehicleBehind = vehBehind;
+                        navAssistPedLeft = pedLeft;
+                        navAssistPedCenter = pedCenter;
+                        navAssistPedRight = pedRight;
                     }
                 }
 
@@ -2982,6 +3323,135 @@ namespace GrandTheftAccessibility
                         lastAnnouncedServiceBlip = -1;
                     }
                 }
+
+                // ============================================
+                // PAUSE MENU ACCESSIBILITY
+                // Using proper natives for menu state detection
+                // ============================================
+                // Check every tick for menu changes (not throttled - selection changes are one-frame events)
+                {
+                    // GET_PAUSE_MENU_STATE: 0=closed, 1=opening, 2=open, 3=closing
+                    int menuState = Function.Call<int>(Hash.GET_PAUSE_MENU_STATE);
+
+                    // Also check IS_PAUSE_MENU_ACTIVE as fallback
+                    bool isPauseMenuActive = Function.Call<bool>(Hash.IS_PAUSE_MENU_ACTIVE);
+
+                    // Log menu state changes for debugging
+                    if (menuState != lastLoggedMenuState)
+                    {
+                        OcrLog($"Menu state changed: {lastLoggedMenuState} -> {menuState}, IS_PAUSE_MENU_ACTIVE={isPauseMenuActive}");
+                        lastLoggedMenuState = menuState;
+                    }
+
+                    // Use IS_PAUSE_MENU_ACTIVE as primary check since GET_PAUSE_MENU_STATE might not work
+                    bool pauseMenuActive = isPauseMenuActive;
+
+                    if (pauseMenuActive && !wasPauseMenuActive)
+                    {
+                        // Pause menu just opened
+                        OcrLog("Pause menu opened - announcing");
+                        Tolk.Speak("Pause menu", true);
+                        lastPauseMenuSelection = -1;
+                        lastPauseMenuTab = -1;
+                    }
+                    else if (!pauseMenuActive && wasPauseMenuActive)
+                    {
+                        // Pause menu closed
+                        OcrLog("Pause menu closed - announcing");
+                        Tolk.Speak("Menu closed", true);
+                    }
+                    // NOTE: Pause menu item reading was attempted via native plugin but GTA V does not
+                    // expose menu text through any known natives - only numerical IDs are available.
+                    // This feature has been shelved until a viable approach is found.
+
+                    wasPauseMenuActive = pauseMenuActive;
+                }
+
+                // ============================================
+                // PHONE ACCESSIBILITY
+                // Using multiple methods to detect phone visibility
+                // ============================================
+                {
+                    // Method 1: GET_MOBILE_PHONE_RENDER_ID
+                    OutputArgument outRenderId = new OutputArgument();
+                    Function.Call(Hash.GET_MOBILE_PHONE_RENDER_ID, outRenderId);
+                    int phoneRenderId = outRenderId.GetResult<int>();
+
+                    // Method 2: CAN_PHONE_BE_SEEN_ON_SCREEN (unreliable but log it)
+                    bool canPhoneBeSeen = Function.Call<bool>(Hash.CAN_PHONE_BE_SEEN_ON_SCREEN);
+
+                    // Method 3: Check if player is in phone animation/state
+                    bool isPhoneCallOngoing = Function.Call<bool>((Hash)0x7497D2CE2C30D24C); // IS_MOBILE_PHONE_CALL_ONGOING
+
+                    // Log phone state changes
+                    if (phoneRenderId != lastLoggedPhoneRenderId || canPhoneBeSeen != lastLoggedCanPhoneBeSeen)
+                    {
+                        OcrLog($"Phone state: renderId={phoneRenderId}, canBeSeen={canPhoneBeSeen}, callOngoing={isPhoneCallOngoing}");
+                        lastLoggedPhoneRenderId = phoneRenderId;
+                        lastLoggedCanPhoneBeSeen = canPhoneBeSeen;
+                    }
+
+                    // Phone is visible if render ID is non-zero
+                    bool phoneVisible = phoneRenderId > 0;
+
+                    if (phoneVisible && !wasPhoneOut)
+                    {
+                        // Phone just became visible
+                        OcrLog("Phone opened - announcing");
+                        Tolk.Speak("Phone", true);
+                        lastOcrText = "";
+                        // Trigger OCR to read initial phone state
+                        TriggerPhoneOcr();
+                    }
+                    else if (!phoneVisible && wasPhoneOut)
+                    {
+                        // Phone was put away
+                        Tolk.Speak("Phone closed", true);
+                        lastOcrText = "";
+                    }
+                    else if (phoneVisible)
+                    {
+                        // Phone is open - periodically check for changes via OCR
+                        // Throttle to every 500ms
+                        if (DateTime.Now.Ticks - phoneCheckTicks > 5000000)
+                        {
+                            phoneCheckTicks = DateTime.Now.Ticks;
+                            TriggerPhoneOcr();
+                        }
+                    }
+
+                    wasPhoneOut = phoneVisible;
+                }
+            }
+
+            // ============================================
+            // PAUSE MENU DETECTION - OUTSIDE Game.IsLoading CHECK
+            // ScriptHookVDotNet scripts still run during pause menu
+            // but the above code is inside if(!Game.IsLoading)
+            // ============================================
+            // This runs every tick regardless of loading state
+            {
+                int menuState = Function.Call<int>(Hash.GET_PAUSE_MENU_STATE);
+                bool isPauseMenuActive = Function.Call<bool>(Hash.IS_PAUSE_MENU_ACTIVE);
+
+                // Log every state change
+                if (menuState != lastLoggedMenuState)
+                {
+                    OcrLog($"[OUTSIDE] Menu state: {menuState}, IS_PAUSE_MENU_ACTIVE={isPauseMenuActive}");
+                    lastLoggedMenuState = menuState;
+
+                    // Announce based on state
+                    if (isPauseMenuActive && !wasPauseMenuActive)
+                    {
+                        Tolk.Speak("Pause menu", true);
+                    }
+                    else if (!isPauseMenuActive && wasPauseMenuActive)
+                    {
+                        Tolk.Speak("Menu closed", true);
+                    }
+
+                    wasPauseMenuActive = isPauseMenuActive;
+                }
             }
         }
 
@@ -3027,6 +3497,21 @@ namespace GrandTheftAccessibility
                 }
             }
 
+            // Manual OCR trigger - Ctrl+NumPad0
+            // Works regardless of keys_disabled state to always allow screen reading
+            // Also works in pause menu and phone menus
+            if (e.KeyCode == Keys.NumPad0 && shifting && !keyState[19])
+            {
+                keyState[19] = true;
+                // Suppress the key event so it doesn't pass to the game
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+                // Disable frontend controls for this frame to prevent menu interaction
+                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 201, true); // INPUT_FRONTEND_ACCEPT
+                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 202, true); // INPUT_FRONTEND_CANCEL
+                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 217, true); // INPUT_FRONTEND_SELECT
+                TriggerManualOcr();
+            }
 
             if (!keys_disabled)
             {
@@ -3579,6 +4064,22 @@ namespace GrandTheftAccessibility
                         }
                     }
 
+                    // Auto-Drive menu - NumPad2 stops autodrive (when driving)
+                    if (mainMenuIndex == 3)
+                    {
+                        if (isAutodriving)
+                        {
+                            isAutodriving = false;
+                            autodriveWanderMode = false;
+                            Game.Player.Character.Task.ClearAll();
+                            Tolk.Speak("Auto-drive stopped. You have control.");
+                        }
+                        else
+                        {
+                            Tolk.Speak("Auto-drive not running. Use NumPad Multiply to start.");
+                        }
+                    }
+
                     if (mainMenuIndex == 1)
                     {
                         Vehicle vehicle = World.CreateVehicle(spawns[spawnMenuIndex].id, Game.Player.Character.Position + Game.Player.Character.ForwardVector * 2.0f, Game.Player.Character.Heading + 90);
@@ -3704,20 +4205,15 @@ namespace GrandTheftAccessibility
                     // Auto-Drive menu (mainMenuIndex == 3)
                     if (mainMenuIndex == 3)
                     {
-                        // If already auto-driving, cancel it
+                        // Toggle the current flag (works while driving)
+                        autodriveFlags[autodriveFlagMenuIndex] = !autodriveFlags[autodriveFlagMenuIndex];
+                        string flagState = autodriveFlags[autodriveFlagMenuIndex] ? "ON" : "OFF";
+                        Tolk.Speak(autodriveFlagNames[autodriveFlagMenuIndex] + ", " + flagState);
+
+                        // If currently autodriving, restart the task with new flags
                         if (isAutodriving)
                         {
-                            isAutodriving = false;
-                            autodriveWanderMode = false;
-                            Game.Player.Character.Task.ClearAll();
-                            Tolk.Speak("Auto-drive cancelled. You have control.");
-                        }
-                        // Otherwise, TOGGLE the current flag
-                        else
-                        {
-                            autodriveFlags[autodriveFlagMenuIndex] = !autodriveFlags[autodriveFlagMenuIndex];
-                            string flagState = autodriveFlags[autodriveFlagMenuIndex] ? "ON" : "OFF";
-                            Tolk.Speak(autodriveFlagNames[autodriveFlagMenuIndex] + ", " + flagState);
+                            UpdateAutodriveSpeed(); // This also updates flags
                         }
                     }
 
@@ -3834,23 +4330,16 @@ namespace GrandTheftAccessibility
                         }
                     }
 
-                    // Auto-Drive menu navigation (cycle through 32 flags)
+                    // Auto-Drive menu navigation (cycle through 32 flags) - works while driving
                     if (mainMenuIndex == 3)
                     {
-                        if (!isAutodriving)
-                        {
-                            if (autodriveFlagMenuIndex > 0)
-                                autodriveFlagMenuIndex--;
-                            else
-                                autodriveFlagMenuIndex = 31; // Wrap to end
-
-                            string flagState = autodriveFlags[autodriveFlagMenuIndex] ? "ON" : "OFF";
-                            Tolk.Speak((autodriveFlagMenuIndex + 1) + ". " + autodriveFlagNames[autodriveFlagMenuIndex] + ", " + flagState);
-                        }
+                        if (autodriveFlagMenuIndex > 0)
+                            autodriveFlagMenuIndex--;
                         else
-                        {
-                            Tolk.Speak("Stop auto-driving first with NumPad 2");
-                        }
+                            autodriveFlagMenuIndex = 31; // Wrap to end
+
+                        string flagState = autodriveFlags[autodriveFlagMenuIndex] ? "ON" : "OFF";
+                        Tolk.Speak((autodriveFlagMenuIndex + 1) + ". " + autodriveFlagNames[autodriveFlagMenuIndex] + ", " + flagState);
                     }
 
                     if (mainMenuIndex == 4)
@@ -3943,22 +4432,16 @@ namespace GrandTheftAccessibility
                     }
 
                     // Auto-Drive menu navigation (cycle through 32 flags)
+                    // Auto-Drive menu navigation - works while driving
                     if (mainMenuIndex == 3)
                     {
-                        if (!isAutodriving)
-                        {
-                            if (autodriveFlagMenuIndex < 31)
-                                autodriveFlagMenuIndex++;
-                            else
-                                autodriveFlagMenuIndex = 0; // Wrap to start
-
-                            string flagState = autodriveFlags[autodriveFlagMenuIndex] ? "ON" : "OFF";
-                            Tolk.Speak((autodriveFlagMenuIndex + 1) + ". " + autodriveFlagNames[autodriveFlagMenuIndex] + ", " + flagState);
-                        }
+                        if (autodriveFlagMenuIndex < 31)
+                            autodriveFlagMenuIndex++;
                         else
-                        {
-                            Tolk.Speak("Stop auto-driving first with NumPad 2");
-                        }
+                            autodriveFlagMenuIndex = 0; // Wrap to start
+
+                        string flagState = autodriveFlags[autodriveFlagMenuIndex] ? "ON" : "OFF";
+                        Tolk.Speak((autodriveFlagMenuIndex + 1) + ". " + autodriveFlagNames[autodriveFlagMenuIndex] + ", " + flagState);
                     }
 
                     if (mainMenuIndex == 4)
@@ -4016,27 +4499,46 @@ namespace GrandTheftAccessibility
                 // ============================================
                 // AUTO-DRIVE SPEED CONTROL (Arrow Keys)
                 // Left arrow = decrease speed, Right arrow = increase speed
-                // Only active in Auto-Drive menu when not driving
+                // Only active in Auto-Drive menu (works while driving too)
+                // Speed granularity: 5 mph increments
                 // ============================================
                 if (e.KeyCode == Keys.Left && !keyState[13])
                 {
                     keyState[13] = true;
-                    if (mainMenuIndex == 3 && !isAutodriving)
+                    if (mainMenuIndex == 3)
                     {
-                        autodriveSpeed = Math.Max(5f, autodriveSpeed - 5f);
-                        int speedMph = (int)Math.Round(autodriveSpeed * 2.237);
-                        Tolk.Speak("Speed: " + speedMph + " mph");
+                        // Convert current m/s to mph, round to nearest 5, subtract 5, convert back
+                        int currentMph = (int)Math.Round(autodriveSpeed * 2.23694);
+                        int snappedMph = ((int)Math.Round(currentMph / 5.0)) * 5;
+                        int newMph = Math.Max(5, snappedMph - 5);
+                        autodriveSpeed = (float)(newMph / 2.23694);
+                        Tolk.Speak("Speed: " + newMph + " mph");
+
+                        // If currently autodriving, update the task speed
+                        if (isAutodriving)
+                        {
+                            UpdateAutodriveSpeed();
+                        }
                     }
                 }
 
                 if (e.KeyCode == Keys.Right && !keyState[14])
                 {
                     keyState[14] = true;
-                    if (mainMenuIndex == 3 && !isAutodriving)
+                    if (mainMenuIndex == 3)
                     {
-                        autodriveSpeed = Math.Min(100f, autodriveSpeed + 5f);
-                        int speedMph = (int)Math.Round(autodriveSpeed * 2.237);
-                        Tolk.Speak("Speed: " + speedMph + " mph");
+                        // Convert current m/s to mph, round to nearest 5, add 5, convert back
+                        int currentMph = (int)Math.Round(autodriveSpeed * 2.23694);
+                        int snappedMph = ((int)Math.Round(currentMph / 5.0)) * 5;
+                        int newMph = Math.Min(225, snappedMph + 5);
+                        autodriveSpeed = (float)(newMph / 2.23694);
+                        Tolk.Speak("Speed: " + newMph + " mph");
+
+                        // If currently autodriving, update the task speed
+                        if (isAutodriving)
+                        {
+                            UpdateAutodriveSpeed();
+                        }
                     }
                 }
 
@@ -4103,8 +4605,9 @@ namespace GrandTheftAccessibility
                             autodriveWanderMode = false;
                             autodriveCheckTicks = DateTime.Now.Ticks;
 
-                            int speedMph = (int)Math.Round(autodriveSpeed * 2.237);
-                            Tolk.Speak("Auto-driving to waypoint at " + speedMph + " mph. " + (int)autodriveStartDistance + " meters.");
+                            int speedMph = (int)Math.Round(autodriveSpeed * 2.23694);
+                            string steerAssistMsg = getSetting("steeringAssist") > 0 ? " Steering assist disabled." : "";
+                            Tolk.Speak("Auto-driving to waypoint at " + speedMph + " mph. " + (int)autodriveStartDistance + " meters." + steerAssistMsg);
                         }
                         else
                         {
@@ -4120,8 +4623,9 @@ namespace GrandTheftAccessibility
                                 autodriveWanderMode = true;
                                 autodriveCheckTicks = DateTime.Now.Ticks;
 
-                                int speedMph = (int)Math.Round(autodriveSpeed * 2.237);
-                                Tolk.Speak("Wandering at " + speedMph + " mph.");
+                                int speedMph = (int)Math.Round(autodriveSpeed * 2.23694);
+                                string steerAssistMsg = getSetting("steeringAssist") > 0 ? " Steering assist disabled." : "";
+                                Tolk.Speak("Wandering at " + speedMph + " mph." + steerAssistMsg);
                             }
                             catch (Exception ex)
                             {
@@ -4172,6 +4676,8 @@ namespace GrandTheftAccessibility
                 keyState[14] = false;
             if (e.KeyCode == Keys.Multiply && keyState[15])
                 keyState[15] = false;
+            if (e.KeyCode == Keys.NumPad0 && keyState[19])
+                keyState[19] = false;
 
 
         }
@@ -4409,7 +4915,7 @@ namespace GrandTheftAccessibility
                 {
                     // Show current flag and state, plus speed
                     string flagState = autodriveFlags[autodriveFlagMenuIndex] ? "ON" : "OFF";
-                    int speedMph = (int)Math.Round(autodriveSpeed * 2.237); // Convert m/s to mph
+                    int speedMph = (int)Math.Round(autodriveSpeed * 2.23694); // Convert m/s to mph
                     result = result + "Flag " + (autodriveFlagMenuIndex + 1) + " of 32: " + autodriveFlagNames[autodriveFlagMenuIndex] + ", " + flagState + ". Speed: " + speedMph + " mph. NumPad Multiply to start. Arrows to adjust speed. Drives to waypoint if set, otherwise wanders.";
                 }
             }
@@ -4444,7 +4950,7 @@ namespace GrandTheftAccessibility
         {
             Dictionary<string, int> dictionary = new Dictionary<string, int>();
             string json;
-            string[] ids = { "announceHeadings", "announceZones", "announceTime", "altitudeIndicator", "targetPitchIndicator", "navigationAssist", "pickupDetection", "coverDetection", "waterHazardDetection", "vehicleHealthFeedback", "staminaFeedback", "interactableDetection", "trafficAwareness", "wantedLevelDetails", "slopeTerrainFeedback", "turnByTurnNavigation", "detectionRadius", "radioOff", "warpInsideVehicle", "onscreen", "speed", "godMode", "policeIgnore", "vehicleGodMode", "infiniteAmmo", "neverWanted", "superJump", "runFaster", "swimFaster", "exsplosiveAmmo", "fireAmmo", "explosiveMelee", "aimAutolock", "steeringAssist", "shapeCasting" };
+            string[] ids = { "announceHeadings", "announceZones", "announceTime", "altitudeIndicator", "targetPitchIndicator", "navigationAssist", "navAssistBeeps", "pickupDetection", "coverDetection", "waterHazardDetection", "vehicleHealthFeedback", "staminaFeedback", "interactableDetection", "trafficAwareness", "wantedLevelDetails", "slopeTerrainFeedback", "turnByTurnNavigation", "detectionRadius", "radioOff", "warpInsideVehicle", "onscreen", "speed", "godMode", "policeIgnore", "vehicleGodMode", "infiniteAmmo", "neverWanted", "superJump", "runFaster", "swimFaster", "exsplosiveAmmo", "fireAmmo", "explosiveMelee", "aimAutolock", "steeringAssist", "shapeCasting", "roadTeleport", "waypointDriveAssist" };
             System.IO.StreamWriter fileOut;
 
             if (!System.IO.Directory.Exists(@Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments) + "/Rockstar Games/GTA V/ModSettings"))
@@ -4456,7 +4962,7 @@ namespace GrandTheftAccessibility
 
                 foreach (string i in ids)
                 {
-                    if (i == "announceHeadings" || i == "announceZones" || i == "altitudeIndicator" || i == "announceTime" || i == "turnByTurnNavigation")
+                    if (i == "announceHeadings" || i == "announceZones" || i == "altitudeIndicator" || i == "announceTime" || i == "turnByTurnNavigation" || i == "navAssistBeeps")
                     {
                         dictionary.Add(i, 1);
                     }
@@ -4500,7 +5006,7 @@ namespace GrandTheftAccessibility
                     }
                     else
                     {
-                        if (i == "announceHeadings" || i == "announceZones" || i == "altitudeIndicator" || i == "announceTime" || i == "targetPitchIndicator" || i == "speed" || i == "turnByTurnNavigation")
+                        if (i == "announceHeadings" || i == "announceZones" || i == "altitudeIndicator" || i == "announceTime" || i == "targetPitchIndicator" || i == "speed" || i == "turnByTurnNavigation" || i == "navAssistBeeps")
                         {
                             settingsMenu.Add(new Setting(i, idToName(i), 1));
                         }
@@ -4681,7 +5187,122 @@ namespace GrandTheftAccessibility
         }
 
         /// <summary>
+        /// Gets the position of a specific part index for visibility checking
+        /// </summary>
+        private GTA.Math.Vector3 GetPartPositionByIndex(int partIndex)
+        {
+            if (autolockTarget == null) return GTA.Math.Vector3.Zero;
+
+            try
+            {
+                if (autolockTarget.EntityType == EntityType.Ped)
+                {
+                    Ped ped = (Ped)autolockTarget;
+                    int boneId = PED_TARGET_PARTS[partIndex].boneId;
+                    GTA.Math.Vector3 bonePos = Function.Call<GTA.Math.Vector3>(
+                        Hash.GET_PED_BONE_COORDS, ped, boneId, 0f, 0f, 0f);
+                    return bonePos != GTA.Math.Vector3.Zero ? bonePos : ped.Position;
+                }
+                else if (autolockTarget.EntityType == EntityType.Vehicle)
+                {
+                    Vehicle vehicle = (Vehicle)autolockTarget;
+                    string boneName = VEHICLE_TARGET_PARTS[partIndex].bone;
+                    int boneIndex = Function.Call<int>(Hash.GET_ENTITY_BONE_INDEX_BY_NAME, vehicle, boneName);
+
+                    if (boneIndex != -1)
+                    {
+                        GTA.Math.Vector3 bonePos = Function.Call<GTA.Math.Vector3>(
+                            Hash.GET_WORLD_POSITION_OF_ENTITY_BONE, vehicle, boneIndex);
+                        if (bonePos != GTA.Math.Vector3.Zero) return bonePos;
+                    }
+                    return vehicle.Position;
+                }
+            }
+            catch { }
+
+            return autolockTarget.Position;
+        }
+
+        /// <summary>
+        /// Checks if a specific target part is visible from the player's position using raycast
+        /// Returns true if there's a clear line of sight to the part
+        /// </summary>
+        private bool IsPartVisible(int partIndex)
+        {
+            if (autolockTarget == null) return false;
+
+            GTA.Math.Vector3 partPos = GetPartPositionByIndex(partIndex);
+            if (partPos == GTA.Math.Vector3.Zero) return false;
+
+            // Use camera position as origin (where bullets come from when aiming)
+            GTA.Math.Vector3 camPos = GTA.GameplayCamera.Position;
+
+            // Perform raycast from camera to target part
+            // Flags: 1 = map, 2 = vehicles, 4 = peds, 8 = objects, 16 = plants
+            // We want to check for vehicle/world blocking the view
+            // Use IntersectWorld flag (1) to detect if part is on the other side of the vehicle
+            RaycastResult ray = World.Raycast(camPos, partPos, IntersectFlags.Map | IntersectFlags.Vehicles, Game.Player.Character);
+
+            if (ray.DidHit)
+            {
+                // Check if the ray hit the target entity itself or something blocking it
+                if (ray.HitEntity != null && ray.HitEntity == autolockTarget)
+                {
+                    // Hit the target - check if we hit close to the part we're aiming at
+                    float hitDistance = camPos.DistanceTo(ray.HitPosition);
+                    float partDistance = camPos.DistanceTo(partPos);
+
+                    // If the hit position is close to the part position, part is visible
+                    // Allow some tolerance (2 meters) since bones might not be on the surface
+                    if (ray.HitPosition.DistanceTo(partPos) < 2.5f)
+                    {
+                        return true;
+                    }
+
+                    // If we hit the target but not near the part, the part is on the other side
+                    // (e.g., trying to hit left wheel from right side - ray hits the right side first)
+                    return false;
+                }
+                else
+                {
+                    // Hit something else blocking the view (world geometry, another vehicle)
+                    return false;
+                }
+            }
+
+            // No hit means clear line of sight (shouldn't happen often)
+            return true;
+        }
+
+        /// <summary>
+        /// Finds the next visible part index, skipping non-visible parts
+        /// Returns -1 if no visible parts found
+        /// </summary>
+        private int FindNextVisiblePart(int startIndex, int direction)
+        {
+            if (autolockTarget == null) return -1;
+
+            int maxParts = autolockTarget.EntityType == EntityType.Ped
+                ? PED_TARGET_PARTS.Length
+                : VEHICLE_TARGET_PARTS.Length;
+
+            // Try each part starting from the given index
+            for (int i = 0; i < maxParts; i++)
+            {
+                int checkIndex = (startIndex + (direction * i) + maxParts) % maxParts;
+                if (IsPartVisible(checkIndex))
+                {
+                    return checkIndex;
+                }
+            }
+
+            // No visible parts found - fallback to center/torso (index 0 for vehicles, 1 for peds)
+            return autolockTarget.EntityType == EntityType.Ped ? 1 : 0;
+        }
+
+        /// <summary>
         /// Handles right stick input for cycling through target parts
+        /// Skips parts that are not visible from the player's position (e.g., gas tank on opposite side)
         /// </summary>
         private void HandlePartCycling()
         {
@@ -4697,11 +5318,13 @@ namespace GrandTheftAccessibility
                 : VEHICLE_TARGET_PARTS.Length;
 
             bool changed = false;
+            int direction = 0;
+            int originalIndex = autolockPartIndex;
 
             if (rightStickX < -0.5f && !autolockPartCycleLeft)
             {
                 autolockPartCycleLeft = true;
-                autolockPartIndex = (autolockPartIndex - 1 + maxParts) % maxParts;
+                direction = -1;
                 changed = true;
             }
             else if (rightStickX >= -0.5f)
@@ -4712,7 +5335,7 @@ namespace GrandTheftAccessibility
             if (rightStickX > 0.5f && !autolockPartCycleRight)
             {
                 autolockPartCycleRight = true;
-                autolockPartIndex = (autolockPartIndex + 1) % maxParts;
+                direction = 1;
                 changed = true;
             }
             else if (rightStickX <= 0.5f)
@@ -4720,9 +5343,41 @@ namespace GrandTheftAccessibility
                 autolockPartCycleRight = false;
             }
 
-            if (changed)
+            if (changed && direction != 0)
             {
                 autolockPartCycleTicks = DateTime.Now.Ticks;
+
+                // Find the next visible part in the given direction
+                // Start from the next part in that direction
+                int startIndex = (autolockPartIndex + direction + maxParts) % maxParts;
+                int foundIndex = -1;
+
+                // Search through all parts to find the next visible one
+                for (int i = 0; i < maxParts; i++)
+                {
+                    int checkIndex = (startIndex + (direction * i) + maxParts) % maxParts;
+                    if (IsPartVisible(checkIndex))
+                    {
+                        foundIndex = checkIndex;
+                        break;
+                    }
+                }
+
+                // If no visible part found, stay on current or fallback to center
+                if (foundIndex == -1)
+                {
+                    // Play a lower "blocked" beep to indicate no other parts visible
+                    outPartCycle.Stop();
+                    partCycleBeep.Frequency = 300;
+                    var blockedSample = partCycleBeep.Take(TimeSpan.FromSeconds(0.1));
+                    outPartCycle.Init(blockedSample);
+                    outPartCycle.Play();
+                    Tolk.Speak("No other visible parts", true);
+                    return;
+                }
+
+                // Update to the new visible part
+                autolockPartIndex = foundIndex;
 
                 outPartCycle.Stop();
                 partCycleBeep.Frequency = 600 + (autolockPartIndex * 80);
@@ -4751,11 +5406,77 @@ namespace GrandTheftAccessibility
             GTA.Math.Vector3 rightVec = playerVeh.RightVector;
             float vehicleSpeed = playerVeh.Speed;
 
+            // ============================================
+            // VEHICLE TYPE CHECK - Skip aircraft and boats
+            // Drive assist only makes sense for land vehicles
+            // ============================================
+            if (playerVeh.IsAircraft || playerVeh.IsBoat)
+            {
+                steeringAssistActive = false;
+                return;
+            }
+
+            // ============================================
+            // REVERSE DRIVING DETECTION
+            // Check if player is driving backwards based on velocity vs forward vector
+            // ============================================
+            GTA.Math.Vector3 velocity = playerVeh.Velocity;
+            if (velocity.Length() > 1f)
+            {
+                float dotVelForward = GTA.Math.Vector3.Dot(GTA.Math.Vector3.Normalize(velocity), forwardVec);
+                isReversing = dotVelForward < -0.3f; // Moving backward if velocity opposes forward vector
+            }
+            else
+            {
+                isReversing = false;
+            }
+
+            // ============================================
+            // HILL/INCLINE COMPENSATION
+            // Use a flattened forward vector for ground-based calculations
+            // ============================================
+            GTA.Math.Vector3 flatForward = new GTA.Math.Vector3(forwardVec.X, forwardVec.Y, 0);
+            if (flatForward.Length() > 0.1f)
+            {
+                flatForward = GTA.Math.Vector3.Normalize(flatForward);
+            }
+            else
+            {
+                flatForward = forwardVec; // Fallback if nearly vertical (unlikely for cars)
+            }
+
+            // ============================================
+            // WAYPOINT-AWARE DRIVE ASSIST
+            // Updates cached waypoint direction for road node preference
+            // Uses both waypoint and mission blip positions
+            // ============================================
+            if (getSetting("waypointDriveAssist") == 1)
+            {
+                // Update waypoint info periodically (every 500ms)
+                if (DateTime.Now.Ticks - waypointUpdateTicks > 5000000)
+                {
+                    waypointUpdateTicks = DateTime.Now.Ticks;
+                    UpdateWaypointDirection(playerPos);
+                }
+            }
+            else
+            {
+                hasActiveWaypoint = false;
+            }
+
             // Detection range scales with speed (10m to 40m)
             float speedFactor = Math.Min(vehicleSpeed / 30f, 1f);
             float detectionRange = 10f + (speedFactor * 30f);
 
-            float closestTTC = float.MaxValue;
+            // ============================================
+            // SEPARATED THREAT DETECTION:
+            // - steerTTC: Used for steering avoidance (includes front AND side threats)
+            // - brakeTTC: Used ONLY for braking (ONLY front/ahead threats)
+            // This prevents side obstacles from triggering braking, which was limiting speed
+            // ============================================
+            float closestSteerTTC = float.MaxValue;  // For steering decisions (all directions)
+            float closestBrakeTTC = float.MaxValue;  // For braking decisions (ONLY ahead)
+            float closestBrakeDistance = float.MaxValue; // Distance to closest brake threat
             string closestDir = "none";
             string closestType = "none";
             int avoidDirection = 0;
@@ -4766,12 +5487,23 @@ namespace GrandTheftAccessibility
             {
                 if (ped == Game.Player.Character || ped.IsDead) continue;
                 float ttc = CalculateTTC(playerVeh, ped.Position, ped.Velocity);
-                if (ttc < closestTTC)
+                string dir = GetThreatDirection(playerVeh, ped.Position);
+                float dist = World.GetDistance(playerPos, ped.Position);
+
+                // Update steering TTC (all directions)
+                if (ttc < closestSteerTTC)
                 {
-                    closestTTC = ttc;
+                    closestSteerTTC = ttc;
                     closestType = "pedestrian";
-                    closestDir = GetThreatDirection(playerVeh, ped.Position);
+                    closestDir = dir;
                     avoidDirection = GetAvoidDirection(playerVeh, ped.Position);
+                }
+
+                // Update braking TTC ONLY for threats ahead (not to the side)
+                if (dir == "ahead" && ttc < closestBrakeTTC)
+                {
+                    closestBrakeTTC = ttc;
+                    closestBrakeDistance = dist;
                 }
             }
 
@@ -4781,77 +5513,457 @@ namespace GrandTheftAccessibility
             {
                 if (veh == playerVeh) continue;
                 float ttc = CalculateTTC(playerVeh, veh.Position, veh.Velocity);
-                if (ttc < closestTTC)
+                string dir = GetThreatDirection(playerVeh, veh.Position);
+                float dist = World.GetDistance(playerPos, veh.Position);
+
+                // Update steering TTC (all directions)
+                if (ttc < closestSteerTTC)
                 {
-                    closestTTC = ttc;
+                    closestSteerTTC = ttc;
                     closestType = "vehicle";
-                    closestDir = GetThreatDirection(playerVeh, veh.Position);
+                    closestDir = dir;
                     avoidDirection = GetAvoidDirection(playerVeh, veh.Position);
+                }
+
+                // Update braking TTC ONLY for threats ahead
+                if (dir == "ahead" && ttc < closestBrakeTTC)
+                {
+                    closestBrakeTTC = ttc;
+                    closestBrakeDistance = dist;
                 }
             }
 
-            // Raycast for world geometry
+            // ============================================
+            // MULTI-RAYCAST FOR WORLD GEOMETRY
+            // Uses flattened forward vector for hill compensation
+            // Multiple rays provide better coverage for obstacles
+            // Direction depends on whether we're reversing
+            // ============================================
             GTA.Math.Vector3 startPos = playerPos + new GTA.Math.Vector3(0, 0, 0.5f);
             float rayRange = Math.Min(detectionRange, vehicleSpeed * 2.5f);
 
-            RaycastResult rayCenter = World.Raycast(startPos, startPos + (forwardVec * rayRange),
-                IntersectFlags.Map | IntersectFlags.Objects, playerVeh);
-            if (rayCenter.DidHit)
+            // Use the direction we're actually traveling
+            GTA.Math.Vector3 travelDir = isReversing ? -flatForward : flatForward;
+            GTA.Math.Vector3 travelRight = isReversing ? -rightVec : rightVec;
+
+            // Cast multiple rays: center, slight left, slight right (for better obstacle coverage)
+            float[] rayOffsets = { 0f, -0.3f, 0.3f }; // Center, left 17°, right 17°
+            float closestRayDist = float.MaxValue;
+            int bestAvoidDir = 0;
+
+            foreach (float offset in rayOffsets)
             {
-                float dist = World.GetDistance(startPos, rayCenter.HitPosition);
-                float ttc = dist / Math.Max(vehicleSpeed, 1f);
-                if (ttc < closestTTC)
+                GTA.Math.Vector3 rayDir = GTA.Math.Vector3.Normalize(travelDir + travelRight * offset);
+                RaycastResult ray = World.Raycast(startPos, startPos + (rayDir * rayRange),
+                    IntersectFlags.Map | IntersectFlags.Objects, playerVeh);
+
+                if (ray.DidHit)
                 {
-                    closestTTC = ttc;
-                    closestType = "obstacle";
-                    closestDir = "ahead";
-                    avoidDirection = GetClearerSide(playerVeh, rayRange);
+                    float dist = World.GetDistance(startPos, ray.HitPosition);
+
+                    if (dist < closestRayDist)
+                    {
+                        closestRayDist = dist;
+                        // Determine avoid direction based on which ray hit
+                        if (offset < 0) bestAvoidDir = 1;       // Left ray hit, steer right
+                        else if (offset > 0) bestAvoidDir = -1; // Right ray hit, steer left
+                        else bestAvoidDir = GetClearerSide(playerVeh, rayRange); // Center hit
+                    }
                 }
             }
 
-            // Store for reference
-            threatTimeToCollision = closestTTC;
+            // Process the closest raycast hit
+            if (closestRayDist < rayRange)
+            {
+                float ttc = closestRayDist / Math.Max(vehicleSpeed, 1f);
+
+                // Both steering and braking (raycast is in travel direction = "ahead")
+                if (ttc < closestSteerTTC)
+                {
+                    closestSteerTTC = ttc;
+                    closestType = "obstacle";
+                    closestDir = "ahead";
+                    avoidDirection = bestAvoidDir;
+                }
+                if (ttc < closestBrakeTTC)
+                {
+                    closestBrakeTTC = ttc;
+                    closestBrakeDistance = closestRayDist;
+                }
+            }
+
+            // ============================================
+            // INTEGRATE NAV ASSIST DATA WITH ENTITY REFERENCES
+            // Uses actual entity velocities for more accurate TTC calculation
+            // Center: affects both steering and braking
+            // Sides: affect ONLY steering, NOT braking
+            // ============================================
+            float navAssistMaxRange = detectionRange;
+
+            // Center obstacle from nav assist (affects BOTH steering and braking)
+            if (navAssistDistCenter < navAssistMaxRange && navAssistTypeCenter != "none")
+            {
+                float ttc;
+
+                // Use actual entity velocity if available for more accurate TTC
+                if (navAssistVehicleCenter != null && navAssistVehicleCenter.Exists())
+                {
+                    ttc = CalculateTTC(playerVeh, navAssistVehicleCenter.Position, navAssistVehicleCenter.Velocity);
+                }
+                else if (navAssistPedCenter != null && navAssistPedCenter.Exists())
+                {
+                    ttc = CalculateTTC(playerVeh, navAssistPedCenter.Position, navAssistPedCenter.Velocity);
+                }
+                else
+                {
+                    // World geometry - use simple distance/speed calculation
+                    ttc = navAssistDistCenter / Math.Max(vehicleSpeed, 1f);
+                }
+
+                if (ttc < closestSteerTTC)
+                {
+                    closestSteerTTC = ttc;
+                    closestType = navAssistTypeCenter == "ped" ? "pedestrian" :
+                                  navAssistTypeCenter == "vehicle" ? "vehicle" : "obstacle";
+                    closestDir = "ahead";
+                    // Use nav assist side data to determine clearer direction
+                    if (navAssistDistLeft > navAssistDistRight + 2f)
+                        avoidDirection = -1; // Left is clearer
+                    else if (navAssistDistRight > navAssistDistLeft + 2f)
+                        avoidDirection = 1; // Right is clearer
+                    else
+                        avoidDirection = GetClearerSide(playerVeh, rayRange);
+                }
+                if (ttc < closestBrakeTTC)
+                {
+                    closestBrakeTTC = ttc;
+                    closestBrakeDistance = navAssistDistCenter;
+                }
+            }
+
+            // Left obstacle from nav assist - ONLY affects steering (steer right to avoid)
+            // Does NOT contribute to braking - side obstacles shouldn't slow the car
+            if (navAssistDistLeft < navAssistMaxRange * 0.5f && navAssistTypeLeft != "none")
+            {
+                float ttc;
+
+                // Use actual entity velocity if available
+                if (navAssistVehicleLeft != null && navAssistVehicleLeft.Exists())
+                {
+                    ttc = CalculateTTC(playerVeh, navAssistVehicleLeft.Position, navAssistVehicleLeft.Velocity);
+                }
+                else if (navAssistPedLeft != null && navAssistPedLeft.Exists())
+                {
+                    ttc = CalculateTTC(playerVeh, navAssistPedLeft.Position, navAssistPedLeft.Velocity);
+                }
+                else
+                {
+                    ttc = navAssistDistLeft / Math.Max(vehicleSpeed * 0.5f, 1f);
+                }
+
+                if (ttc < closestSteerTTC)
+                {
+                    closestSteerTTC = ttc;
+                    closestType = navAssistTypeLeft == "ped" ? "pedestrian" :
+                                  navAssistTypeLeft == "vehicle" ? "vehicle" : "obstacle";
+                    closestDir = "left";
+                    avoidDirection = 1; // Steer right to avoid left obstacle
+                }
+                // NOTE: Intentionally NOT updating closestBrakeTTC - side threats don't trigger braking
+            }
+
+            // Right obstacle from nav assist - ONLY affects steering (steer left to avoid)
+            // Does NOT contribute to braking
+            if (navAssistDistRight < navAssistMaxRange * 0.5f && navAssistTypeRight != "none")
+            {
+                float ttc;
+
+                // Use actual entity velocity if available
+                if (navAssistVehicleRight != null && navAssistVehicleRight.Exists())
+                {
+                    ttc = CalculateTTC(playerVeh, navAssistVehicleRight.Position, navAssistVehicleRight.Velocity);
+                }
+                else if (navAssistPedRight != null && navAssistPedRight.Exists())
+                {
+                    ttc = CalculateTTC(playerVeh, navAssistPedRight.Position, navAssistPedRight.Velocity);
+                }
+                else
+                {
+                    ttc = navAssistDistRight / Math.Max(vehicleSpeed * 0.5f, 1f);
+                }
+
+                if (ttc < closestSteerTTC)
+                {
+                    closestSteerTTC = ttc;
+                    closestType = navAssistTypeRight == "ped" ? "pedestrian" :
+                                  navAssistTypeRight == "vehicle" ? "vehicle" : "obstacle";
+                    closestDir = "right";
+                    avoidDirection = -1; // Steer left to avoid right obstacle
+                }
+                // NOTE: Intentionally NOT updating closestBrakeTTC - side threats don't trigger braking
+            }
+
+            // Store for reference - use steer TTC for general threat tracking
+            threatTimeToCollision = closestSteerTTC;
             threatDirection = closestDir;
             threatType = closestType;
+
+            // Get road guidance for lane keeping
+            roadSteerCorrection = GetRoadCurveGuidance(playerVeh);
+
+            // ============================================
+            // SPATIAL AWARENESS - Analyze front/back clearance for handbrake turn decisions
+            // ============================================
+            float frontClearance = navAssistDistCenter;
+            float rearClearance = navAssistDistBehind;
+            float leftClearance = navAssistDistLeft;
+            float rightClearance = navAssistDistRight;
+
+            // Calculate vehicle skew relative to road heading
+            vehicleSkewAngle = roadHeadingDelta; // Already calculated by GetRoadCurveGuidance
+            vehicleIsSkewed = Math.Abs(vehicleSkewAngle) > 25f; // More than 25 degrees off road heading
+
+            // Determine if handbrake turn would help correct the situation
+            // Conditions for handbrake turn assist:
+            // 1. Vehicle is significantly skewed from road direction (>25°)
+            // 2. There's an obstacle ahead within braking distance
+            // 3. There's clearance on one side to turn into
+            // 4. Speed is in the right range (5-20 m/s) - too fast is dangerous
+            // 5. Not reversing (handbrake turns don't work well in reverse)
+            bool needsHandbrakeTurn = false;
+            float handbrakeSteerDir = 0f;
+
+            // Only enable handbrake turns at moderate speeds (5-20 m/s / ~10-45 mph)
+            // Too slow: regular steering works fine
+            // Too fast: handbrake turn is dangerous and could cause rollover
+            bool speedOkForHandbrake = vehicleSpeed > 5f && vehicleSpeed < 20f;
+
+            if (isFullMode && speedOkForHandbrake && !isReversing)
+            {
+                // Check if we need to make a sharp correction
+                // Scale the "blocked" threshold - at higher speeds, need more time to react
+                float timeAhead = Math.Max(1.5f, vehicleSpeed / 15f); // 1.5s minimum, scales with speed
+                bool frontBlocked = frontClearance < vehicleSpeed * timeAhead;
+                bool needsSharpTurn = Math.Abs(roadSteerCorrection) > 0.6f || vehicleIsSkewed;
+
+                // Also require sufficient clearance on the target side (at least 8m)
+                float minClearanceForTurn = 8f;
+
+                if (frontBlocked && needsSharpTurn)
+                {
+                    // Determine which way to turn based on road direction and clearance
+                    if (roadSteerCorrection > 0.3f && rightClearance > leftClearance + 3f && rightClearance > minClearanceForTurn)
+                    {
+                        // Need to turn right and right side is clearer
+                        needsHandbrakeTurn = true;
+                        handbrakeSteerDir = 1f;
+                    }
+                    else if (roadSteerCorrection < -0.3f && leftClearance > rightClearance + 3f && leftClearance > minClearanceForTurn)
+                    {
+                        // Need to turn left and left side is clearer
+                        needsHandbrakeTurn = true;
+                        handbrakeSteerDir = -1f;
+                    }
+                    else if (vehicleIsSkewed)
+                    {
+                        // Vehicle is skewed - turn toward road heading
+                        // If skew is positive (road is to our right), turn right
+                        if (vehicleSkewAngle > 25f && rightClearance > minClearanceForTurn)
+                        {
+                            needsHandbrakeTurn = true;
+                            handbrakeSteerDir = 1f;
+                        }
+                        else if (vehicleSkewAngle < -25f && leftClearance > minClearanceForTurn)
+                        {
+                            needsHandbrakeTurn = true;
+                            handbrakeSteerDir = -1f;
+                        }
+                    }
+                }
+            }
 
             // Apply controls if threat detected
             float steerThreshold = isFullMode ? STEER_THRESHOLD_FULL : STEER_THRESHOLD_ASSIST;
             float brakeThreshold = isFullMode ? BRAKE_THRESHOLD_FULL : BRAKE_THRESHOLD_ASSIST;
+            float minBrakeDist = isFullMode ? MIN_BRAKE_DISTANCE_FULL : MIN_BRAKE_DISTANCE;
 
-            if (closestTTC < steerThreshold || closestTTC < brakeThreshold)
+            // Steering threat: any direction (use steerTTC)
+            bool hasSteerThreat = closestSteerTTC < steerThreshold;
+
+            // Braking threat: ONLY if obstacle is ahead, within brake TTC, AND at a reasonable distance
+            // This prevents braking from distant obstacles at low speeds (which was limiting speed to 6-7 mph)
+            bool hasBrakeThreat = closestBrakeTTC < brakeThreshold && closestBrakeDistance > minBrakeDist;
+
+            // ============================================
+            // FIRST-CONTACT EMERGENCY STOP (IMPROVED)
+            // If an obstacle suddenly appears within minimum brake distance (too close for normal braking)
+            // AND we weren't already braking, apply rapid deceleration instead of instant stop.
+            // This is less jarring and more realistic than zeroing velocity instantly.
+            // ============================================
+            bool obstacleInCriticalZone = closestBrakeDistance <= minBrakeDist && closestBrakeDistance < 999f;
+
+            if (obstacleInCriticalZone && !wasObstacleInBrakeZone && !cachedIsBraking && vehicleSpeed > 1f)
+            {
+                // First contact with obstacle in critical zone - apply aggressive but not instant stop
+                // Reduce velocity significantly rather than zeroing it completely
+                float emergencyBrakeFactor = Math.Max(0.2f, closestBrakeDistance / minBrakeDist);
+
+                // Scale deceleration based on speed - faster = more aggressive braking needed
+                if (vehicleSpeed > 15f)
+                {
+                    // High speed: reduce to 30% of current velocity
+                    playerVeh.Velocity = playerVeh.Velocity * 0.3f;
+                }
+                else if (vehicleSpeed > 5f)
+                {
+                    // Medium speed: reduce to 50% of current velocity
+                    playerVeh.Velocity = playerVeh.Velocity * 0.5f;
+                }
+                else
+                {
+                    // Low speed: can safely stop more abruptly
+                    playerVeh.Velocity = playerVeh.Velocity * 0.2f;
+                }
+
+                // Also try to steer away from the obstacle if there's a clear direction
+                if (avoidDirection != 0 && isFullMode)
+                {
+                    smoothedSteerCorrection = avoidDirection * 0.8f;
+                }
+
+                if (DateTime.Now.Ticks - lastAssistAnnounceTicks > 10000000)
+                {
+                    Tolk.Speak("Emergency brake!", true);
+                    lastAssistAnnounceTicks = DateTime.Now.Ticks;
+                }
+            }
+
+            // Update tracking for next frame
+            wasObstacleInBrakeZone = obstacleInCriticalZone;
+
+            bool hasThreat = hasSteerThreat || hasBrakeThreat;
+
+            // Check if we need to auto-teleport back to road
+            CheckRoadTeleport(playerVeh, isFullMode, closestSteerTTC);
+
+            // Always activate if we have road guidance or a threat
+            if (hasThreat || (isOnValidRoad && Math.Abs(roadSteerCorrection) > 0.05f) || needsHandbrakeTurn)
             {
                 steeringAssistActive = true;
-                ApplySteeringAssist(playerVeh, closestTTC, avoidDirection, isFullMode, steerThreshold, brakeThreshold);
+                // Pass both steer and brake TTCs to the assist function
+                ApplySteeringAssist(playerVeh, closestSteerTTC, closestBrakeTTC, closestBrakeDistance, avoidDirection, isFullMode, steerThreshold, brakeThreshold, hasSteerThreat, hasBrakeThreat, needsHandbrakeTurn, handbrakeSteerDir);
             }
             else if (steeringAssistActive)
             {
                 steeringAssistActive = false;
                 smoothedSteerCorrection = 0f;
+                smoothedRoadCorrection = 0f;
+                cachedHandbrakeMagnitude = 0f;
             }
         }
 
         /// <summary>
-        /// Calculates time to collision based on relative velocity
+        /// Calculates time to collision based on relative velocity.
+        /// Now handles stationary obstacles and uses vehicle size for collision radius.
         /// </summary>
         private float CalculateTTC(Vehicle playerVeh, GTA.Math.Vector3 targetPos, GTA.Math.Vector3 targetVel)
         {
             GTA.Math.Vector3 relPos = targetPos - playerVeh.Position;
             GTA.Math.Vector3 relVel = targetVel - playerVeh.Velocity;
 
-            if (relPos.Length() < 0.1f) return 0.1f;
+            float distance = relPos.Length();
+            if (distance < 0.1f) return 0.1f;
+
+            // Calculate collision radius based on vehicle size
+            float collisionRadius = GetVehicleCollisionRadius(playerVeh);
 
             float closingSpeed = -GTA.Math.Vector3.Dot(GTA.Math.Vector3.Normalize(relPos), relVel);
-            if (closingSpeed <= 0) return float.MaxValue;
 
-            float distance = relPos.Length();
-            float collisionRadius = 4f;
+            // Handle stationary or slowly moving obstacles
+            // Only consider them threats if they're DIRECTLY ahead (high dot product) and relatively close
+            if (closingSpeed <= 0.5f)
+            {
+                // Check if obstacle is in our path (ahead or behind depending on direction)
+                GTA.Math.Vector3 moveDir = isReversing ? -playerVeh.ForwardVector : playerVeh.ForwardVector;
+                float dotToTarget = GTA.Math.Vector3.Dot(moveDir, GTA.Math.Vector3.Normalize(relPos));
+
+                // Only consider it a threat if it's VERY directly ahead (>0.85 = within ~30 degrees)
+                // This prevents parked cars on the side of the road from being false positives
+                if (dotToTarget > 0.85f)
+                {
+                    // Use our own speed as closing speed for stationary obstacles
+                    float ourSpeed = playerVeh.Speed;
+                    if (ourSpeed > 1f)
+                    {
+                        closingSpeed = ourSpeed * dotToTarget;
+                    }
+                    else
+                    {
+                        // Very slow/stopped - only worry about VERY close stationary obstacles
+                        if (distance < 5f) // Reduced from 15f to 5f
+                        {
+                            return distance / 3f; // Artificial TTC based on distance
+                        }
+                        return float.MaxValue;
+                    }
+                }
+                else
+                {
+                    return float.MaxValue; // Not directly in our path
+                }
+            }
 
             if (distance < collisionRadius) return 0.1f;
             return (distance - collisionRadius) / closingSpeed;
         }
 
         /// <summary>
-        /// Determines the direction of a threat relative to the vehicle
+        /// Gets collision radius based on vehicle type.
+        /// Larger vehicles need more clearance.
+        /// </summary>
+        private float GetVehicleCollisionRadius(Vehicle veh)
+        {
+            try
+            {
+                // Use vehicle class to estimate size since GetDimensions isn't available
+                VehicleClass vehClass = veh.ClassType;
+
+                switch (vehClass)
+                {
+                    case VehicleClass.Motorcycles:
+                    case VehicleClass.Cycles:
+                        return BASE_COLLISION_RADIUS; // Smallest
+                    case VehicleClass.Compacts:
+                    case VehicleClass.Coupes:
+                        return BASE_COLLISION_RADIUS + 0.5f;
+                    case VehicleClass.Sedans:
+                    case VehicleClass.Sports:
+                    case VehicleClass.SportsClassics:
+                    case VehicleClass.Muscle:
+                        return BASE_COLLISION_RADIUS + 1f;
+                    case VehicleClass.SUVs:
+                    case VehicleClass.OffRoad:
+                    case VehicleClass.Vans:
+                        return BASE_COLLISION_RADIUS + 1.5f;
+                    case VehicleClass.Industrial:
+                    case VehicleClass.Commercial:
+                    case VehicleClass.Utility:
+                        return BASE_COLLISION_RADIUS + 2.5f; // Trucks
+                    case VehicleClass.Super:
+                        return BASE_COLLISION_RADIUS + 1f; // Wide but low
+                    default:
+                        return BASE_COLLISION_RADIUS + 1f; // Default for unknown
+                }
+            }
+            catch
+            {
+                return BASE_COLLISION_RADIUS + 1f; // Default fallback
+            }
+        }
+
+        /// <summary>
+        /// Determines the direction of a threat relative to the vehicle.
+        /// Now properly handles "behind" direction and accounts for reverse driving.
         /// </summary>
         private string GetThreatDirection(Vehicle playerVeh, GTA.Math.Vector3 threatPos)
         {
@@ -4859,10 +5971,23 @@ namespace GrandTheftAccessibility
             float dotForward = GTA.Math.Vector3.Dot(playerVeh.ForwardVector, toThreat);
             float dotRight = GTA.Math.Vector3.Dot(playerVeh.RightVector, toThreat);
 
-            if (dotForward > 0.5f) return "ahead";
-            if (dotRight > 0.3f) return "right";
-            if (dotRight < -0.3f) return "left";
-            return "ahead";
+            // When reversing, "ahead" means behind the vehicle (direction of travel)
+            if (isReversing)
+            {
+                if (dotForward < -0.5f) return "ahead";  // Behind vehicle = ahead when reversing
+                if (dotForward > 0.5f) return "behind";  // Front of vehicle = behind when reversing
+                if (dotRight > 0.3f) return "left";      // Inverted for reversing
+                if (dotRight < -0.3f) return "right";
+                return "ahead";
+            }
+            else
+            {
+                if (dotForward > 0.5f) return "ahead";
+                if (dotForward < -0.5f) return "behind";  // Now properly returns "behind"
+                if (dotRight > 0.3f) return "right";
+                if (dotRight < -0.3f) return "left";
+                return "ahead"; // Default for edge cases (directly to side)
+            }
         }
 
         /// <summary>
@@ -4906,49 +6031,664 @@ namespace GrandTheftAccessibility
         }
 
         /// <summary>
+        /// Gets road guidance by finding the best path nodes ahead of the vehicle.
+        /// Returns a steering correction value (-1 to 1) to follow the road.
+        /// Also sets isOnValidRoad and roadHeadingDelta fields.
+        /// Filters out nodes for opposite-direction lanes to prevent U-turn behavior.
+        /// </summary>
+        private float GetRoadGuidance(Vehicle playerVeh)
+        {
+            GTA.Math.Vector3 playerPos = playerVeh.Position;
+            GTA.Math.Vector3 forwardVec = playerVeh.ForwardVector;
+            float vehicleSpeed = playerVeh.Speed;
+            float vehicleHeading = playerVeh.Heading;
+
+            // Look ahead based on speed (minimum 15m, up to 50m at high speed)
+            float lookAhead = Math.Max(15f, Math.Min(50f, vehicleSpeed * 2f));
+
+            // Position to check: ahead of the vehicle
+            GTA.Math.Vector3 checkPos = playerPos + (forwardVec * lookAhead);
+
+            // Try up to 3 closest nodes to find one going our direction
+            for (int nodeIndex = 1; nodeIndex <= 3; nodeIndex++)
+            {
+                OutputArgument outPos = new OutputArgument();
+                OutputArgument outHeading = new OutputArgument();
+                OutputArgument outLanes = new OutputArgument();
+
+                // GET_NTH_CLOSEST_VEHICLE_NODE_WITH_HEADING
+                bool foundNode = Function.Call<bool>(Hash.GET_NTH_CLOSEST_VEHICLE_NODE_WITH_HEADING,
+                    checkPos.X, checkPos.Y, checkPos.Z,
+                    nodeIndex,
+                    outPos,
+                    outHeading,
+                    outLanes,
+                    1,              // nodeFlags - include switched off nodes
+                    3.0f,           // zMeasureMult
+                    0f);            // zTolerance
+
+                if (!foundNode)
+                {
+                    continue;
+                }
+
+                GTA.Math.Vector3 nodePos = outPos.GetResult<GTA.Math.Vector3>();
+                float nodeHeading = outHeading.GetResult<float>();
+
+                // Check if the node is reasonably close (not on a completely different road)
+                float distToNode = World.GetDistance(playerPos, nodePos);
+                if (distToNode > lookAhead * 2f)
+                {
+                    continue;
+                }
+
+                // Calculate the heading difference
+                float headingDiff = nodeHeading - vehicleHeading;
+                while (headingDiff > 180f) headingDiff -= 360f;
+                while (headingDiff < -180f) headingDiff += 360f;
+
+                // FILTER: Skip nodes that are not closely aligned (>45° difference)
+                // Narrower filter prevents steering toward adjacent lanes on complex freeways
+                if (Math.Abs(headingDiff) > 45f)
+                {
+                    continue;
+                }
+
+                // Found a valid same-direction node
+                isOnValidRoad = true;
+                roadHeadingDelta = headingDiff;
+
+                // Also consider lateral offset from the road center
+                GTA.Math.Vector3 toNode = GTA.Math.Vector3.Normalize(nodePos - playerPos);
+                float dotRight = GTA.Math.Vector3.Dot(playerVeh.RightVector, toNode);
+
+                // Combine heading correction and lateral offset correction (1.5x more aggressive)
+                float headingCorrection = headingDiff / 60f;
+                float lateralCorrection = dotRight * 0.75f;
+
+                // Clamp total correction
+                float totalCorrection = Math.Max(-1f, Math.Min(1f, headingCorrection + lateralCorrection));
+                return totalCorrection;
+            }
+
+            // No valid same-direction node found
+            isOnValidRoad = false;
+            roadHeadingDelta = 0f;
+            return 0f;
+        }
+
+        /// <summary>
+        /// Updates the cached waypoint direction for waypoint-aware drive assist.
+        /// Gets the target position from either waypoint or mission blip.
+        /// Calculates the heading direction TO the target for road node preference.
+        /// </summary>
+        private void UpdateWaypointDirection(GTA.Math.Vector3 playerPos)
+        {
+            GTA.Math.Vector3 targetPos = GTA.Math.Vector3.Zero;
+
+            // Check for active waypoint first
+            if (Function.Call<bool>(Hash.IS_WAYPOINT_ACTIVE))
+            {
+                int wpHandle = Function.Call<int>(Hash.GET_FIRST_BLIP_INFO_ID, 8); // 8 = waypoint blip
+                if (Function.Call<bool>(Hash.DOES_BLIP_EXIST, wpHandle))
+                {
+                    targetPos = Function.Call<GTA.Math.Vector3>(Hash.GET_BLIP_INFO_ID_COORD, wpHandle);
+                }
+            }
+            // Fall back to mission blip if no waypoint
+            else if (missionTrackingActive && trackedBlipHandle != -1)
+            {
+                if (Function.Call<bool>(Hash.DOES_BLIP_EXIST, trackedBlipHandle))
+                {
+                    targetPos = Function.Call<GTA.Math.Vector3>(Hash.GET_BLIP_INFO_ID_COORD, trackedBlipHandle);
+                }
+            }
+
+            if (targetPos != GTA.Math.Vector3.Zero)
+            {
+                cachedWaypointPos = targetPos;
+                hasActiveWaypoint = true;
+
+                // Calculate heading TO the waypoint (in degrees, matching GTA's heading system)
+                // GTA V heading: 0=North, increases CLOCKWISE (90=East, 180=South, 270=West)
+                float dx = targetPos.X - playerPos.X;
+                float dy = targetPos.Y - playerPos.Y;
+
+                // atan2(-dx, dy) gives angle from North, increasing clockwise
+                // This matches GTA's vehicle heading system
+                float angleRad = (float)Math.Atan2(-dx, dy);
+                float angleDeg = angleRad * (180f / (float)Math.PI);
+
+                // Normalize to 0-360
+                if (angleDeg < 0) angleDeg += 360f;
+
+                // GTA headings are actually counter-clockwise from what we calculated
+                // So we need to flip it: heading = 360 - angle (or just negate and normalize)
+                cachedWaypointHeading = (360f - angleDeg) % 360f;
+            }
+            else
+            {
+                hasActiveWaypoint = false;
+            }
+        }
+
+        /// <summary>
+        /// Checks if a road node heading is favorable for reaching the waypoint.
+        /// Returns a score: higher = better alignment with waypoint direction.
+        /// Used to prefer road nodes that lead toward the destination.
+        /// </summary>
+        private float GetWaypointAlignmentScore(float nodeHeading, float vehicleHeading)
+        {
+            if (!hasActiveWaypoint) return 0f;
+
+            // Calculate how well the node heading aligns with the waypoint direction
+            float headingToWaypoint = cachedWaypointHeading;
+
+            float nodeDiff = nodeHeading - headingToWaypoint;
+            while (nodeDiff > 180f) nodeDiff -= 360f;
+            while (nodeDiff < -180f) nodeDiff += 360f;
+
+            // Score based on alignment (1.0 = perfect alignment, 0 = perpendicular, -1 = opposite)
+            // Use cosine-like scoring
+            float alignmentScore = (float)Math.Cos(nodeDiff * Math.PI / 180f);
+
+            return alignmentScore;
+        }
+
+        /// <summary>
+        /// Gets multiple road nodes ahead to understand the road curve better.
+        /// Returns the average steering direction needed.
+        /// Filters out nodes for opposite-direction lanes to prevent U-turn behavior on multi-lane roads.
+        /// When waypoint-aware drive assist is enabled, prefers nodes heading toward the waypoint.
+        /// </summary>
+        private float GetRoadCurveGuidance(Vehicle playerVeh)
+        {
+            GTA.Math.Vector3 playerPos = playerVeh.Position;
+            GTA.Math.Vector3 forwardVec = playerVeh.ForwardVector;
+            float vehicleSpeed = playerVeh.Speed;
+            float vehicleHeading = playerVeh.Heading;
+
+            float totalCorrection = 0f;
+            int validNodes = 0;
+
+            // Check if waypoint-aware mode is active
+            bool useWaypointGuidance = hasActiveWaypoint && getSetting("waypointDriveAssist") == 1;
+
+            // Check multiple points ahead (near, medium, far)
+            float[] distances = { 10f, 25f, 45f };
+            float[] weights = { 0.5f, 0.3f, 0.2f }; // Near points weighted more
+
+            for (int i = 0; i < distances.Length; i++)
+            {
+                float lookAhead = Math.Max(distances[i], vehicleSpeed * (i + 1) * 0.5f);
+                GTA.Math.Vector3 checkPos = playerPos + (forwardVec * lookAhead);
+
+                // Collect valid candidate nodes (up to 5)
+                List<Tuple<GTA.Math.Vector3, float, float>> candidateNodes = new List<Tuple<GTA.Math.Vector3, float, float>>();
+
+                // Try up to 5 closest nodes to find candidates
+                for (int nodeIndex = 1; nodeIndex <= 5; nodeIndex++)
+                {
+                    OutputArgument outPos = new OutputArgument();
+                    OutputArgument outHeading = new OutputArgument();
+                    OutputArgument outLanes = new OutputArgument();
+
+                    bool foundNode = Function.Call<bool>(Hash.GET_NTH_CLOSEST_VEHICLE_NODE_WITH_HEADING,
+                        checkPos.X, checkPos.Y, checkPos.Z, nodeIndex, outPos, outHeading, outLanes, 1, 3.0f, 0f);
+
+                    if (foundNode)
+                    {
+                        GTA.Math.Vector3 nodePos = outPos.GetResult<GTA.Math.Vector3>();
+                        float nodeHeading = outHeading.GetResult<float>();
+
+                        float headingDiff = nodeHeading - vehicleHeading;
+                        while (headingDiff > 180f) headingDiff -= 360f;
+                        while (headingDiff < -180f) headingDiff += 360f;
+
+                        // FILTER: Skip nodes that are not closely aligned (>45° difference)
+                        // Narrower filter prevents steering toward adjacent lanes on complex freeways
+                        if (Math.Abs(headingDiff) > 45f)
+                        {
+                            continue;
+                        }
+
+                        // This node passes the heading filter, add as candidate
+                        candidateNodes.Add(new Tuple<GTA.Math.Vector3, float, float>(nodePos, nodeHeading, headingDiff));
+                    }
+                }
+
+                // Select best node from candidates
+                if (candidateNodes.Count > 0)
+                {
+                    GTA.Math.Vector3 bestNodePos;
+                    float bestHeadingDiff;
+
+                    if (useWaypointGuidance && candidateNodes.Count > 1)
+                    {
+                        // WAYPOINT-AWARE: Score each candidate by alignment with waypoint direction
+                        float bestScore = float.MinValue;
+                        int bestIndex = 0;
+
+                        for (int j = 0; j < candidateNodes.Count; j++)
+                        {
+                            float waypointScore = GetWaypointAlignmentScore(candidateNodes[j].Item2, vehicleHeading);
+
+                            // Also factor in how close the heading is to current vehicle heading (prefer smoother turns)
+                            float smoothnessBonus = 1f - (Math.Abs(candidateNodes[j].Item3) / 45f) * 0.3f;
+
+                            float totalScore = waypointScore + smoothnessBonus;
+
+                            if (totalScore > bestScore)
+                            {
+                                bestScore = totalScore;
+                                bestIndex = j;
+                            }
+                        }
+
+                        bestNodePos = candidateNodes[bestIndex].Item1;
+                        bestHeadingDiff = candidateNodes[bestIndex].Item3;
+                    }
+                    else
+                    {
+                        // Standard mode: use first valid node (closest)
+                        bestNodePos = candidateNodes[0].Item1;
+                        bestHeadingDiff = candidateNodes[0].Item3;
+                    }
+
+                    // Direction to node for lateral correction (1.5x more aggressive)
+                    GTA.Math.Vector3 toNode = GTA.Math.Vector3.Normalize(bestNodePos - playerPos);
+                    float dotRight = GTA.Math.Vector3.Dot(playerVeh.RightVector, toNode);
+
+                    float correction = (bestHeadingDiff / 60f) + (dotRight * 0.45f); // 1.5x more aggressive
+                    correction = Math.Max(-1f, Math.Min(1f, correction));
+
+                    totalCorrection += correction * weights[i];
+                    validNodes++;
+                }
+            }
+
+            if (validNodes == 0)
+            {
+                isOnValidRoad = false;
+                return 0f;
+            }
+
+            isOnValidRoad = true;
+            return totalCorrection;
+        }
+
+        /// <summary>
+        /// Finds the nearest road node going the same direction as the vehicle.
+        /// Returns the node position, heading, and distance. Returns false if no valid node found.
+        /// </summary>
+        private bool FindNearestSameDirectionRoadNode(Vehicle playerVeh, out GTA.Math.Vector3 nodePos, out float nodeHeading, out float distance)
+        {
+            nodePos = GTA.Math.Vector3.Zero;
+            nodeHeading = 0f;
+            distance = 999f;
+
+            GTA.Math.Vector3 playerPos = playerVeh.Position;
+            float vehicleHeading = playerVeh.Heading;
+
+            // Search in expanding radius for a valid node
+            for (int nodeIndex = 1; nodeIndex <= 10; nodeIndex++)
+            {
+                OutputArgument outPos = new OutputArgument();
+                OutputArgument outHeading = new OutputArgument();
+                OutputArgument outLanes = new OutputArgument();
+
+                bool foundNode = Function.Call<bool>(Hash.GET_NTH_CLOSEST_VEHICLE_NODE_WITH_HEADING,
+                    playerPos.X, playerPos.Y, playerPos.Z, nodeIndex, outPos, outHeading, outLanes, 1, 3.0f, 0f);
+
+                if (foundNode)
+                {
+                    GTA.Math.Vector3 testPos = outPos.GetResult<GTA.Math.Vector3>();
+                    float testHeading = outHeading.GetResult<float>();
+
+                    float headingDiff = testHeading - vehicleHeading;
+                    while (headingDiff > 180f) headingDiff -= 360f;
+                    while (headingDiff < -180f) headingDiff += 360f;
+
+                    // Only accept nodes closely aligned with our direction (within 45 degrees)
+                    if (Math.Abs(headingDiff) <= 45f)
+                    {
+                        nodePos = testPos;
+                        nodeHeading = testHeading;
+                        distance = World.GetDistance(playerPos, testPos);
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Teleports the vehicle to the nearest valid road node (same direction).
+        /// Adds slight Z offset to prevent clipping through ground.
+        /// </summary>
+        private bool TeleportToNearestRoad(Vehicle playerVeh)
+        {
+            GTA.Math.Vector3 nodePos;
+            float nodeHeading;
+            float distance;
+
+            if (FindNearestSameDirectionRoadNode(playerVeh, out nodePos, out nodeHeading, out distance))
+            {
+                // Add slight Z offset to prevent clipping (0.5m above road)
+                GTA.Math.Vector3 teleportPos = new GTA.Math.Vector3(nodePos.X, nodePos.Y, nodePos.Z + 0.5f);
+
+                // Teleport vehicle
+                playerVeh.Position = teleportPos;
+                playerVeh.Heading = nodeHeading;
+
+                // Preserve some forward momentum but reduce speed
+                float currentSpeed = playerVeh.Speed;
+                float newSpeed = Math.Max(5f, currentSpeed * 0.5f); // At least 5 m/s, or half current speed
+                playerVeh.Velocity = playerVeh.ForwardVector * newSpeed;
+
+                // Reset tracking
+                wasCloseToRoad = true;
+                offRoadStartTicks = 0;
+                lastValidRoadDistance = 0f;
+
+                Tolk.Speak("Teleported to road", true);
+                return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Checks road distance and handles auto-teleport logic.
+        /// Should be called from ProcessSteeringAssist when drive assist is active.
+        /// </summary>
+        private void CheckRoadTeleport(Vehicle playerVeh, bool isFullMode, float threatTTC)
+        {
+            // Only works if setting is enabled and drive assist is on
+            if (getSetting("roadTeleport") != 1) return;
+
+            long now = DateTime.Now.Ticks;
+
+            // Enforce cooldown between teleports to prevent rapid-fire teleporting
+            if ((now - lastTeleportTicks) < ROAD_TELEPORT_COOLDOWN_TICKS)
+            {
+                return;
+            }
+
+            GTA.Math.Vector3 nodePos;
+            float nodeHeading;
+            float currentRoadDistance;
+
+            bool foundNode = FindNearestSameDirectionRoadNode(playerVeh, out nodePos, out nodeHeading, out currentRoadDistance);
+            lastValidRoadDistance = foundNode ? currentRoadDistance : 999f;
+
+            // Scale thresholds based on vehicle speed - faster driving = more tolerance
+            // At 15 m/s (~33 mph), add 50% to thresholds; at 30 m/s (~67 mph), add 100%
+            float vehicleSpeed = playerVeh.Speed;
+            float speedScale = 1f + Math.Min(vehicleSpeed / 30f, 1f); // 1.0 to 2.0 multiplier
+
+            float roadCloseThreshold = ROAD_CLOSE_THRESHOLD_BASE * speedScale;
+            float roadFarThreshold = ROAD_FAR_THRESHOLD_BASE * speedScale;
+
+            // If no valid node found at all (heading filter rejected everything), don't teleport
+            // This prevents teleporting on sharp curves where heading differs significantly
+            if (!foundNode)
+            {
+                // Only teleport if we ALSO can't find ANY node (even with relaxed heading)
+                // Try finding any node within 90 degrees as a sanity check
+                bool anyNodeNearby = false;
+                for (int i = 1; i <= 5; i++)
+                {
+                    OutputArgument outPos = new OutputArgument();
+                    OutputArgument outHeading = new OutputArgument();
+                    OutputArgument outLanes = new OutputArgument();
+
+                    if (Function.Call<bool>(Hash.GET_NTH_CLOSEST_VEHICLE_NODE_WITH_HEADING,
+                        playerVeh.Position.X, playerVeh.Position.Y, playerVeh.Position.Z,
+                        i, outPos, outHeading, outLanes, 1, 3.0f, 0f))
+                    {
+                        float dist = World.GetDistance(playerVeh.Position, outPos.GetResult<GTA.Math.Vector3>());
+                        if (dist < roadCloseThreshold * 1.5f)
+                        {
+                            anyNodeNearby = true;
+                            break;
+                        }
+                    }
+                }
+
+                // If there's any road node nearby, we're probably on a curve - don't teleport
+                if (anyNodeNearby)
+                {
+                    wasCloseToRoad = true;
+                    offRoadStartTicks = 0;
+                    return;
+                }
+            }
+
+            // Condition 1: Collision imminent AND far from road - teleport immediately
+            // Only if threat is VERY imminent (< 0.3s) and we're genuinely far from road
+            if (threatTTC < 0.3f && currentRoadDistance > roadFarThreshold * 1.5f)
+            {
+                if (TeleportToNearestRoad(playerVeh))
+                {
+                    lastTeleportTicks = now;
+                }
+                return;
+            }
+
+            // Condition 2: Extremely far from any valid road node (scaled by speed)
+            if (currentRoadDistance > roadCloseThreshold * 1.5f)
+            {
+                if (TeleportToNearestRoad(playerVeh))
+                {
+                    lastTeleportTicks = now;
+                }
+                return;
+            }
+
+            // Condition 3: Moderately far from road for 5+ seconds
+            if (currentRoadDistance > roadFarThreshold)
+            {
+                if (wasCloseToRoad)
+                {
+                    // Just went off-road, start timer
+                    offRoadStartTicks = now;
+                    wasCloseToRoad = false;
+                }
+                else if (offRoadStartTicks > 0 && (now - offRoadStartTicks) > ROAD_TELEPORT_DELAY_TICKS)
+                {
+                    // Been off-road for 5+ seconds
+                    if (TeleportToNearestRoad(playerVeh))
+                    {
+                        lastTeleportTicks = now;
+                    }
+                    return;
+                }
+            }
+            else
+            {
+                // Close to road - reset tracking
+                wasCloseToRoad = true;
+                offRoadStartTicks = 0;
+            }
+        }
+
+        /// <summary>
         /// Calculates and CACHES steering/braking values. Does NOT apply inputs directly.
         /// Inputs must be applied every tick via ApplyCachedSteeringInputs().
         /// </summary>
-        private void ApplySteeringAssist(Vehicle playerVeh, float ttc, int avoidDir, bool isFullMode, float steerThreshold, float brakeThreshold)
+        /// <param name="steerTTC">Time to collision for steering (includes side threats)</param>
+        /// <param name="brakeTTC">Time to collision for braking (ONLY ahead threats)</param>
+        /// <param name="brakeDistance">Distance to the closest braking threat</param>
+        /// <param name="hasSteerThreat">Whether there's a steering threat (any direction)</param>
+        /// <param name="hasBrakeThreat">Whether there's a braking threat (ahead only)</param>
+        /// <param name="needsHandbrakeTurn">Whether a handbrake turn should be applied</param>
+        /// <param name="handbrakeSteerDir">Direction for handbrake turn (-1=left, 1=right)</param>
+        private void ApplySteeringAssist(Vehicle playerVeh, float steerTTC, float brakeTTC, float brakeDistance, int avoidDir, bool isFullMode, float steerThreshold, float brakeThreshold, bool hasSteerThreat, bool hasBrakeThreat, bool needsHandbrakeTurn = false, float handbrakeSteerDir = 0f)
         {
-            // Calculate steering magnitude (0 to 1)
-            float steerUrgency = Math.Max(0f, 1f - (ttc / steerThreshold));
-            float maxSteer = isFullMode ? 1.0f : 0.5f;
-            float targetSteer = avoidDir * steerUrgency * steerUrgency * maxSteer;
-
-            // Smooth the steering using frame-rate independent lerp
-            // Formula: current += (target - current) * (1 - e^(-rate * deltaTime))
-            // Approximation for small deltaTime: current += (target - current) * rate * deltaTime
             float smoothFactor = Math.Min(1.0f, STEER_SMOOTHING_RATE * deltaTime);
-            smoothedSteerCorrection += (targetSteer - smoothedSteerCorrection) * smoothFactor;
+            float targetSteer = 0f;
+            float brakeMag = 0f;
+            float handbrakeMag = 0f;
 
-            // Calculate brake magnitude
-            float brakeUrgency = Math.Max(0f, 1f - (ttc / brakeThreshold));
-            float brakeMag = brakeUrgency * brakeUrgency;
+            // STEERING: Responds to threats from ANY direction (uses steerTTC)
+            if (hasSteerThreat)
+            {
+                // OBSTACLE AVOIDANCE: Calculate steering to avoid collision (1.5x more aggressive)
+                float steerUrgency = Math.Max(0f, 1f - (steerTTC / steerThreshold));
+                float maxSteer = isFullMode ? 1.0f : 0.75f;
+                targetSteer = avoidDir * steerUrgency * steerUrgency * maxSteer * 1.5f;
 
-            // Emergency stop - increase brake magnitude
-            if (ttc < 0.8f)
+                // Smooth the obstacle avoidance steering
+                smoothedSteerCorrection += (targetSteer - smoothedSteerCorrection) * smoothFactor;
+            }
+            else
+            {
+                // No steer threat - decay obstacle avoidance
+                smoothedSteerCorrection *= (1f - smoothFactor);
+            }
+
+            // BRAKING: ONLY responds to threats AHEAD (uses brakeTTC, separate from steering)
+            // This is the KEY fix - side obstacles no longer cause braking!
+            if (hasBrakeThreat)
+            {
+                float brakeUrgency = Math.Max(0f, 1f - (brakeTTC / brakeThreshold));
+                brakeMag = brakeUrgency * brakeUrgency;
+            }
+            // No else needed - brakeMag stays at 0 if no brake threat
+
+            // HANDBRAKE TURN ASSISTANCE (Full mode only)
+            if (needsHandbrakeTurn && isFullMode)
+            {
+                // Apply handbrake with corresponding steering for a controlled drift turn
+                handbrakeMag = 0.8f; // Strong but not full handbrake
+
+                // Boost steering in the direction of the handbrake turn
+                float handbrakeSteerBoost = handbrakeSteerDir * 1.0f; // Full steering in turn direction
+                smoothedSteerCorrection = smoothedSteerCorrection * 0.3f + handbrakeSteerBoost * 0.7f;
+
+                // Light braking during handbrake turn
+                brakeMag = Math.Max(brakeMag, 0.3f);
+            }
+            else
+            {
+                // Decay handbrake when not needed
+                handbrakeMag = cachedHandbrakeMagnitude * (1f - smoothFactor * 2f);
+            }
+
+            // ROAD FOLLOWING: Apply road guidance for lane keeping
+            if (isOnValidRoad)
+            {
+                // Scale road correction based on mode (1.5x more aggressive for better road tracking)
+                float roadStrength = isFullMode ? 0.9f : 0.45f;
+                float targetRoadSteer = roadSteerCorrection * roadStrength;
+
+                // Use slower smoothing for road following (more gradual)
+                float roadSmoothFactor = Math.Min(1.0f, STEER_SMOOTHING_RATE * 0.5f * deltaTime);
+                smoothedRoadCorrection += (targetRoadSteer - smoothedRoadCorrection) * roadSmoothFactor;
+            }
+            else
+            {
+                // No valid road - decay road correction
+                smoothedRoadCorrection *= (1f - smoothFactor);
+            }
+
+            // COMBINE: Balance obstacle avoidance with road following
+            // Road following should be primary unless there's a serious imminent threat
+            float combinedSteer;
+
+            // Calculate how urgent the STEERING threat is (0 = no threat, 1 = imminent collision)
+            float threatUrgency = hasSteerThreat ? Math.Max(0f, Math.Min(1f, 1f - (steerTTC / steerThreshold))) : 0f;
+
+            if (isOnValidRoad)
+            {
+                // On a valid road - prioritize road following unless threat is urgent
+                if (threatUrgency > 0.7f && Math.Abs(smoothedSteerCorrection) > 0.2f)
+                {
+                    // URGENT threat (TTC very low) - let obstacle avoidance take over
+                    // But still blend some road correction if they're going the same way
+                    if (Math.Sign(smoothedSteerCorrection) == Math.Sign(smoothedRoadCorrection))
+                    {
+                        combinedSteer = smoothedSteerCorrection * 0.8f + smoothedRoadCorrection * 0.2f;
+                    }
+                    else
+                    {
+                        combinedSteer = smoothedSteerCorrection;
+                    }
+                }
+                else if (threatUrgency > 0.3f && Math.Abs(smoothedSteerCorrection) > 0.1f)
+                {
+                    // MODERATE threat - blend both, favoring road if directions conflict
+                    if (Math.Sign(smoothedSteerCorrection) == Math.Sign(smoothedRoadCorrection) ||
+                        Math.Abs(smoothedRoadCorrection) < 0.1f)
+                    {
+                        // Same direction - use stronger of the two
+                        combinedSteer = Math.Abs(smoothedSteerCorrection) > Math.Abs(smoothedRoadCorrection)
+                            ? smoothedSteerCorrection * 0.6f + smoothedRoadCorrection * 0.4f
+                            : smoothedRoadCorrection * 0.6f + smoothedSteerCorrection * 0.4f;
+                    }
+                    else
+                    {
+                        // Conflicting - favor road following, obstacle avoidance is probably wrong
+                        combinedSteer = smoothedRoadCorrection * 0.7f + smoothedSteerCorrection * 0.3f;
+                    }
+                }
+                else
+                {
+                    // LOW/NO threat - road following is primary
+                    combinedSteer = smoothedRoadCorrection + smoothedSteerCorrection * 0.2f;
+                }
+            }
+            else
+            {
+                // NOT on a valid road - obstacle avoidance is all we have
+                if (hasSteerThreat)
+                {
+                    combinedSteer = smoothedSteerCorrection;
+                }
+                else
+                {
+                    combinedSteer = smoothedSteerCorrection * 0.5f; // Decay if no threat and no road
+                }
+            }
+
+            combinedSteer = Math.Max(-1f, Math.Min(1f, combinedSteer));
+
+            // Emergency stop - ONLY for brake threats (ahead), not side threats
+            // Also require the obstacle to be close enough that braking makes sense
+            if (hasBrakeThreat && brakeTTC < 0.5f && brakeDistance < 15f)
             {
                 brakeMag = 1.0f;
             }
 
-            // Cache values for per-tick application
-            cachedSteerCorrection = smoothedSteerCorrection;
+            // Cache values for per-tick application - use combined steering
+            cachedSteerCorrection = combinedSteer;
             cachedBrakeMagnitude = brakeMag;
             cachedAvoidDirection = avoidDir;
+            cachedHandbrakeMagnitude = handbrakeMag;
+            // Track if system is braking - used to block player throttle in full mode
+            cachedIsBraking = (brakeMag > 0.1f || handbrakeMag > 0.1f);
 
-            // Audio/speech feedback
-            if (DateTime.Now.Ticks - lastAssistAnnounceTicks > 20000000)
+            // Audio/speech feedback (only for threats, not lane keeping)
+            bool hasThreat = hasSteerThreat || hasBrakeThreat;
+            if ((hasThreat || needsHandbrakeTurn) && DateTime.Now.Ticks - lastAssistAnnounceTicks > 20000000)
             {
                 lastAssistAnnounceTicks = DateTime.Now.Ticks;
 
+                float steerUrgency = Math.Max(0f, 1f - (steerTTC / steerThreshold));
                 outSteerAssist.Stop();
                 steerAssistBeep.Frequency = 400 + (int)(steerUrgency * 600);
                 var sample = steerAssistBeep.Take(TimeSpan.FromSeconds(0.08));
                 outSteerAssist.Init(sample);
                 outSteerAssist.Play();
 
-                if (brakeMag > 0.5f || Math.Abs(smoothedSteerCorrection) > 0.3f)
+                if (handbrakeMag > 0.5f)
+                {
+                    string turnDir = handbrakeSteerDir > 0 ? "right" : "left";
+                    Tolk.Speak("Handbrake turn " + turnDir, true);
+                }
+                else if (brakeMag > 0.5f || Math.Abs(smoothedSteerCorrection) > 0.3f)
                 {
                     string action = brakeMag > 0.5f ? "Braking" : "Steering";
                     Tolk.Speak(action + ", " + threatType + " " + threatDirection, true);
@@ -4975,9 +6715,9 @@ namespace GrandTheftAccessibility
                 }
                 else
                 {
-                    // Assistive mode: blend with player input
+                    // Assistive mode: blend with player input (1.5x more aggressive blend)
                     float playerSteer = Function.Call<float>(Hash.GET_CONTROL_NORMAL, 0, 59);
-                    float blended = Math.Max(-1f, Math.Min(1f, playerSteer + cachedSteerCorrection * 0.7f));
+                    float blended = Math.Max(-1f, Math.Min(1f, playerSteer + cachedSteerCorrection * 1.05f)); // 0.7 * 1.5 = 1.05
                     Function.Call((Hash)0xE8A25867FBA3B05E, 0, 59, blended);
                 }
             }
@@ -4987,17 +6727,30 @@ namespace GrandTheftAccessibility
             {
                 Function.Call((Hash)0xE8A25867FBA3B05E, 0, 72, cachedBrakeMagnitude);
 
-                // In full mode with strong braking, also cut throttle
-                if (cachedIsFullMode && cachedBrakeMagnitude > 0.5f)
+                // In full mode during ANY braking, completely disable player throttle input
+                // This prevents the player from countering the safety braking
+                if (cachedIsFullMode && cachedIsBraking)
                 {
-                    Function.Call((Hash)0xE8A25867FBA3B05E, 0, 71, 0f);
+                    // DISABLE_CONTROL_ACTION - prevents player from using throttle while system is braking
+                    Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 71, true); // Disable accelerate
+                    Function.Call((Hash)0xE8A25867FBA3B05E, 0, 71, 0f);      // Force throttle to 0
                 }
+            }
+
+            // Apply handbrake for corrective turns (Full mode only)
+            if (cachedHandbrakeMagnitude > 0.1f && cachedIsFullMode)
+            {
+                Function.Call((Hash)0xE8A25867FBA3B05E, 0, 76, cachedHandbrakeMagnitude); // Handbrake
+
+                // During handbrake turns, also disable player throttle to prevent fighting the maneuver
+                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 71, true);
+                Function.Call((Hash)0xE8A25867FBA3B05E, 0, 71, 0f);
             }
 
             // Emergency measures for imminent collision
             if (cachedBrakeMagnitude >= 1.0f)
             {
-                Function.Call((Hash)0xE8A25867FBA3B05E, 0, 76, 1.0f); // Handbrake
+                Function.Call((Hash)0xE8A25867FBA3B05E, 0, 76, 1.0f); // Full handbrake
                 Function.Call((Hash)0xE8A25867FBA3B05E, 0, 71, 0f);   // Cut throttle
 
                 // In Full mode, if collision is truly unavoidable, force stop
@@ -5063,6 +6816,8 @@ namespace GrandTheftAccessibility
                 result = "audible Targetting Pitch Indicator. ";
             if (id == "navigationAssist")
                 result = "Navigation Assist (Obstacle Detection). ";
+            if (id == "navAssistBeeps")
+                result = "Navigation Assist Audio Beeps. ";
             if (id == "pickupDetection")
                 result = "Pickup/Item Detection. ";
             if (id == "coverDetection")
@@ -5107,6 +6862,10 @@ namespace GrandTheftAccessibility
                 result = "Steering Assist Mode: ";
             if (id == "shapeCasting")
                 result = "Enhanced Obstacle Detection (Shape Casting). ";
+            if (id == "roadTeleport")
+                result = "Auto-Teleport to Road (Drive Assist). ";
+            if (id == "waypointDriveAssist")
+                result = "Waypoint-Aware Drive Assist. ";
             if (id == "announceTime")
                 result = "Time of Day Announcements. ";
             if (id == "announceHeadings")
@@ -5247,6 +7006,1123 @@ namespace GrandTheftAccessibility
             // Vertical rotation (around right axis): blend horizontal result with up
             GTA.Math.Vector3 result = hRotated * (float)Math.Cos(vRad) + up * (float)Math.Sin(vRad);
             return GTA.Math.Vector3.Normalize(result);
+        }
+
+        // ============================================
+        // WINDOWS OCR METHODS
+        // ============================================
+
+        /// <summary>
+        /// Writes a debug message to the OCR log file in the scripts folder.
+        /// </summary>
+        private void OcrLog(string message)
+        {
+            if (!ocrDebug) return;
+
+            try
+            {
+                // Initialize log path if not set
+                if (ocrLogPath == null)
+                {
+                    // Try multiple methods to find the scripts folder
+                    string scriptsFolder = null;
+
+                    // Method 1: AppDomain base directory + scripts
+                    string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+                    string scriptsPath1 = Path.Combine(baseDir, "scripts");
+                    if (Directory.Exists(scriptsPath1))
+                    {
+                        scriptsFolder = scriptsPath1;
+                    }
+                    // Method 2: Just use base directory (GTA V root)
+                    else if (Directory.Exists(baseDir))
+                    {
+                        scriptsFolder = baseDir;
+                    }
+                    // Method 3: Try assembly location as fallback
+                    else
+                    {
+                        string dllPath = System.Reflection.Assembly.GetExecutingAssembly().Location;
+                        if (!string.IsNullOrEmpty(dllPath))
+                        {
+                            scriptsFolder = Path.GetDirectoryName(dllPath);
+                        }
+                    }
+
+                    // Final fallback: use temp folder
+                    if (string.IsNullOrEmpty(scriptsFolder) || !Directory.Exists(scriptsFolder))
+                    {
+                        scriptsFolder = Path.GetTempPath();
+                    }
+
+                    ocrLogPath = Path.Combine(scriptsFolder, "OCR_output_log.txt");
+
+                    // Clear the log file on first write
+                    File.WriteAllText(ocrLogPath, $"=== OCR Debug Log Started {DateTime.Now} ===\r\n");
+                    File.AppendAllText(ocrLogPath, $"Log path: {ocrLogPath}\r\n");
+                }
+
+                // Append timestamped message
+                string logLine = $"[{DateTime.Now:HH:mm:ss.fff}] {message}\r\n";
+                File.AppendAllText(ocrLogPath, logLine);
+            }
+            catch (Exception ex)
+            {
+                // Try to write error to a known location as last resort
+                try
+                {
+                    string emergencyLog = Path.Combine(Path.GetTempPath(), "OCR_output_log.txt");
+                    File.AppendAllText(emergencyLog, $"[{DateTime.Now}] Log error: {ex.Message}\r\n");
+                }
+                catch { }
+            }
+        }
+
+        /// <summary>
+        /// Initializes the Windows OCR engine if available.
+        /// </summary>
+        private void InitializeOcr()
+        {
+            if (ocrInitialized) return;
+
+            try
+            {
+                OcrLog("Initializing OCR engine...");
+
+                // Try to create OCR engine with English language
+                var language = new Windows.Globalization.Language("en-US");
+                if (OcrEngine.IsLanguageSupported(language))
+                {
+                    ocrEngine = OcrEngine.TryCreateFromLanguage(language);
+                    OcrLog("OCR engine created for English (en-US)");
+                }
+
+                // Fall back to user profile language if English isn't available
+                if (ocrEngine == null)
+                {
+                    ocrEngine = OcrEngine.TryCreateFromUserProfileLanguages();
+                    if (ocrEngine != null)
+                    {
+                        OcrLog("OCR engine created from user profile languages");
+                    }
+                }
+
+                ocrInitialized = true;
+
+                if (ocrEngine == null)
+                {
+                    OcrLog("ERROR: OCR engine failed to initialize - no supported language found");
+                }
+            }
+            catch (Exception ex)
+            {
+                ocrInitialized = true; // Don't keep retrying
+                ocrEngine = null;
+                OcrLog("ERROR: OCR init exception: " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Captures a region of the screen as a Bitmap using PrintWindow API.
+        /// This works better with DirectX games than GDI CopyFromScreen.
+        /// Requires Windows 8.1+ for PW_RENDERFULLCONTENT flag.
+        /// </summary>
+        private Bitmap CaptureScreenRegion(float leftPct, float topPct, float widthPct, float heightPct)
+        {
+            try
+            {
+                // Get the foreground window (should be GTA V)
+                IntPtr hwnd = GetForegroundWindow();
+
+                // Try to get DWM extended frame bounds (more accurate for DWM-composited windows)
+                RECT windowRect;
+                int dwmResult = DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS,
+                    out windowRect, Marshal.SizeOf(typeof(RECT)));
+
+                // Fall back to GetWindowRect if DWM fails
+                if (dwmResult != 0)
+                {
+                    GetWindowRect(hwnd, out windowRect);
+                }
+
+                int windowWidth = windowRect.Right - windowRect.Left;
+                int windowHeight = windowRect.Bottom - windowRect.Top;
+
+                // Ensure valid window size
+                if (windowWidth < 100 || windowHeight < 100)
+                {
+                    OcrLog($"Window too small: {windowWidth}x{windowHeight}");
+                    return null;
+                }
+
+                // Capture the entire window using PrintWindow with PW_RENDERFULLCONTENT
+                // This flag (Windows 8.1+) captures DirectX/hardware-accelerated content
+                Bitmap fullWindow = new Bitmap(windowWidth, windowHeight, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                using (Graphics g = Graphics.FromImage(fullWindow))
+                {
+                    IntPtr hdc = g.GetHdc();
+                    bool success = PrintWindow(hwnd, hdc, PW_RENDERFULLCONTENT);
+                    g.ReleaseHdc(hdc);
+
+                    if (!success)
+                    {
+                        OcrLog("PrintWindow failed, falling back to CopyFromScreen");
+                        // Fall back to traditional screen capture
+                        g.CopyFromScreen(windowRect.Left, windowRect.Top, 0, 0,
+                            new Size(windowWidth, windowHeight));
+                    }
+                }
+
+                // Calculate and extract the requested region
+                int regionLeft = (int)(windowWidth * leftPct);
+                int regionTop = (int)(windowHeight * topPct);
+                int regionWidth = (int)(windowWidth * widthPct);
+                int regionHeight = (int)(windowHeight * heightPct);
+
+                // Ensure minimum size
+                if (regionWidth < 50 || regionHeight < 50)
+                {
+                    fullWindow.Dispose();
+                    return null;
+                }
+
+                // Clamp to window bounds
+                regionLeft = Math.Max(0, Math.Min(regionLeft, windowWidth - regionWidth));
+                regionTop = Math.Max(0, Math.Min(regionTop, windowHeight - regionHeight));
+                regionWidth = Math.Min(regionWidth, windowWidth - regionLeft);
+                regionHeight = Math.Min(regionHeight, windowHeight - regionTop);
+
+                // Extract the region
+                Bitmap regionBitmap = new Bitmap(regionWidth, regionHeight, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                using (Graphics g = Graphics.FromImage(regionBitmap))
+                {
+                    g.DrawImage(fullWindow,
+                        new Rectangle(0, 0, regionWidth, regionHeight),
+                        new Rectangle(regionLeft, regionTop, regionWidth, regionHeight),
+                        GraphicsUnit.Pixel);
+                }
+                fullWindow.Dispose();
+
+                // Save debug screenshots (first 3 only to avoid filling disk)
+                if (ocrSaveScreenshots && ocrScreenshotCount < 3)
+                {
+                    try
+                    {
+                        string screenshotPath = Path.Combine(
+                            Path.GetDirectoryName(ocrLogPath) ?? Path.GetTempPath(),
+                            $"OCR_debug_{ocrScreenshotCount++}.png");
+                        regionBitmap.Save(screenshotPath, System.Drawing.Imaging.ImageFormat.Png);
+                        OcrLog($"Saved debug screenshot: {screenshotPath}");
+                    }
+                    catch (Exception ssEx)
+                    {
+                        OcrLog($"Failed to save screenshot: {ssEx.Message}");
+                    }
+                }
+
+                return regionBitmap;
+            }
+            catch (Exception ex)
+            {
+                OcrLog("Screen capture failed: " + ex.Message);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Converts a System.Drawing.Bitmap to a Windows.Graphics.Imaging.SoftwareBitmap for OCR.
+        /// </summary>
+        private async Task<SoftwareBitmap> ConvertToSoftwareBitmap(Bitmap bitmap)
+        {
+            try
+            {
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    // Save bitmap to memory stream as PNG
+                    bitmap.Save(stream, System.Drawing.Imaging.ImageFormat.Png);
+                    stream.Position = 0;
+
+                    // Create IRandomAccessStream from memory stream
+                    var randomAccessStream = new InMemoryRandomAccessStream();
+                    await randomAccessStream.WriteAsync(stream.ToArray().AsBuffer());
+                    randomAccessStream.Seek(0);
+
+                    // Decode to SoftwareBitmap
+                    BitmapDecoder decoder = await BitmapDecoder.CreateAsync(randomAccessStream);
+                    SoftwareBitmap softwareBitmap = await decoder.GetSoftwareBitmapAsync(
+                        BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied);
+
+                    return softwareBitmap;
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine("Bitmap conversion failed: " + ex.Message);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Performs OCR on a screen region and returns the recognized text.
+        /// </summary>
+        private async Task<string> PerformOcrOnRegion(float leftPct, float topPct, float widthPct, float heightPct)
+        {
+            if (ocrEngine == null)
+            {
+                InitializeOcr();
+                if (ocrEngine == null)
+                {
+                    OcrLog("PerformOcrOnRegion: OCR engine is null after init attempt");
+                    return null;
+                }
+            }
+
+            try
+            {
+                OcrLog($"PerformOcrOnRegion: Capturing region L={leftPct:P0} T={topPct:P0} W={widthPct:P0} H={heightPct:P0}");
+
+                // Capture the screen region
+                using (Bitmap screenshot = CaptureScreenRegion(leftPct, topPct, widthPct, heightPct))
+                {
+                    if (screenshot == null)
+                    {
+                        OcrLog("PerformOcrOnRegion: Screen capture returned null");
+                        return null;
+                    }
+
+                    OcrLog($"PerformOcrOnRegion: Captured {screenshot.Width}x{screenshot.Height} bitmap");
+
+                    // Convert to SoftwareBitmap
+                    SoftwareBitmap softwareBitmap = await ConvertToSoftwareBitmap(screenshot);
+                    if (softwareBitmap == null)
+                    {
+                        OcrLog("PerformOcrOnRegion: SoftwareBitmap conversion returned null");
+                        return null;
+                    }
+
+                    try
+                    {
+                        OcrLog("PerformOcrOnRegion: Running OCR recognition...");
+
+                        // Perform OCR
+                        OcrResult result = await ocrEngine.RecognizeAsync(softwareBitmap);
+
+                        if (result != null && result.Lines.Count > 0)
+                        {
+                            OcrLog($"PerformOcrOnRegion: Found {result.Lines.Count} lines of text");
+
+                            // Combine all lines into a single string
+                            List<string> lines = new List<string>();
+                            foreach (var line in result.Lines)
+                            {
+                                string lineText = line.Text.Trim();
+                                if (!string.IsNullOrWhiteSpace(lineText))
+                                {
+                                    lines.Add(lineText);
+                                }
+                            }
+                            return string.Join(". ", lines);
+                        }
+                        else
+                        {
+                            OcrLog("PerformOcrOnRegion: OCR returned no lines");
+                        }
+                    }
+                    finally
+                    {
+                        softwareBitmap?.Dispose();
+                    }
+                }
+
+                return null;
+            }
+            catch (Exception ex)
+            {
+                OcrLog("PerformOcrOnRegion ERROR: " + ex.Message);
+                return null;
+            }
+        }
+
+        // ============================================
+        // SHARED MEMORY GAME STATE COMMUNICATION
+        // Writes game state to shared memory for external MenuHelper
+        // ============================================
+
+        /// <summary>
+        /// Initializes the shared memory for communication with external MenuHelper.
+        /// </summary>
+        private void InitializeSharedMemory()
+        {
+            try
+            {
+                // Create or open the shared memory file
+                sharedMemory = MemoryMappedFile.CreateOrOpen(
+                    SHARED_MEMORY_NAME,
+                    SHARED_MEMORY_SIZE,
+                    MemoryMappedFileAccess.ReadWrite);
+
+                sharedMemoryAccessor = sharedMemory.CreateViewAccessor(0, SHARED_MEMORY_SIZE);
+                OcrLog("Shared memory initialized: " + SHARED_MEMORY_NAME);
+
+                // Initialize with zeros
+                for (int i = 0; i < SHARED_MEMORY_SIZE; i++)
+                {
+                    sharedMemoryAccessor.Write(i, (byte)0);
+                }
+            }
+            catch (Exception ex)
+            {
+                OcrLog("Failed to initialize shared memory: " + ex.Message);
+                sharedMemory = null;
+                sharedMemoryAccessor = null;
+            }
+        }
+
+        /// <summary>
+        /// Writes current game state to shared memory for external process to read.
+        /// Called every tick. When script pauses, the last state remains readable.
+        /// </summary>
+        private void HandlePauseMenuAccessibility()
+        {
+            try
+            {
+                // Get current game state from natives
+                bool menuActive = Function.Call<bool>(Hash.IS_PAUSE_MENU_ACTIVE);
+                int menuState = Function.Call<int>(Hash.GET_PAUSE_MENU_STATE);
+                bool phoneVisible = Function.Call<bool>(Hash.CAN_PHONE_BE_SEEN_ON_SCREEN);
+
+                // Only consider phone visible if game is fully loaded
+                if (phoneVisible && Game.IsLoading)
+                {
+                    phoneVisible = false;
+                }
+
+                // NOTE: Pause menu selection reading was attempted but GTA V only exposes
+                // numerical menu IDs, not the actual text content. Feature shelved.
+                int menuSelection = 0;
+
+                // Write state to shared memory for external MenuHelper to read
+                WriteGameStateToSharedMemory(menuActive, menuState, phoneVisible, menuSelection);
+
+                // Also handle state changes for in-process announcements (when not paused)
+                if (menuActive && !pauseMenuWasActive)
+                {
+                    OcrLog($"Pause menu opened, state={menuState}");
+                    // Don't announce here - let external helper handle it
+                    pauseMenuWasActive = true;
+                }
+                else if (!menuActive && pauseMenuWasActive)
+                {
+                    OcrLog("Pause menu closed");
+                    pauseMenuWasActive = false;
+                }
+
+                // Track phone state changes
+                if (phoneVisible && !bgPhoneWasOpen)
+                {
+                    OcrLog("Phone opened");
+                    bgPhoneWasOpen = true;
+                }
+                else if (!phoneVisible && bgPhoneWasOpen)
+                {
+                    OcrLog("Phone closed");
+                    bgPhoneWasOpen = false;
+                }
+            }
+            catch (Exception ex)
+            {
+                OcrLog("HandlePauseMenuAccessibility error: " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Writes game state to shared memory.
+        /// </summary>
+        private void WriteGameStateToSharedMemory(bool menuActive, int menuState, bool phoneVisible, int menuSelection)
+        {
+            if (sharedMemoryAccessor == null) return;
+
+            try
+            {
+                // Offset 0: isPauseMenuActive
+                sharedMemoryAccessor.Write(0, (byte)(menuActive ? 1 : 0));
+
+                // Offset 1: pauseMenuState
+                sharedMemoryAccessor.Write(1, (byte)menuState);
+
+                // Offset 2: isPhoneVisible
+                sharedMemoryAccessor.Write(2, (byte)(phoneVisible ? 1 : 0));
+
+                // Offset 3: menuSelection
+                sharedMemoryAccessor.Write(3, (byte)menuSelection);
+
+                // Offset 4-7: timestamp (Environment.TickCount)
+                sharedMemoryAccessor.Write(4, Environment.TickCount);
+            }
+            catch (Exception ex)
+            {
+                OcrLog("WriteGameStateToSharedMemory error: " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Cleanup shared memory on script abort.
+        /// </summary>
+        private void CleanupSharedMemory()
+        {
+            try
+            {
+                // Write "not active" state before closing
+                if (sharedMemoryAccessor != null)
+                {
+                    sharedMemoryAccessor.Write(0, (byte)0); // menu not active
+                    sharedMemoryAccessor.Write(2, (byte)0); // phone not visible
+                    sharedMemoryAccessor.Dispose();
+                    sharedMemoryAccessor = null;
+                }
+                if (sharedMemory != null)
+                {
+                    sharedMemory.Dispose();
+                    sharedMemory = null;
+                }
+                OcrLog("Shared memory cleaned up");
+            }
+            catch { }
+        }
+
+        private bool pauseMenuWasActive = false;
+
+        /// <summary>
+        /// Announces the current pause menu tab based on state index.
+        /// </summary>
+        private void AnnounceMenuTab(int state)
+        {
+            string tabName;
+            switch (state)
+            {
+                case 0: tabName = "Map"; break;
+                case 1: tabName = "Brief"; break;
+                case 2: tabName = "Stats"; break;
+                case 3: tabName = "Settings"; break;
+                case 4: tabName = "Game"; break;
+                case 5: tabName = "Gallery"; break;
+                case 6: tabName = "Info"; break;
+                case 7: tabName = "Store"; break;
+                case 8: tabName = "Social Club"; break;
+                case 9: tabName = "Friends"; break;
+                case 10: tabName = "Crews"; break;
+                default: tabName = $"Tab {state}"; break;
+            }
+            Tolk.Speak(tabName, true);
+        }
+
+        /// <summary>
+        /// Triggers OCR for phone UI and speaks the result.
+        /// </summary>
+        private async void TriggerPhoneOcr()
+        {
+            if (ocrInProgress) return;
+            if (DateTime.Now.Ticks - lastOcrTicks < OCR_COOLDOWN_TICKS) return;
+
+            ocrInProgress = true;
+            lastOcrTicks = DateTime.Now.Ticks;
+
+            try
+            {
+                OcrLog("Phone OCR triggered");
+
+                string ocrText = await PerformOcrOnRegion(
+                    PHONE_REGION_LEFT, PHONE_REGION_TOP,
+                    PHONE_REGION_WIDTH, PHONE_REGION_HEIGHT);
+
+                if (string.IsNullOrWhiteSpace(ocrText))
+                {
+                    OcrLog("Phone OCR: No text found");
+                }
+                else if (ocrText != lastOcrText)
+                {
+                    OcrLog("Phone OCR result: " + ocrText);
+                    lastOcrText = ocrText;
+                    Tolk.Speak(ocrText, true);
+                }
+                else
+                {
+                    OcrLog("Phone OCR: Same text as before, not speaking");
+                }
+            }
+            catch (Exception ex)
+            {
+                OcrLog("Phone OCR error: " + ex.Message);
+            }
+            finally
+            {
+                ocrInProgress = false;
+            }
+        }
+
+        /// <summary>
+        /// Triggers OCR for pause menu UI and speaks the result.
+        /// </summary>
+        private async void TriggerMenuOcr()
+        {
+            if (ocrInProgress) return;
+            if (DateTime.Now.Ticks - lastOcrTicks < OCR_COOLDOWN_TICKS) return;
+
+            ocrInProgress = true;
+            lastOcrTicks = DateTime.Now.Ticks;
+
+            try
+            {
+                OcrLog("Menu OCR triggered");
+
+                string ocrText = await PerformOcrOnRegion(
+                    MENU_REGION_LEFT, MENU_REGION_TOP,
+                    MENU_REGION_WIDTH, MENU_REGION_HEIGHT);
+
+                if (string.IsNullOrWhiteSpace(ocrText))
+                {
+                    OcrLog("Menu OCR: No text found");
+                }
+                else if (ocrText != lastOcrText)
+                {
+                    OcrLog("Menu OCR result: " + ocrText);
+                    lastOcrText = ocrText;
+                    Tolk.Speak(ocrText, true);
+                }
+                else
+                {
+                    OcrLog("Menu OCR: Same text as before, not speaking");
+                }
+            }
+            catch (Exception ex)
+            {
+                OcrLog("Menu OCR error: " + ex.Message);
+            }
+            finally
+            {
+                ocrInProgress = false;
+            }
+        }
+
+        /// <summary>
+        /// Manual OCR trigger (can be bound to a key).
+        /// Reads the center of the screen.
+        /// </summary>
+        private async void TriggerManualOcr()
+        {
+            if (ocrInProgress)
+            {
+                Tolk.Speak("OCR in progress", true);
+                return;
+            }
+
+            ocrInProgress = true;
+            OcrLog("Manual OCR triggered");
+            Tolk.Speak("Reading screen", true);
+
+            try
+            {
+                // Read a large center region
+                string ocrText = await PerformOcrOnRegion(0.10f, 0.10f, 0.80f, 0.80f);
+
+                if (!string.IsNullOrWhiteSpace(ocrText))
+                {
+                    OcrLog("Manual OCR result: " + ocrText);
+                    Tolk.Speak(ocrText, true);
+                }
+                else
+                {
+                    OcrLog("Manual OCR: No text detected");
+                    Tolk.Speak("No text detected", true);
+                }
+            }
+            catch (Exception ex)
+            {
+                OcrLog("Manual OCR error: " + ex.Message);
+                Tolk.Speak("OCR failed", true);
+            }
+            finally
+            {
+                ocrInProgress = false;
+            }
+        }
+
+        // ============================================
+        // GLOBAL KEYBOARD HOOK FOR PAUSE MENU OCR
+        // Works even when ScriptHookVDotNet is paused
+        // ============================================
+
+        /// <summary>
+        /// Called when the script is aborted - clean up resources
+        /// </summary>
+        private void onAborted(object sender, EventArgs e)
+        {
+            CleanupSharedMemory();
+            StopMenuMonitorThread();
+            UninstallKeyboardHook();
+        }
+
+        /// <summary>
+        /// Installs a low-level keyboard hook to capture F12 for OCR during pause menu
+        /// </summary>
+        private void InstallKeyboardHook()
+        {
+            if (globalKeyboardHook != IntPtr.Zero)
+                return; // Already installed
+
+            try
+            {
+                // Keep a reference to prevent garbage collection
+                keyboardProcDelegate = KeyboardHookCallback;
+
+                using (var curProcess = System.Diagnostics.Process.GetCurrentProcess())
+                using (var curModule = curProcess.MainModule)
+                {
+                    globalKeyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, keyboardProcDelegate,
+                        GetModuleHandle(curModule.ModuleName), 0);
+                }
+
+                if (globalKeyboardHook != IntPtr.Zero)
+                {
+                    OcrLog("Global keyboard hook installed - F12 for OCR");
+                }
+                else
+                {
+                    OcrLog("Failed to install keyboard hook: " + Marshal.GetLastWin32Error());
+                }
+            }
+            catch (Exception ex)
+            {
+                OcrLog("Keyboard hook install error: " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Removes the global keyboard hook
+        /// </summary>
+        private void UninstallKeyboardHook()
+        {
+            if (globalKeyboardHook != IntPtr.Zero)
+            {
+                UnhookWindowsHookEx(globalKeyboardHook);
+                globalKeyboardHook = IntPtr.Zero;
+                OcrLog("Global keyboard hook uninstalled");
+            }
+        }
+
+        /// <summary>
+        /// Keyboard hook callback - triggered on every keypress system-wide
+        /// </summary>
+        private IntPtr KeyboardHookCallback(int nCode, IntPtr wParam, IntPtr lParam)
+        {
+            if (nCode >= 0 && wParam == (IntPtr)WM_KEYDOWN)
+            {
+                int vkCode = Marshal.ReadInt32(lParam);
+
+                // F12 = Trigger OCR reading of the screen
+                if (vkCode == VK_F12)
+                {
+                    OcrLog("F12 pressed - triggering OCR from keyboard hook");
+                    // Run OCR on a background thread to avoid blocking the hook
+                    Task.Run(() => PerformHookTriggeredOcr());
+                }
+            }
+            return CallNextHookEx(globalKeyboardHook, nCode, wParam, lParam);
+        }
+
+        /// <summary>
+        /// OCR triggered from keyboard hook - runs on background thread
+        /// </summary>
+        private void PerformHookTriggeredOcr()
+        {
+            if (ocrInProgress)
+            {
+                Tolk.Speak("Reading in progress", true);
+                return;
+            }
+
+            ocrInProgress = true;
+            OcrLog("Hook-triggered OCR starting");
+            Tolk.Speak("Reading", true);
+
+            try
+            {
+                // Use synchronous OCR since we're already on a background thread
+                using (Bitmap screenshot = CaptureScreenRegion(0.05f, 0.05f, 0.90f, 0.90f))
+                {
+                    if (screenshot == null)
+                    {
+                        Tolk.Speak("Capture failed", true);
+                        return;
+                    }
+
+                    // Wait for async OCR to complete
+                    var task = PerformOcrOnBitmap(screenshot);
+                    task.Wait();
+                    string result = task.Result;
+
+                    if (!string.IsNullOrWhiteSpace(result))
+                    {
+                        OcrLog("Hook OCR result: " + result);
+                        Tolk.Speak(result, true);
+                    }
+                    else
+                    {
+                        Tolk.Speak("No text found", true);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                OcrLog("Hook OCR error: " + ex.Message);
+                Tolk.Speak("Read failed", true);
+            }
+            finally
+            {
+                ocrInProgress = false;
+            }
+        }
+
+        // ============================================
+        // BACKGROUND MENU/PHONE MONITOR THREAD
+        // Runs independently of game tick - works during pause menu
+        // ============================================
+
+        /// <summary>
+        /// Starts the background menu monitor thread
+        /// </summary>
+        private void StartMenuMonitorThread()
+        {
+            if (menuMonitorThread != null && menuMonitorThread.IsAlive)
+                return;
+
+            menuMonitorRunning = true;
+            menuMonitorThread = new Thread(MenuMonitorLoop);
+            menuMonitorThread.IsBackground = true;
+            menuMonitorThread.Name = "GTA11Y_MenuMonitor";
+            menuMonitorThread.Start();
+            OcrLog("Background menu monitor thread started");
+        }
+
+        /// <summary>
+        /// Stops the background menu monitor thread
+        /// </summary>
+        private void StopMenuMonitorThread()
+        {
+            menuMonitorRunning = false;
+            if (menuMonitorThread != null)
+            {
+                menuMonitorThread.Join(1000); // Wait up to 1 second
+                menuMonitorThread = null;
+            }
+            OcrLog("Background menu monitor thread stopped");
+        }
+
+        /// <summary>
+        /// Background thread loop that monitors for pause menu/phone via screen analysis
+        /// </summary>
+        private void MenuMonitorLoop()
+        {
+            OcrLog("MenuMonitorLoop started");
+
+            while (menuMonitorRunning)
+            {
+                try
+                {
+                    // Check screen for pause menu indicators
+                    // The pause menu has a dark overlay and specific UI elements
+                    bool menuDetected = DetectPauseMenuViaScreen();
+                    bool phoneDetected = DetectPhoneViaScreen();
+
+                    // Handle pause menu state changes
+                    if (menuDetected && !bgMenuWasOpen)
+                    {
+                        OcrLog("[BG] Pause menu detected via screen analysis");
+                        Tolk.Speak("Pause menu", true);
+                        bgMenuWasOpen = true;
+                        bgLastOcrText = "";
+
+                        // Give menu time to fully render, then OCR
+                        Thread.Sleep(300);
+                        PerformBackgroundMenuOcr();
+                    }
+                    else if (!menuDetected && bgMenuWasOpen)
+                    {
+                        OcrLog("[BG] Pause menu closed");
+                        Tolk.Speak("Menu closed", true);
+                        bgMenuWasOpen = false;
+                        bgLastOcrText = "";
+                    }
+                    else if (menuDetected && bgMenuWasOpen)
+                    {
+                        // Menu still open - periodically check for changes
+                        PerformBackgroundMenuOcr();
+                    }
+
+                    // Handle phone state changes (only when menu not open)
+                    if (!menuDetected)
+                    {
+                        if (phoneDetected && !bgPhoneWasOpen)
+                        {
+                            OcrLog("[BG] Phone detected via screen analysis");
+                            Tolk.Speak("Phone", true);
+                            bgPhoneWasOpen = true;
+                            bgLastOcrText = "";
+
+                            Thread.Sleep(500); // Let phone animation complete
+                            PerformBackgroundPhoneOcr();
+                        }
+                        else if (!phoneDetected && bgPhoneWasOpen)
+                        {
+                            OcrLog("[BG] Phone closed");
+                            Tolk.Speak("Phone closed", true);
+                            bgPhoneWasOpen = false;
+                            bgLastOcrText = "";
+                        }
+                        else if (phoneDetected && bgPhoneWasOpen)
+                        {
+                            // Phone still open - periodically check for changes
+                            PerformBackgroundPhoneOcr();
+                        }
+                    }
+
+                    // Sleep between checks
+                    Thread.Sleep(200); // Check 5 times per second
+                }
+                catch (Exception ex)
+                {
+                    OcrLog("[BG] Error in MenuMonitorLoop: " + ex.Message);
+                    Thread.Sleep(500);
+                }
+            }
+
+            OcrLog("MenuMonitorLoop ended");
+        }
+
+        /// <summary>
+        /// Detects if pause menu is visible by checking screen characteristics
+        /// The pause menu has a dark semi-transparent overlay
+        /// </summary>
+        private bool DetectPauseMenuViaScreen()
+        {
+            try
+            {
+                // Capture a small region at the top-left where menu header typically appears
+                // The pause menu has a dark background with specific brightness levels
+                using (Bitmap screenshot = CaptureScreenRegion(0.0f, 0.0f, 0.15f, 0.10f))
+                {
+                    if (screenshot == null) return false;
+
+                    // Calculate average brightness of the region
+                    // Pause menu has a dark overlay (low brightness)
+                    long totalBrightness = 0;
+                    int pixelCount = 0;
+
+                    // Sample every 4th pixel for speed
+                    for (int x = 0; x < screenshot.Width; x += 4)
+                    {
+                        for (int y = 0; y < screenshot.Height; y += 4)
+                        {
+                            Color pixel = screenshot.GetPixel(x, y);
+                            totalBrightness += (pixel.R + pixel.G + pixel.B) / 3;
+                            pixelCount++;
+                        }
+                    }
+
+                    float avgBrightness = (float)totalBrightness / pixelCount;
+
+                    // Also check a region in the center where menu content appears
+                    using (Bitmap centerShot = CaptureScreenRegion(0.35f, 0.10f, 0.30f, 0.15f))
+                    {
+                        if (centerShot == null) return false;
+
+                        // Check if center has text-like patterns (higher contrast)
+                        // Pause menu typically has white/yellow text on dark background
+                        int brightPixels = 0;
+                        int darkPixels = 0;
+
+                        for (int x = 0; x < centerShot.Width; x += 4)
+                        {
+                            for (int y = 0; y < centerShot.Height; y += 4)
+                            {
+                                Color pixel = centerShot.GetPixel(x, y);
+                                int brightness = (pixel.R + pixel.G + pixel.B) / 3;
+                                if (brightness > 200) brightPixels++;
+                                else if (brightness < 50) darkPixels++;
+                            }
+                        }
+
+                        // Pause menu: dark edges (low avgBrightness) + center has both bright text and dark background
+                        bool hasMenuCharacteristics = avgBrightness < 40 && darkPixels > 50 && brightPixels > 10;
+
+                        return hasMenuCharacteristics;
+                    }
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Detects if phone is visible by checking screen characteristics
+        /// </summary>
+        private bool DetectPhoneViaScreen()
+        {
+            try
+            {
+                // The phone appears in the center-right area with a distinctive shape
+                // It has a bright screen area with specific aspect ratio
+                using (Bitmap screenshot = CaptureScreenRegion(0.40f, 0.20f, 0.25f, 0.50f))
+                {
+                    if (screenshot == null) return false;
+
+                    // Phone screen is typically bright with UI elements
+                    // Check for high brightness concentration in phone-shaped region
+                    int brightPixels = 0;
+                    int totalSamples = 0;
+
+                    for (int x = 0; x < screenshot.Width; x += 4)
+                    {
+                        for (int y = 0; y < screenshot.Height; y += 4)
+                        {
+                            Color pixel = screenshot.GetPixel(x, y);
+                            int brightness = (pixel.R + pixel.G + pixel.B) / 3;
+                            if (brightness > 150) brightPixels++;
+                            totalSamples++;
+                        }
+                    }
+
+                    // Phone typically has a bright screen area
+                    float brightRatio = (float)brightPixels / totalSamples;
+
+                    // If more than 15% of pixels are bright, might be phone
+                    // This is a heuristic and may need tuning
+                    return brightRatio > 0.15f && brightRatio < 0.6f;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Performs OCR on the pause menu from background thread
+        /// </summary>
+        private void PerformBackgroundMenuOcr()
+        {
+            try
+            {
+                // Initialize OCR if needed (thread-safe)
+                if (ocrEngine == null)
+                {
+                    InitializeOcr();
+                    if (ocrEngine == null) return;
+                }
+
+                using (Bitmap screenshot = CaptureScreenRegion(
+                    MENU_REGION_LEFT, MENU_REGION_TOP,
+                    MENU_REGION_WIDTH, MENU_REGION_HEIGHT))
+                {
+                    if (screenshot == null) return;
+
+                    // Run OCR synchronously in background thread
+                    var task = PerformOcrOnBitmap(screenshot);
+                    task.Wait();
+                    string ocrText = task.Result;
+
+                    if (!string.IsNullOrWhiteSpace(ocrText) && ocrText != bgLastOcrText)
+                    {
+                        OcrLog("[BG] Menu OCR: " + ocrText);
+                        bgLastOcrText = ocrText;
+                        Tolk.Speak(ocrText, true);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                OcrLog("[BG] Menu OCR error: " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Performs OCR on the phone from background thread
+        /// </summary>
+        private void PerformBackgroundPhoneOcr()
+        {
+            try
+            {
+                if (ocrEngine == null)
+                {
+                    InitializeOcr();
+                    if (ocrEngine == null) return;
+                }
+
+                using (Bitmap screenshot = CaptureScreenRegion(
+                    PHONE_REGION_LEFT, PHONE_REGION_TOP,
+                    PHONE_REGION_WIDTH, PHONE_REGION_HEIGHT))
+                {
+                    if (screenshot == null) return;
+
+                    var task = PerformOcrOnBitmap(screenshot);
+                    task.Wait();
+                    string ocrText = task.Result;
+
+                    if (!string.IsNullOrWhiteSpace(ocrText) && ocrText != bgLastOcrText)
+                    {
+                        OcrLog("[BG] Phone OCR: " + ocrText);
+                        bgLastOcrText = ocrText;
+                        Tolk.Speak(ocrText, true);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                OcrLog("[BG] Phone OCR error: " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Performs OCR on a bitmap and returns the text
+        /// </summary>
+        private async Task<string> PerformOcrOnBitmap(Bitmap bitmap)
+        {
+            try
+            {
+                SoftwareBitmap softwareBitmap = await ConvertToSoftwareBitmap(bitmap);
+                if (softwareBitmap == null) return null;
+
+                try
+                {
+                    OcrResult result = await ocrEngine.RecognizeAsync(softwareBitmap);
+
+                    if (result != null && result.Lines.Count > 0)
+                    {
+                        List<string> lines = new List<string>();
+                        foreach (var line in result.Lines)
+                        {
+                            string lineText = line.Text.Trim();
+                            if (!string.IsNullOrWhiteSpace(lineText))
+                            {
+                                lines.Add(lineText);
+                            }
+                        }
+                        return string.Join(". ", lines);
+                    }
+                }
+                finally
+                {
+                    softwareBitmap?.Dispose();
+                }
+
+                return null;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
     }
