@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>GTA11Y_MenuHelper</AssemblyName>
+    <ApplicationIcon />
+    <StartupObject>GTA11Y.MenuHelper.Program</StartupObject>
+    <!-- Output to same directory as main mod -->
+    <OutputPath>..\GTA\bin\Debug\net48\</OutputPath>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Windows.SDK.Contracts" Version="10.0.19041.1" />
+  </ItemGroup>
+
+  <!-- Include Tolk wrapper from main project -->
+  <ItemGroup>
+    <Compile Include="..\GTA\Tolk.cs" Link="Tolk.cs" />
+  </ItemGroup>
+
+</Project>

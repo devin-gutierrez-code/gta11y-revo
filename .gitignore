@@ -47,3 +47,7 @@ CodeCoverage/
 TestResult.xml
 nunit-*.xml
 claude.md
+
+# Claude Code tooling and temp files
+.claude/
+.tmp_nat.json
