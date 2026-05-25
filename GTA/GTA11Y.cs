@@ -7564,7 +7564,17 @@ namespace GrandTheftAccessibility
                     staticWallFacesUs = GTA.Math.Vector3.Dot(sn, -sfwd) > WALL_NORMAL_FACE_DOT;
                 }
                 bool staticInCone = IsInBrakeCone(playerVeh, staticHitPos);
-                if (!staticInCone && !staticWallFacesUs)
+                // Head-on bypass is only safe at short range. The capsule sweep
+                // has lateral radius up to 2.2 m and runs out to v*3.5 (>100 m
+                // at highway speed), so a building corner 20-30 m off-axis can
+                // still register a "head-on" normal — promoting it to a brake
+                // threat caused the wall-collision cluster in the
+                // driveassist-2026-05-25-103730 audit. Beyond STATIC_HEADON_RANGE
+                // require the in-cone gate to also pass; below it the head-on
+                // bypass still wins because we're close enough that an
+                // imminent dead-ahead wall is a true emergency.
+                const float STATIC_HEADON_RANGE = 8f;
+                if (!staticInCone && !(staticWallFacesUs && staticDist <= STATIC_HEADON_RANGE))
                     staticHitValid = false;
             }
             if (staticHitValid)
