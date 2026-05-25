@@ -147,6 +147,14 @@ namespace GrandTheftAccessibility
         private float cachedSteerCorrection = 0f;
         private float cachedBrakeMagnitude = 0f;
         private int cachedAvoidDirection = 0;
+        // Hysteresis on the avoidance direction so per-scan ping-pong doesn't
+        // yaw-oscillate the wheel. Tracks the last proposed direction and how
+        // many consecutive frames we've seen it. Only a *sign flip* against the
+        // currently published direction triggers the hold; clearing to 0 or
+        // sticking to the same sign publishes immediately.
+        private int proposedAvoidDirection = 0;
+        private int avoidDirHoldFrames = 0;
+        private const int AVOID_DIR_FLIP_HOLD = 3;
         private bool cachedIsFullMode = false;
         private bool cachedIsBraking = false; // True when system is actively braking (blocks throttle in full mode)
 
@@ -166,6 +174,15 @@ namespace GrandTheftAccessibility
         private GTA.Math.Vector3 cachedBrakeThreatPos = GTA.Math.Vector3.Zero;
         private GTA.Math.Vector3 cachedBrakeThreatVel = GTA.Math.Vector3.Zero;
         private long cachedBrakeThreatStamp = 0;
+        // First-seen tracking for the cached brake threat. The Stamp field is
+        // refreshed every frame the scan reconfirms the threat — useless for
+        // staleness when the cache is being continuously re-confirmed by a curb
+        // or roadside feature. FirstSeenStamp captures when the threat was
+        // initially noticed (only reset when the cache actually clears) plus the
+        // player position at that moment, so we can detect the F4137-style
+        // "stuck against same spot, cache never clears" pattern.
+        private long cachedBrakeThreatFirstSeenStamp = 0;
+        private GTA.Math.Vector3 cachedBrakeThreatFirstSeenPlayerPos = GTA.Math.Vector3.Zero;
         // Same for the closest steer-relevant threat.
         private GTA.Math.Vector3 cachedSteerThreatPos = GTA.Math.Vector3.Zero;
         private GTA.Math.Vector3 cachedSteerThreatVel = GTA.Math.Vector3.Zero;
@@ -363,6 +380,13 @@ namespace GrandTheftAccessibility
         private const float LANE_WIDTH_SURFACE = 3.2f;        // Surface street lane width
         private GTA.Math.Vector3 ppGoalSmoothed = GTA.Math.Vector3.Zero;
         private bool ppGoalInitialized = false;
+        // Lane-selection hysteresis. Without this, when the player sits near a
+        // lane boundary the Math.Round() in LaneCenterFromNode flips between
+        // adjacent lane indices on noise frames, producing a goal point that
+        // jumps a full lane width side-to-side. Requires the player to cross
+        // the boundary by 0.4 m before accepting a one-step lane change.
+        private int lastLaneIndex = int.MinValue;
+        private const float LANE_CHANGE_HYSTERESIS_M = 0.4f;
 
         // Pre-emptive curve braking: slow down before a sharp bend so the
         // vehicle does not exceed its lateral grip limit and spin out.
@@ -455,6 +479,14 @@ namespace GrandTheftAccessibility
         // wandering. Require 3 consecutive failures before falling back.
         private int laneKeepFailureStreak = 0;
         private const int LANEKEEP_FAILURE_HYSTERESIS = 3;
+        // Wall-clock decay for the fail streak. Under contested chaos
+        // laneKeepOk flickers and the streak gets stuck near its cap. Track the
+        // last time the streak was incremented and decay by 1 every
+        // STREAK_TIME_DECAY_MS that passes without a new increment, regardless
+        // of the per-frame OK check. This lets the streak drain on its own when
+        // the player has driven through a noisy patch.
+        private long lastStreakIncrementTicks = 0;
+        private const long STREAK_TIME_DECAY_MS = 500;
         // EARLY SKEW DETECTION: lane-keep reports "on road" whenever a path
         // polyline exists, even while the car is badly rotated off the road
         // tangent. A sustained large heading error counts as a lane-keep
@@ -462,6 +494,24 @@ namespace GrandTheftAccessibility
         private const float LANEKEEP_SKEW_FAIL_ANGLE = 38f;
         private const int LANEKEEP_SKEW_FAIL_FRAMES = 10;
         private int skewFailureStreak = 0;
+        // PERSISTENT-SKEW ESCALATION. The 4-layer stuck recovery (see
+        // MonitorStuckAutodrive) only fires when speed < 0.7 m/s, which means a
+        // car still rolling but pinned >50 deg sideways never escalates. The
+        // dominant failure pattern in driveassist-2026-05-25-012227 was exactly
+        // this: skew 78-97 deg, failStreak=20, mode-flipping every ~180 ms and
+        // never recovering. This adds two earlier escalation rungs that fire on
+        // SKEW DURATION, not on stop duration:
+        //   2 s skewed -> bypass the steer rate-clamp so the saturated road
+        //                 correction actually executes in one frame
+        //   4 s skewed + low speed -> SET_VEHICLE_ON_GROUND_PROPERLY directly
+        private const float PERSISTENT_SKEW_ANGLE       = 50f;
+        private const int   PERSISTENT_SKEW_BYPASS_MS   = 2000;
+        private const int   PERSISTENT_SKEW_RIGHT_MS    = 4000;
+        private const float PERSISTENT_SKEW_RIGHT_SPEED = 2.0f;
+        private long persistentSkewStartTicks = 0;
+        private bool bypassSteerRateClampThisFrame = false;
+        private long lastSkewRighteningTicks = 0;
+        private const long SKEW_RIGHTEN_COOLDOWN_TICKS  = 60000000; // 6 s
         // Recovery target is latched once chosen (see FindBestRecoveryNode call
         // site) so the car pursues a STABLE node instead of chasing a moving
         // "nearest node" and orbiting it.
@@ -473,6 +523,87 @@ namespace GrandTheftAccessibility
         // sign of headingDelta flips frame-to-frame as the angle wraps; latching
         // one direction keeps the car committed to a single U-turn.
         private int recoveryUturnDir = 0;
+
+        // ============================================
+        // ROLLING HISTORY BUFFER — per-frame snapshot of the drive-assist
+        // decision state. Lets gates require sustained evidence (e.g. "stayed
+        // off the road for >250 ms") instead of acting on a single noisy frame.
+        // Addresses three failure clusters observed in driveassist logs:
+        //  C1 — single-frame avoid-steer slams (instant 0->0.8 felt as a jolt)
+        //  C2 — mode oscillation (LaneKeeping <-> Aligning every ~60 frames)
+        //  C3 — gridlock where a stale brake-threat held the car stopped
+        // The polyline itself is NOT stored — it must rebuild each frame
+        // (spatial derivative of vehicle pos). Only derived metrics are kept.
+        // ============================================
+        private struct DriveAssistSnapshot
+        {
+            public long  TimestampTicks;
+            public long  FrameCount;
+            public float DeltaTimeSec;
+
+            public float SpeedMs;
+            public GTA.Math.Vector3 Position;
+            public float Heading;
+
+            public bool  IsOnValidRoad;
+            public float RoadHeadingDelta;
+            public float LaneLateralError;
+            public int   ClosestPolySegIdx;
+            public int   PolylinePointCount;
+
+            public DriveMode Mode;
+            public int   LaneKeepFailureStreak;
+            public bool  LaneKeepOkRaw;   // pre-hysteresis; gate queries use this
+
+            public float CachedSteerCorrection;
+            public float SmoothedSteerCorrection;
+            public float SmoothedRoadCorrection;
+            public int   CachedAvoidDirection;
+            public float CachedBrakeMagnitude;
+            public bool  EmergencyBrakeActive;
+
+            public float SteerTTC;
+            public float BrakeTTC;
+            public GTA.Math.Vector3 CachedBrakeThreatPos;
+            public long  CachedBrakeThreatStamp;
+            public bool  HasSteerThreat;
+            public bool  HasBrakeThreat;
+
+            public float NavDistCenter, NavDistLeft, NavDistRight, NavDistBehind;
+        }
+        private const int HISTORY_CAPACITY  = 32;   // ~500 ms @ 60 fps; slack for spikes
+        private const int HISTORY_WINDOW_MS = 200;  // default rolling-query window
+        private DriveAssistSnapshot[] history = new DriveAssistSnapshot[HISTORY_CAPACITY];
+        private int historyHead  = 0;   // index of next write
+        private int historyCount = 0;   // saturates at HISTORY_CAPACITY
+
+        // C2 — mode-transition hysteresis. Sustained-evidence gates in both
+        // directions; cap the failure streak so it can't accumulate to 46+ as
+        // the audit observed. Times in ms — frame-rate-independent.
+        private long lastModeChangeTicks = 0;
+        // Tuned 2026-05-25: mode flips were happening at ~530 ms intervals (the
+        // old 500 ms hysteresis + ~30 ms of evidence slack). Widen hysteresis to
+        // 800 ms and shorten the "all OK" confirm to 250 ms so the gap between
+        // "can return to LaneKeeping" and "can flip back out" is wider than the
+        // observed flip cadence.
+        private const int MODE_CHANGE_HYSTERESIS_MS   = 800;
+        private const int ALIGN_CONFIRM_MS            = 250;
+        private const int LANEKEEP_CONFIRM_MS         = 250;
+        private const int LANEKEEP_FAILURE_STREAK_CAP = 20;
+        // Fraction of OK frames in the confirm window below which we consider
+        // failure sustained. Strict "any OK frame = abort" caused false
+        // negatives in noisy detection windows.
+        private const float ALIGN_OK_FRACTION_MAX     = 0.20f;
+
+        // C3 — stale brake-threat re-scan. If we've been stopped >1 s while the
+        // cached brake threat is >1 s old AND emergencyBrakeActive is still set,
+        // the data is almost certainly stale; force-clear and let the next scan
+        // re-evaluate. 500 ms cooldown prevents re-trigger thrash.
+        private long lastForcedRescanTicks = 0;
+        private const int  STALE_THREAT_AGE_MS          = 1000;
+        private const int  GRIDLOCK_STOPPED_MS          = 1000;
+        private const float GRIDLOCK_SPEED_MS           = 0.3f;
+        private const long FORCED_RESCAN_COOLDOWN_TICKS = 5000000; // 500 ms
 
         // ============================================
         // STUCK RECOVERY — 4-layer escalation
@@ -2686,12 +2817,16 @@ namespace GrandTheftAccessibility
                         navAssistTicks = DateTime.Now.Ticks;
                         raycastCounter++;
 
-                        // Detection range - larger in vehicles and scales with speed
+                        // Detection range. On-foot keeps the tight 5m; in-vehicle
+                        // scales with stopping-distance physics (a~5 m/s^2 + 0.55s
+                        // reaction): range >= 0.1*v^2 + 0.55*v. Linear v*3.0
+                        // approximates the curve well up to ~40 m/s.
+                        //   v=10 -> 30m,  v=20 -> 60m,  v=30 -> 90m,  v>=40 -> 120m
+                        // Old 26m cap left only ~0.7s of warning at 67 mph.
                         float maxRange = 5f;
                         if (inVehicle)
                         {
-                            float speedFactor = Math.Min(vehicleSpeed / 25f, 1f);
-                            maxRange = 6f + (speedFactor * 20f); // 6m to 26m based on speed
+                            maxRange = Math.Min(120f, Math.Max(10f, vehicleSpeed * 3.0f));
                         }
 
                         GTA.Math.Vector3 playerPos = Game.Player.Character.Position;
@@ -2738,7 +2873,11 @@ namespace GrandTheftAccessibility
                         Ped[] nearbyPeds = World.GetNearbyPeds(playerPos, maxRange + 2f);
                         foreach (Ped ped in nearbyPeds)
                         {
-                            if (ped == Game.Player.Character || ped.IsDead) continue;
+                            // Skip dead peds, the player, and peds inside vehicles
+                            // (in-vehicle peds get double-counted with the containing
+                            // vehicle's scan, producing spurious steerTTC<0.1s threats
+                            // in chase scenarios — see analysis cluster 9/10 F9390).
+                            if (ped == Game.Player.Character || ped.IsDead || ped.IsInVehicle()) continue;
 
                             GTA.Math.Vector3 toEntity = ped.Position - playerPos;
                             float dist = toEntity.Length();
@@ -7247,12 +7386,14 @@ namespace GrandTheftAccessibility
             // Direction depends on whether we're reversing
             // ============================================
             GTA.Math.Vector3 startPos = playerPos + new GTA.Math.Vector3(0, 0, 0.5f);
-            // Obstacle look-ahead: ~3 s of travel, NOT capped by detectionRange.
-            // detectionRange tops out at 40 m, which at highway speed is barely
-            // 1 s of warning — obstacles were being detected at 2-3 m (debug log
-            // F10864 / F11613, hits at 33-57 mph). Give the rays their own
-            // speed-scaled range so braking has usable stopping distance.
-            float rayRange = Math.Min(80f, Math.Max(15f, vehicleSpeed * 3.0f));
+            // Obstacle look-ahead derived from stopping-distance physics
+            // (a~5 m/s^2 + 0.55s reaction): range >= 0.1*v^2 + 0.55*v.
+            // Linear v*3.5 approximates that curve through ~40 m/s, raised cap
+            // 80 -> 150 because the old cap left only ~13 m of buffer past
+            // stopping distance at 67 mph (audit failures in
+            // driveassist-2026-05-25-012227.log — every shapecast row "none").
+            //   v=15 -> 53m,  v=25 -> 88m,  v=30 -> 105m,  v=40 -> 140m
+            float rayRange = Math.Min(150f, Math.Max(15f, vehicleSpeed * 3.5f));
 
             // Use the direction we're actually traveling
             GTA.Math.Vector3 travelDir = isReversing ? -flatForward : flatForward;
@@ -7284,9 +7425,10 @@ namespace GrandTheftAccessibility
 
                 if (!ray.DidHit) continue;
                 // GROUND-Z FILTER: skip hits that look like road/ground (mostly
-                // vertical normal). Threshold 0.7 — surfaces tilted up to ~45°
-                // count as ground.
-                if (Math.Abs(ray.SurfaceNormal.Z) > 0.7f) continue;
+                // vertical normal). Threshold 0.85 — only surfaces tilted up to
+                // ~32 deg count as ground. Old 0.7 (~45 deg) was rejecting
+                // sloped guardrails and embankment walls as "ground".
+                if (Math.Abs(ray.SurfaceNormal.Z) > 0.85f) continue;
 
                 float dist = World.GetDistance(startPos, ray.HitPosition);
 
@@ -7304,6 +7446,36 @@ namespace GrandTheftAccessibility
                 {
                     closestBrakeEligibleRayDist = dist;
                     closestBrakeEligibleRayHitPos = ray.HitPosition;
+                }
+            }
+
+            // VOLUMETRIC CAPSULE SWEEP — the 5-ray fan has angular gaps that grow
+            // with distance (at 80m the +/-17deg rays are ~24m apart laterally),
+            // easily wide enough to miss a guardrail end-cap or a single pillar.
+            // The capsule fills those gaps with a continuous swept volume.
+            // Always brake-eligible: if it volumetrically clears, the car
+            // physically cannot fit past.
+            GTA.Math.Vector3 capsuleHitPos, capsuleHitNorm;
+            float capsuleDist = PerformShapeCast(startPos, travelDir, travelRight,
+                rayRange, IntersectFlags.Map | IntersectFlags.Objects, playerVeh,
+                out capsuleHitPos, out capsuleHitNorm, vehicleSpeed);
+            if (capsuleDist > 0f && Math.Abs(capsuleHitNorm.Z) <= 0.85f)
+            {
+                if (capsuleDist < closestRayDist)
+                {
+                    closestRayDist = capsuleDist;
+                    closestRayHitPos = capsuleHitPos;
+                    // Lateral side from hit normal — sign of dot with travelRight
+                    // gives the side the wall is on; we want to steer AWAY from it.
+                    float capLat = GTA.Math.Vector3.Dot(travelRight, capsuleHitNorm);
+                    if (capLat > 0.1f) bestAvoidDir = -1;
+                    else if (capLat < -0.1f) bestAvoidDir = 1;
+                    else bestAvoidDir = GetClearerSide(playerVeh, rayRange);
+                }
+                if (capsuleDist < closestBrakeEligibleRayDist)
+                {
+                    closestBrakeEligibleRayDist = capsuleDist;
+                    closestBrakeEligibleRayHitPos = capsuleHitPos;
                 }
             }
 
@@ -7352,6 +7524,75 @@ namespace GrandTheftAccessibility
                     closestBrakeThreatPos = closestRayHitPos;
                     closestBrakeThreatVel = GTA.Math.Vector3.Zero;
                 }
+            }
+
+            // STATIC-WALL CAST — Map-only, wider radius, longer range. Static
+            // geometry never moves, so we can plan ~5 s ahead vs the ~3.5 s used
+            // for traffic. Splitting flags also stops small objects (parked
+            // cars, hydrants) from masking a wall 30 m behind them. Brake-only:
+            // a static wall ahead with no closer dynamic threat means brake
+            // straight, don't swerve into traffic.
+            GTA.Math.Vector3 staticHitPos, staticHitNorm;
+            float staticRange, staticRadius;
+            float staticDist = PerformStaticWallCast(startPos, travelDir,
+                vehicleSpeed, playerVeh,
+                out staticHitPos, out staticHitNorm,
+                out staticRange, out staticRadius);
+            // Tightened 2026-05-25:
+            //  - normalZ filter 0.85 -> 0.60. Old threshold accepted surfaces only
+            //    32° off horizontal (sloped curbs, embankment toes). 0.60 keeps
+            //    only surfaces >=53° from horizontal — true walls, signs, building
+            //    faces. Sloped curbs at normalZ 0.7-0.85 are no longer "walls".
+            //  - IsInBrakeCone gate: the swept capsule has lateral radius up to
+            //    2.2 m, so it can hit geometry outside the actual driving lane.
+            //    Require the hit point to be in our forward corridor (same gate
+            //    used by the nav-assist center brake source) before promoting to
+            //    a brake threat. Surface-normal "wall faces us" head-on still
+            //    bypasses this check below.
+            bool staticHitValid = staticDist > 0f
+                && Math.Abs(staticHitNorm.Z) <= 0.60f;
+            if (staticHitValid)
+            {
+                // Wall facing us head-on? swerve-clearance check.
+                bool staticWallFacesUs = false;
+                GTA.Math.Vector3 sn = staticHitNorm; sn.Z = 0f;
+                GTA.Math.Vector3 sfwd = playerVeh.ForwardVector; sfwd.Z = 0f;
+                if (sn.LengthSquared() > 0.0001f && sfwd.LengthSquared() > 0.0001f)
+                {
+                    sn.Normalize(); sfwd.Normalize();
+                    staticWallFacesUs = GTA.Math.Vector3.Dot(sn, -sfwd) > WALL_NORMAL_FACE_DOT;
+                }
+                bool staticInCone = IsInBrakeCone(playerVeh, staticHitPos);
+                if (!staticInCone && !staticWallFacesUs)
+                    staticHitValid = false;
+            }
+            if (staticHitValid)
+            {
+                float staticTtc = staticDist / Math.Max(vehicleSpeed, 1f);
+                // Defer to closer non-map threats; only act if we beat the
+                // current brake threat.
+                if (staticTtc < closestBrakeTTC)
+                {
+                    closestBrakeTTC = staticTtc;
+                    closestBrakeDistance = staticDist;
+                    closestBrakeType = "wall";
+                    closestBrakeThreatPos = staticHitPos;
+                    closestBrakeThreatVel = GTA.Math.Vector3.Zero;
+                }
+                if (driveLogger != null && driveLogger.IsRunning)
+                    driveLogger.Write("[F" + driveLogFrameCount
+                        + "] shapecast: STATIC dist=" + staticDist.ToString("F1")
+                        + " range=" + staticRange.ToString("F0")
+                        + " radius=" + staticRadius.ToString("F1")
+                        + " normalZ=" + staticHitNorm.Z.ToString("F2"));
+            }
+            else if (staticDist > 0f && driveLogger != null && driveLogger.IsRunning)
+            {
+                // Log rejected static hits so the next telemetry pass can
+                // confirm Fix 1 is filtering the right surfaces.
+                driveLogger.Write("[F" + driveLogFrameCount
+                    + "] shapecast: STATIC-REJECTED dist=" + staticDist.ToString("F1")
+                    + " normalZ=" + staticHitNorm.Z.ToString("F2"));
             }
 
             // ============================================
@@ -7589,6 +7830,15 @@ namespace GrandTheftAccessibility
             long nowStamp = DateTime.Now.Ticks;
             if (closestBrakeThreatPos != GTA.Math.Vector3.Zero)
             {
+                // Initialize FirstSeen the moment the cache transitions from
+                // empty -> populated. Subsequent re-confirmations refresh Stamp
+                // but leave FirstSeen alone, so the 3-second wedge-detect below
+                // measures actual elapsed time, not refresh recency.
+                if (cachedBrakeThreatStamp == 0)
+                {
+                    cachedBrakeThreatFirstSeenStamp = nowStamp;
+                    cachedBrakeThreatFirstSeenPlayerPos = playerVeh.Position;
+                }
                 cachedBrakeThreatPos = closestBrakeThreatPos;
                 cachedBrakeThreatVel = closestBrakeThreatVel;
                 cachedBrakeThreatStamp = nowStamp;
@@ -7596,6 +7846,8 @@ namespace GrandTheftAccessibility
             else
             {
                 cachedBrakeThreatPos = GTA.Math.Vector3.Zero;
+                cachedBrakeThreatStamp = 0;
+                cachedBrakeThreatFirstSeenStamp = 0;
             }
             if (closestSteerThreatPos != GTA.Math.Vector3.Zero)
             {
@@ -7606,6 +7858,99 @@ namespace GrandTheftAccessibility
             else
             {
                 cachedSteerThreatPos = GTA.Math.Vector3.Zero;
+            }
+
+            // EARLY-CLEAR (2026-05-25 fix for Loop 2 + Loop 3). The C3 rescan
+            // below only fires when the vehicle is stopped AND the cache is
+            // stale AND emergencyBrakeActive is set. That gate misses two
+            // common cases the failure-log analysis surfaced:
+            //   (a) Drove past: the vehicle has moved beyond the cached
+            //       threat position (forward-dot is now <= 0) or the threat
+            //       has drifted laterally out of the brake cone as the road
+            //       curves. The cache is referring to something physically
+            //       behind/beside the car — clear it so the next scan can
+            //       pick a fresh forward threat instead.
+            //   (b) Long-wedged: the threat was first seen >3 s ago and the
+            //       vehicle has moved <1 m since. Every refresh is the same
+            //       roadside feature; the C3 staleness check never fires
+            //       because Stamp keeps being refreshed. FirstSeenStamp
+            //       captures the original detection time, decoupling from
+            //       the refresh-driven Stamp.
+            // Both clears also drop emergencyBrakeActive and
+            // wasObstacleInBrakeZone so Loop 3 (Mechanism A keeping
+            // emergency brake latched via critical-zone test) releases too.
+            if (cachedBrakeThreatStamp > 0 && cachedBrakeThreatPos != GTA.Math.Vector3.Zero)
+            {
+                GTA.Math.Vector3 toCached = cachedBrakeThreatPos - playerVeh.Position;
+                bool clearReasonPast = false;
+                bool clearReasonWedged = false;
+                if (toCached.LengthSquared() > 0.0001f)
+                {
+                    GTA.Math.Vector3 toCachedN = GTA.Math.Vector3.Normalize(toCached);
+                    GTA.Math.Vector3 vfwd = isReversing ? -playerVeh.ForwardVector : playerVeh.ForwardVector;
+                    float fwdDot = GTA.Math.Vector3.Dot(vfwd, toCachedN);
+                    // <=0.15 covers behind (negative) and very oblique side
+                    // hits the brake cone would also reject.
+                    if (fwdDot <= 0.15f) clearReasonPast = true;
+                }
+                if (!clearReasonPast && cachedBrakeThreatFirstSeenStamp > 0)
+                {
+                    long firstSeenAgeMs = (DateTime.Now.Ticks - cachedBrakeThreatFirstSeenStamp) / 10000;
+                    float playerMoved = (playerVeh.Position - cachedBrakeThreatFirstSeenPlayerPos).Length();
+                    if (firstSeenAgeMs > 3000 && playerMoved < 1f)
+                        clearReasonWedged = true;
+                }
+                if (clearReasonPast || clearReasonWedged)
+                {
+                    cachedBrakeThreatPos = GTA.Math.Vector3.Zero;
+                    cachedBrakeThreatStamp = 0;
+                    cachedBrakeThreatFirstSeenStamp = 0;
+                    emergencyBrakeActive = false;
+                    wasObstacleInBrakeZone = false;
+                    if (driveLogger != null && driveLogger.IsRunning)
+                        driveLogger.Write("[F" + driveLogFrameCount
+                            + "] EVENT brake-cache-early-clear: "
+                            + (clearReasonPast ? "drove-past" : "long-wedged"));
+                    RecordDriveDecision("brake-cache-early-clear: "
+                        + (clearReasonPast ? "drove-past" : "long-wedged"));
+                }
+            }
+
+            // STALE BRAKE-THREAT RE-SCAN (C3 fix). When the cached brake threat
+            // is >1 s old AND the vehicle has been stopped for >1 s AND
+            // emergencyBrakeActive is stuck on, we are almost certainly acting
+            // on stale obstacle data — the audit found 20% of failures in this
+            // gridlock state. Force-clear the cache so this frame can re-pick
+            // (or so the next scan can find a fresh threat or none at all).
+            // 500 ms cooldown prevents re-trigger thrash.
+            long rescanNow = DateTime.Now.Ticks;
+            long brakeAgeMs = cachedBrakeThreatStamp > 0
+                ? (rescanNow - cachedBrakeThreatStamp) / 10000 : 0;
+            // Staleness threshold scales DOWN with speed: a 1 s old threat
+            // position is already 30 m off at 67 mph. Floored at 200 ms so
+            // city-speed noise doesn't constantly rescan. (Combined with the
+            // gridlock check below this only fires when stopped, so the scaling
+            // is mostly defensive for code paths that may grow into this check.)
+            int staleThresholdMs = Math.Max(200,
+                Math.Min(STALE_THREAT_AGE_MS, STALE_THREAT_AGE_MS - (int)(vehicleSpeed * 20f)));
+            bool brakeStale     = brakeAgeMs > staleThresholdMs;
+            bool brakeGridlock  = VehicleStoppedForLastMs(GRIDLOCK_SPEED_MS, GRIDLOCK_STOPPED_MS)
+                                  && HistorySpansAtLeastMs(GRIDLOCK_STOPPED_MS);
+            bool rescanCooldown = (rescanNow - lastForcedRescanTicks)
+                                  > FORCED_RESCAN_COOLDOWN_TICKS;
+            if (brakeStale && brakeGridlock && rescanCooldown && emergencyBrakeActive)
+            {
+                cachedBrakeThreatPos   = GTA.Math.Vector3.Zero;
+                cachedBrakeThreatStamp = 0;
+                cachedBrakeThreatFirstSeenStamp = 0;
+                emergencyBrakeActive   = false;
+                wasObstacleInBrakeZone = false;
+                lastForcedRescanTicks  = rescanNow;
+                if (driveLogger != null && driveLogger.IsRunning)
+                    driveLogger.Write("[F" + driveLogFrameCount
+                        + "] EVENT stale-threat-rescan: ageMs=" + brakeAgeMs
+                        + " stoppedMs>=" + GRIDLOCK_STOPPED_MS);
+                RecordDriveDecision("stale-threat-rescan: forced clear ageMs=" + brakeAgeMs);
             }
 
             // ============================================
@@ -7623,6 +7968,15 @@ namespace GrandTheftAccessibility
                 // Reset alignment state so prior vehicle's mode can't bleed in.
                 currentDriveMode = DriveMode.LaneKeeping;
                 alignmentEngageReverse = false;
+                // Drop rolling history — prior vehicle's snapshots are stale.
+                historyHead = 0;
+                historyCount = 0;
+                lastModeChangeTicks = DateTime.Now.Ticks;
+                // Reset lane-snap memory; prior vehicle was likely in a
+                // different lane / road class.
+                lastLaneIndex = int.MinValue;
+                // Reset persistent-skew tracker.
+                persistentSkewStartTicks = 0;
             }
 
             // Lane-keep first. Sets isOnValidRoad as a side effect.
@@ -7667,19 +8021,124 @@ namespace GrandTheftAccessibility
             if (skewFailureStreak >= LANEKEEP_SKEW_FAIL_FRAMES)
                 laneKeepOk = false;
 
-            // Hysteresis on lane-keep failure: brief blips (sharp curve, overpass
-            // shadow, weird node) shouldn't flip us to alignment mode — that mode
-            // change caused the wandering the user reported. Require multiple
-            // consecutive failures before falling back.
-            if (laneKeepOk) laneKeepFailureStreak = 0;
-            else laneKeepFailureStreak++;
+            // PERSISTENT-SKEW ESCALATION. Track how long we've been pinned in
+            // a heavily-skewed state outside LaneKeeping. Once past the bypass
+            // threshold, allow the rate-clamped steering to release in one
+            // frame. Past the righten threshold, snap the vehicle upright on
+            // the road. Comfort doesn't matter when we're 50+ deg off-axis.
+            bool inSkewedRecovery = currentDriveMode != DriveMode.LaneKeeping
+                && Math.Abs(roadHeadingDelta) > PERSISTENT_SKEW_ANGLE;
+            long skewNow = DateTime.Now.Ticks;
+            bypassSteerRateClampThisFrame = false;
+            if (inSkewedRecovery)
+            {
+                if (persistentSkewStartTicks == 0) persistentSkewStartTicks = skewNow;
+                long skewMs = (skewNow - persistentSkewStartTicks) / 10000;
+                if (skewMs >= PERSISTENT_SKEW_BYPASS_MS)
+                    bypassSteerRateClampThisFrame = true;
+                if (skewMs >= PERSISTENT_SKEW_RIGHT_MS
+                    && playerVeh.Speed < PERSISTENT_SKEW_RIGHT_SPEED
+                    && (skewNow - lastSkewRighteningTicks) > SKEW_RIGHTEN_COOLDOWN_TICKS)
+                {
+                    Function.Call(Hash.SET_VEHICLE_ON_GROUND_PROPERLY, playerVeh, 5.0f);
+                    lastSkewRighteningTicks = skewNow;
+                    persistentSkewStartTicks = 0;
+                    if (driveLogger != null && driveLogger.IsRunning)
+                        driveLogger.Write("[F" + driveLogFrameCount
+                            + "] EVENT persistent-skew-righten: skewMs=" + skewMs
+                            + " angle=" + roadHeadingDelta.ToString("F1"));
+                    RecordDriveDecision("persistent-skew-righten: skewMs=" + skewMs);
+                }
+            }
+            else
+            {
+                persistentSkewStartTicks = 0;
+            }
 
-            bool useLaneKeep = laneKeepOk
-                || (currentDriveMode == DriveMode.LaneKeeping
-                    && laneKeepFailureStreak < LANEKEEP_FAILURE_HYSTERESIS);
+            // Hysteresis on lane-keep failure (C2 fix). The OLD logic zeroed
+            // the streak on a single OK frame, which let the system bounce
+            // LaneKeeping <-> AligningHeading every ~60 frames (audit observed
+            // streaks climbing to 46+ and failures clustering at the bounce).
+            // NEW: decay the streak by 3 on each OK frame (asymmetric — a clean
+            // frame in a noisy run is strong positive evidence) but bump by 1
+            // on bad frames. Cap so it can't run away. Combined with the
+            // sustained-evidence gates below, mode flips now require buffered
+            // evidence in BOTH directions.
+            // 2026-05-25 fix: prior `--` decay caused the streak to ceiling at
+            // 20 and never drop back below LANEKEEP_FAILURE_HYSTERESIS once
+            // saturated — every failure event in driveassist-2026-05-25-012227
+            // shows laneKeepFailStreak=20.
+            if (laneKeepOk && laneKeepFailureStreak > 0) laneKeepFailureStreak -= 3;
+            else if (!laneKeepOk)
+            {
+                laneKeepFailureStreak++;
+                lastStreakIncrementTicks = DateTime.Now.Ticks;
+            }
+            // Wall-clock decay: if the streak hasn't been incremented in the
+            // last STREAK_TIME_DECAY_MS, drop it by 1 regardless of laneKeepOk.
+            // Stops Mechanism D's "streak stuck at cap" pattern from chaotic
+            // detection windows where laneKeepOk flickers True/False.
+            if (laneKeepFailureStreak > 0 && lastStreakIncrementTicks > 0
+                && (DateTime.Now.Ticks - lastStreakIncrementTicks) / 10000 > STREAK_TIME_DECAY_MS)
+            {
+                laneKeepFailureStreak--;
+                // Slide the timestamp forward so the next decay step needs
+                // another full STREAK_TIME_DECAY_MS to elapse.
+                lastStreakIncrementTicks = DateTime.Now.Ticks;
+            }
+            if (laneKeepFailureStreak < 0) laneKeepFailureStreak = 0;
+            if (laneKeepFailureStreak > LANEKEEP_FAILURE_STREAK_CAP)
+                laneKeepFailureStreak = LANEKEEP_FAILURE_STREAK_CAP;
+
+            // Sustained-evidence gates polled from the rolling history. Fall
+            // back to legacy behavior in the first ~200 ms after start /
+            // vehicle change (HistorySpansAtLeastMs returns false there).
+            long modeNowTicks = DateTime.Now.Ticks;
+            long msSinceModeChange = (modeNowTicks - lastModeChangeTicks) / 10000;
+            bool transitionLocked = lastModeChangeTicks > 0
+                && msSinceModeChange < MODE_CHANGE_HYSTERESIS_MS
+                && HistorySpansAtLeastMs(MODE_CHANGE_HYSTERESIS_MS);
+
+            bool useLaneKeep;
+            if (transitionLocked)
+            {
+                // Recently flipped — hold whatever mode we're in. Prevents the
+                // sub-second ping-pong the audit identified.
+                useLaneKeep = (currentDriveMode == DriveMode.LaneKeeping);
+            }
+            else if (currentDriveMode == DriveMode.LaneKeeping)
+            {
+                // STAY in LaneKeeping unless sustained failure. Legacy
+                // hysteresis still applies as a fallback for the warmup window.
+                // Sustained failure = <20% OK frames in confirm window. The
+                // prior "zero OK frames allowed" rule was too strict — a single
+                // noisy OK frame in the middle of a clear failure stretch would
+                // veto recovery for another full ALIGN_CONFIRM_MS.
+                bool sustainedFailure =
+                    HistorySpansAtLeastMs(ALIGN_CONFIRM_MS) &&
+                    FractionLaneKeepOkInLastMs(ALIGN_CONFIRM_MS) < ALIGN_OK_FRACTION_MAX;
+                bool legacyFallback = !HistorySpansAtLeastMs(ALIGN_CONFIRM_MS)
+                    && laneKeepFailureStreak >= LANEKEEP_FAILURE_HYSTERESIS;
+                useLaneKeep = laneKeepOk
+                    || !(sustainedFailure || legacyFallback);
+            }
+            else
+            {
+                // RETURN to LaneKeeping ONLY on sustained success — never on a
+                // single OK frame (that's what caused the oscillation).
+                useLaneKeep = WasOnValidRoadForLastMs(LANEKEEP_CONFIRM_MS);
+            }
+
+            DriveMode prevMode = currentDriveMode;
 
             if (useLaneKeep)
             {
+                // Entering LaneKeeping is the canonical "we're OK" event. Reset
+                // the failure streak so a saturated cap (20) from a prior
+                // recovery cycle doesn't keep us pinned in the legacy-fallback
+                // sustained-failure branch on the very next bad frame.
+                if (currentDriveMode != DriveMode.LaneKeeping)
+                    laneKeepFailureStreak = 0;
                 currentDriveMode = DriveMode.LaneKeeping;
                 // Re-flag as on-road so downstream gates pass even during a brief
                 // detection blip — we keep applying the LAST valid road correction
@@ -7696,6 +8155,15 @@ namespace GrandTheftAccessibility
                 recoveryBrakeRequest = 0f;
                 recoveryUturnDir = 0;
                 alignmentEngageReverse = false;
+                // Clear residual recovery fields so they don't appear in the
+                // logs (or feed any future code path) with values from a
+                // recovery target the player drove away from minutes ago.
+                // Analysis cluster 10 showed recoveryDist=2.6 logged while
+                // the player was 510 m from the target.
+                recoveryTargetPos = GTA.Math.Vector3.Zero;
+                recoveryTargetHeading = 0f;
+                recoveryTargetDistance = 999f;
+                recoveryHeadingDelta = 0f;
                 offroadModeStartTicks = 0; // back on the road; clear timeout
             }
             else
@@ -7794,6 +8262,11 @@ namespace GrandTheftAccessibility
                     recoveryBrakeRequest = 0f;
                 }
             }
+
+            // Stamp the mode-change time so the next-tick hysteresis gate can
+            // measure how long ago we last flipped.
+            if (currentDriveMode != prevMode)
+                lastModeChangeTicks = DateTime.Now.Ticks;
 
             // Mode-transition announcements (rate-limited to 5 s).
             if (currentDriveMode != lastAnnouncedMode
@@ -7976,6 +8449,33 @@ namespace GrandTheftAccessibility
             // (cachedBrakeMagnitude = 1.0). The game's actual brake/ABS physics handle
             // the deceleration curve, which feels natural instead of teleporting speed.
             // ============================================
+            // AVOID-DIRECTION HYSTERESIS (Mechanism C fix). The per-scan threat
+            // priority can ping-pong between two sources (e.g. ped-ahead vs
+            // wall-from-static-cast) and flip avoidDirection sign every 1-3
+            // frames, yaw-oscillating the wheel. Require sign flips to be
+            // sustained for AVOID_DIR_FLIP_HOLD frames before they take effect.
+            // Clearing to 0 or sticking on the same sign publishes immediately.
+            int publishedAvoidDir;
+            if (avoidDirection == 0 || avoidDirection == cachedAvoidDirection || cachedAvoidDirection == 0)
+            {
+                publishedAvoidDir = avoidDirection;
+                proposedAvoidDirection = avoidDirection;
+                avoidDirHoldFrames = 0;
+            }
+            else
+            {
+                if (avoidDirection == proposedAvoidDirection)
+                    avoidDirHoldFrames++;
+                else
+                {
+                    proposedAvoidDirection = avoidDirection;
+                    avoidDirHoldFrames = 1;
+                }
+                publishedAvoidDir = avoidDirHoldFrames >= AVOID_DIR_FLIP_HOLD
+                    ? avoidDirection
+                    : cachedAvoidDirection;
+            }
+
             bool obstacleInCriticalZone = closestBrakeDistance <= minBrakeDist && closestBrakeDistance < 999f;
 
             if (obstacleInCriticalZone && !wasObstacleInBrakeZone && !cachedIsBraking && vehicleSpeed > 1f)
@@ -7983,9 +8483,11 @@ namespace GrandTheftAccessibility
                 emergencyBrakeActive = true;
 
                 // Light steering nudge away from the obstacle (only in Full mode).
-                if (avoidDirection != 0 && isFullMode)
+                // Use the hysteresis-gated direction so a flipping scan can't
+                // yank the wheel the wrong way on first contact.
+                if (publishedAvoidDir != 0 && isFullMode)
                 {
-                    smoothedSteerCorrection = avoidDirection * 0.5f;
+                    smoothedSteerCorrection = publishedAvoidDir * 0.5f;
                 }
 
                 if (DateTime.Now.Ticks - lastAssistAnnounceTicks > 10000000)
@@ -8014,8 +8516,10 @@ namespace GrandTheftAccessibility
                 || currentDriveMode != DriveMode.LaneKeeping)
             {
                 steeringAssistActive = true;
-                // Pass both steer and brake TTCs to the assist function
-                ApplySteeringAssist(playerVeh, closestSteerTTC, closestBrakeTTC, closestBrakeDistance, avoidDirection, isFullMode, steerThreshold, brakeThreshold, hasSteerThreat, hasBrakeThreat, needsHandbrakeTurn, handbrakeSteerDir);
+                // Pass both steer and brake TTCs to the assist function.
+                // publishedAvoidDir is the hysteresis-gated direction computed
+                // just above the emergency-brake first-contact block.
+                ApplySteeringAssist(playerVeh, closestSteerTTC, closestBrakeTTC, closestBrakeDistance, publishedAvoidDir, isFullMode, steerThreshold, brakeThreshold, hasSteerThreat, hasBrakeThreat, needsHandbrakeTurn, handbrakeSteerDir);
             }
             else if (steeringAssistActive)
             {
@@ -8026,7 +8530,17 @@ namespace GrandTheftAccessibility
                 previousFrameSteer = 0f;
                 brakeArmed = false;
                 try { outBrakeWarn.Stop(); } catch { }
+                // Drop the rolling history so re-enable starts from fail-safe
+                // (gates default to legacy behavior until 200 ms accumulates).
+                historyHead  = 0;
+                historyCount = 0;
             }
+
+            // Record this tick's final state into the rolling-history ring.
+            // Single canonical write site — every gate that polls the buffer
+            // sees a consistent snapshot of the decisions we just made.
+            PushDriveAssistSnapshot(playerVeh, closestSteerTTC, closestBrakeTTC,
+                hasSteerThreat, hasBrakeThreat);
         }
 
         /// <summary>
@@ -8520,8 +9034,21 @@ namespace GrandTheftAccessibility
 
             // Snap to the lane the player is closest to.
             float playerOffset = GTA.Math.Vector3.Dot(playerPos - carriageCenter, right);
-            int laneIndex = (int)Math.Round(playerOffset / laneWidth);
-            laneIndex = Math.Max(-(K - 1) / 2, Math.Min((K - 1) / 2, laneIndex));
+            int rawLaneIndex = (int)Math.Round(playerOffset / laneWidth);
+            rawLaneIndex = Math.Max(-(K - 1) / 2, Math.Min((K - 1) / 2, rawLaneIndex));
+
+            // Hysteresis: require crossing the boundary by 0.4 m before accepting
+            // a one-step change. Prevents lane-snap flicker when the player sits
+            // near a lane boundary.
+            int laneIndex = rawLaneIndex;
+            if (lastLaneIndex != int.MinValue && Math.Abs(rawLaneIndex - lastLaneIndex) == 1)
+            {
+                float boundaryOffset = (lastLaneIndex + Math.Sign(rawLaneIndex - lastLaneIndex) * 0.5f) * laneWidth;
+                float overshoot = (playerOffset - boundaryOffset) * Math.Sign(rawLaneIndex - lastLaneIndex);
+                if (overshoot < LANE_CHANGE_HYSTERESIS_M)
+                    laneIndex = lastLaneIndex;
+            }
+            lastLaneIndex = laneIndex;
 
             return carriageCenter + right * (laneIndex * laneWidth);
         }
@@ -9813,30 +10340,43 @@ namespace GrandTheftAccessibility
 
             combinedSteer = Math.Max(-1f, Math.Min(1f, combinedSteer));
 
-            // STEERING RATE LIMIT: Prevent flip-around by limiting how fast steering can change per frame
-            // Inspired by NPC AI's fSteeringDeadzone and fCorneringSteerMultiplier parameters.
-            bool emergencySwerve = railLaneConflict || threatUrgency > 0.85f;
+            // STEERING RATE LIMIT — history-aware slew to dampen the
+            // "avoidance jolt" cluster from the failure audit.
+            // Three rates (per second, deltaTime-scaled so frame-rate-independent):
+            //   normal       — gentle, used when there is no urgent threat.
+            //   emergency    — fast enough to reach ~0.8 in ~200 ms (avoids
+            //                  the F11613 case where a slow clamp steered
+            //                  INTO an obstacle) but no longer a single-frame
+            //                  slam (audit C1: drivers felt the jolt and
+            //                  marked it as a lane-keep failure).
+            //   railconflict — keeps the prior single-frame priority for
+            //                  rail-mounted vehicles where flip-around is
+            //                  the only escape.
+            // Fatigue damping: if history shows we've already been swinging
+            // hard in the last ~200 ms, pull the slew down. Repeated big
+            // swings ARE the oscillation pattern.
+            const float STEER_SLEW_NORMAL_PER_SEC       = MAX_STEER_RATE * 3f;
+            const float STEER_SLEW_EMERGENCY_PER_SEC    = 4.0f;
+            const float STEER_SLEW_RAILCONFLICT_PER_SEC = 6.0f;
+
+            bool emergencySwerve = threatUrgency > 0.85f;
+            float slewPerSec =
+                railLaneConflict ? STEER_SLEW_RAILCONFLICT_PER_SEC :
+                emergencySwerve  ? STEER_SLEW_EMERGENCY_PER_SEC    :
+                                   STEER_SLEW_NORMAL_PER_SEC;
+            if (MaxAbsSteerCmdInLastMs(HISTORY_WINDOW_MS) > 0.6f)
+                slewPerSec *= 0.6f;
+
+            float maxSteerDelta = slewPerSec * deltaTime;
             float steerDelta = combinedSteer - previousFrameSteer;
             bool steerRateClamped = false;
-            if (emergencySwerve)
+            // Persistent-skew escalation: if we've been pinned >50 deg off-axis
+            // for >2 s, comfort no longer matters. Let the saturated correction
+            // execute in one frame so the car can actually un-skew.
+            if (Math.Abs(steerDelta) > maxSteerDelta && !bypassSteerRateClampThisFrame)
             {
-                // EMERGENCY SWERVE: no rate clamp. At the gentle rate a 0->1
-                // swerve takes ~0.5 s and the car contacts the obstacle before
-                // the steer develops (debug log F11613: avoidance wanted +0.96
-                // but the clamped output was -0.26 — steered INTO the obstacle).
-                // Upstream smoothing still prevents jitter.
-            }
-            else
-            {
-                // ApplySteeringAssist runs once per ~50 ms scan but deltaTime is
-                // a single ~16 ms frame, so the raw limit slews ~3x too slow.
-                // Scale to the real scan cadence.
-                float maxSteerDelta = MAX_STEER_RATE * 3f * deltaTime;
-                if (Math.Abs(steerDelta) > maxSteerDelta)
-                {
-                    combinedSteer = previousFrameSteer + Math.Sign(steerDelta) * maxSteerDelta;
-                    steerRateClamped = true;
-                }
+                combinedSteer = previousFrameSteer + Math.Sign(steerDelta) * maxSteerDelta;
+                steerRateClamped = true;
             }
             previousFrameSteer = combinedSteer;
 
@@ -10002,8 +10542,17 @@ namespace GrandTheftAccessibility
             // ---- BRAKE HYSTERESIS (arm/release) ----
             // Once armed, stay armed until TTC clears comfortably above the release
             // threshold — prevents single-frame brake taps when TTC oscillates.
-            if (hasLiveBrakeThreat && liveTtc <= BRAKE_ARM_TTC) brakeArmed = true;
-            else if (!hasLiveBrakeThreat || liveTtc >= BRAKE_RELEASE_TTC) brakeArmed = false;
+            // Arm-TTC scales with speed: fixed 0.8s gave only 24 m of arming
+            // distance at 30 m/s, which can't beat reaction + stopping.
+            //   v=8  -> 0.8s / 1.6s   (city, matches old behavior)
+            //   v=20 -> 1.1s / 2.2s
+            //   v=30 -> 1.35s / 2.7s
+            //   v>=56 -> 2.0s / 4.0s  (capped)
+            float liveSpeed = playerVeh.Speed;
+            float armTtc = Math.Min(2.0f, Math.Max(BRAKE_ARM_TTC, 0.025f * liveSpeed + 0.6f));
+            float releaseTtc = armTtc * 2.0f;
+            if (hasLiveBrakeThreat && liveTtc <= armTtc) brakeArmed = true;
+            else if (!hasLiveBrakeThreat || liveTtc >= releaseTtc) brakeArmed = false;
 
             // Emergency latch overrides hysteresis.
             if (emergencyBrakeActive) { brakeArmed = true; liveBrakeTarget = 1.0f; }
@@ -10529,9 +11078,14 @@ namespace GrandTheftAccessibility
             hitPosition = GTA.Math.Vector3.Zero;
             hitNormal = GTA.Math.Vector3.Zero;
 
-            // Capsule radius scales with speed: wider sweep at higher speed for extra
-            // safety margin. 1.0 m at low speed (~car half-width), 1.8 m highway.
-            float radius = vehicleSpeed > SHAPE_CAST_SPEED_THRESHOLD ? 1.8f : 1.0f;
+            // Capsule radius scales continuously with speed. At freeway speed the
+            // vehicle wanders laterally and a binary 1.0/1.8 step under-detects:
+            //   v=5  -> 1.0m  (~car half-width)
+            //   v=15 -> 1.4m  (suburban, 0.4m margin past body)
+            //   v=30 -> 2.0m  (highway, full width + lateral wander)
+            //   v>=42 -> 2.5m (capped; wider phantom-brakes parked cars)
+            // Old binary SHAPE_CAST_SPEED_THRESHOLD constant retained but unused.
+            float radius = Math.Min(2.5f, Math.Max(1.0f, 0.04f * vehicleSpeed + 0.8f));
 
             GTA.Math.Vector3 endPos = startPos + forwardVec * maxRange;
             int excludeHandle = (exclude != null && exclude.Exists()) ? exclude.Handle : 0;
@@ -10546,6 +11100,59 @@ namespace GrandTheftAccessibility
 
             // GET_SHAPE_TEST_RESULT: 0x3D87450E15D98694
             //   returns 0=null, 1=ready, 2=not_ready; writes didHit/hitPos/normal/hitEntity
+            OutputArgument oDidHit = new OutputArgument();
+            OutputArgument oHitPos = new OutputArgument();
+            OutputArgument oNormal = new OutputArgument();
+            OutputArgument oHitEnt = new OutputArgument();
+            Function.Call(
+                (Hash)0x3D87450E15D98694,
+                handle, oDidHit, oHitPos, oNormal, oHitEnt);
+
+            if (!oDidHit.GetResult<bool>())
+                return -1f;
+
+            hitPosition = oHitPos.GetResult<GTA.Math.Vector3>();
+            hitNormal = oNormal.GetResult<GTA.Math.Vector3>();
+            return World.GetDistance(startPos, hitPosition);
+        }
+
+        // Long-range capsule sweep against STATIC MAP GEOMETRY ONLY.
+        // Walls/buildings/terrain don't move, so we can plan further ahead than the
+        // main fan (which has to react to traffic). Splitting flags also prevents
+        // small objects from masking large static walls behind them.
+        //
+        // Tuned 2026-05-25 after the F10015-class phantom-brake failures: the
+        // previous floor of 1.5 m radius caused the capsule to bite into roadside
+        // curbs/embankments at any speed under 6 m/s. The 0.9 m floor matches a
+        // typical vehicle half-width and stops sidewalk-curb hits while still
+        // covering normal lane width. Range also pulled back from v*5 to v*4 so
+        // we don't pick up walls 80+ m ahead that the player has plenty of time
+        // to handle without an emergency brake.
+        //   range: min(180, max(20, v*4.0))
+        //     v=15 -> 60m,  v=30 -> 120m,  v>=45 -> 180m (cap)
+        //   radius: min(2.2, max(0.9, 0.04*v + 0.7))
+        //     v=5 -> 0.9m,  v=15 -> 1.3m,  v=30 -> 1.9m,  v>=38 -> 2.2m (cap)
+        // Returns hit distance or -1 if no hit.
+        private float PerformStaticWallCast(GTA.Math.Vector3 startPos,
+            GTA.Math.Vector3 forwardVec, float vehicleSpeed, Entity exclude,
+            out GTA.Math.Vector3 hitPosition, out GTA.Math.Vector3 hitNormal,
+            out float outRange, out float outRadius)
+        {
+            hitPosition = GTA.Math.Vector3.Zero;
+            hitNormal = GTA.Math.Vector3.Zero;
+
+            outRange  = Math.Min(180f, Math.Max(20f, vehicleSpeed * 4.0f));
+            outRadius = Math.Min(2.2f, Math.Max(0.9f, 0.04f * vehicleSpeed + 0.7f));
+
+            GTA.Math.Vector3 endPos = startPos + forwardVec * outRange;
+            int excludeHandle = (exclude != null && exclude.Exists()) ? exclude.Handle : 0;
+
+            int handle = Function.Call<int>(
+                (Hash)0xE6AC6C45FBE83004,
+                startPos.X, startPos.Y, startPos.Z,
+                endPos.X, endPos.Y, endPos.Z,
+                outRadius, (int)IntersectFlags.Map, excludeHandle, 7);
+
             OutputArgument oDidHit = new OutputArgument();
             OutputArgument oHitPos = new OutputArgument();
             OutputArgument oNormal = new OutputArgument();
@@ -15281,6 +15888,178 @@ namespace GrandTheftAccessibility
             catch { return false; }
         }
 
+        // =====================================================================
+        // ROLLING-HISTORY BUFFER — see field declaration block for rationale.
+        // All "ForLastMs" predicates return false when the buffer doesn't yet
+        // span the requested window. First ~200 ms after session start or a
+        // vehicle change therefore falls back to legacy behavior rather than
+        // mis-firing on confident-looking sustained-evidence assertions.
+        // =====================================================================
+        private bool TryGetSnapshot(int framesBack, out DriveAssistSnapshot s)
+        {
+            if (framesBack < 0 || framesBack >= historyCount)
+            {
+                s = default(DriveAssistSnapshot);
+                return false;
+            }
+            int idx = historyHead - 1 - framesBack;
+            while (idx < 0) idx += HISTORY_CAPACITY;
+            s = history[idx];
+            return true;
+        }
+
+        private bool HistorySpansAtLeastMs(int ms)
+        {
+            if (historyCount < 2) return false;
+            DriveAssistSnapshot newest, oldest;
+            if (!TryGetSnapshot(0, out newest)) return false;
+            if (!TryGetSnapshot(historyCount - 1, out oldest)) return false;
+            long spanMs = (newest.TimestampTicks - oldest.TimestampTicks) / 10000;
+            return spanMs >= ms;
+        }
+
+        // All "InLastMs" predicates fail-safe to false unless the buffer has
+        // enough span to make the claim. Polled, not subscribed — cheap given
+        // the buffer is at most 32 entries.
+        private bool WasOnValidRoadForLastMs(int ms)
+        {
+            if (!HistorySpansAtLeastMs(ms)) return false;
+            long nowTicks = DateTime.Now.Ticks;
+            long cutoffTicks = nowTicks - (long)ms * 10000;
+            for (int i = 0; i < historyCount; i++)
+            {
+                DriveAssistSnapshot s;
+                if (!TryGetSnapshot(i, out s)) return false;
+                if (s.TimestampTicks < cutoffTicks) break;
+                if (!s.IsOnValidRoad) return false;
+            }
+            return true;
+        }
+
+        private bool AnyLaneKeepOkRawInLastMs(int ms)
+        {
+            if (!HistorySpansAtLeastMs(ms)) return false;
+            long nowTicks = DateTime.Now.Ticks;
+            long cutoffTicks = nowTicks - (long)ms * 10000;
+            for (int i = 0; i < historyCount; i++)
+            {
+                DriveAssistSnapshot s;
+                if (!TryGetSnapshot(i, out s)) return false;
+                if (s.TimestampTicks < cutoffTicks) break;
+                if (s.LaneKeepOkRaw) return true;
+            }
+            return false;
+        }
+
+        // Fraction of snapshots in the last `ms` window that report LaneKeepOkRaw.
+        // Used by the sustained-failure gate so a single noisy OK frame doesn't
+        // veto recovery for the whole confirm window.
+        private float FractionLaneKeepOkInLastMs(int ms)
+        {
+            if (!HistorySpansAtLeastMs(ms)) return 0f;
+            long nowTicks = DateTime.Now.Ticks;
+            long cutoffTicks = nowTicks - (long)ms * 10000;
+            int okCount = 0;
+            int total = 0;
+            for (int i = 0; i < historyCount; i++)
+            {
+                DriveAssistSnapshot s;
+                if (!TryGetSnapshot(i, out s)) break;
+                if (s.TimestampTicks < cutoffTicks) break;
+                total++;
+                if (s.LaneKeepOkRaw) okCount++;
+            }
+            if (total == 0) return 0f;
+            return (float)okCount / (float)total;
+        }
+
+        private float MaxAbsSteerCmdInLastMs(int ms)
+        {
+            float maxAbs = 0f;
+            long nowTicks = DateTime.Now.Ticks;
+            long cutoffTicks = nowTicks - (long)ms * 10000;
+            for (int i = 0; i < historyCount; i++)
+            {
+                DriveAssistSnapshot s;
+                if (!TryGetSnapshot(i, out s)) break;
+                if (s.TimestampTicks < cutoffTicks) break;
+                float a = Math.Abs(s.CachedSteerCorrection);
+                if (a > maxAbs) maxAbs = a;
+            }
+            return maxAbs;
+        }
+
+        private bool VehicleStoppedForLastMs(float speedMs, int ms)
+        {
+            if (!HistorySpansAtLeastMs(ms)) return false;
+            long nowTicks = DateTime.Now.Ticks;
+            long cutoffTicks = nowTicks - (long)ms * 10000;
+            for (int i = 0; i < historyCount; i++)
+            {
+                DriveAssistSnapshot s;
+                if (!TryGetSnapshot(i, out s)) return false;
+                if (s.TimestampTicks < cutoffTicks) break;
+                if (s.SpeedMs > speedMs) return false;
+            }
+            return true;
+        }
+
+        // Single canonical write site — called once per ProcessSteeringAssist
+        // tick after all per-frame computation is final.
+        private void PushDriveAssistSnapshot(Vehicle veh,
+            float steerTTC, float brakeTTC,
+            bool hasSteerThreat, bool hasBrakeThreat)
+        {
+            DriveAssistSnapshot s = new DriveAssistSnapshot();
+            s.TimestampTicks = DateTime.Now.Ticks;
+            s.FrameCount     = driveLogFrameCount;
+            s.DeltaTimeSec   = deltaTime;
+
+            if (veh != null)
+            {
+                s.SpeedMs   = veh.Speed;
+                s.Position  = veh.Position;
+                s.Heading   = veh.Heading;
+            }
+
+            s.IsOnValidRoad       = isOnValidRoad;
+            s.RoadHeadingDelta    = roadHeadingDelta;
+            s.LaneLateralError    = lastLaneLateralError;
+            s.ClosestPolySegIdx   = lastClosestPolySeg;
+            s.PolylinePointCount  = pathPolyline != null ? pathPolyline.Count : 0;
+
+            s.Mode                   = currentDriveMode;
+            s.LaneKeepFailureStreak  = laneKeepFailureStreak;
+            // LaneKeepOkRaw is the pre-hysteresis "are we on the road right
+            // now" signal. Mode-transition gates that read the buffer must use
+            // this raw signal, NOT the post-hysteresis decision, or they
+            // become self-referential.
+            s.LaneKeepOkRaw          = isOnValidRoad;
+
+            s.CachedSteerCorrection    = cachedSteerCorrection;
+            s.SmoothedSteerCorrection  = smoothedSteerCorrection;
+            s.SmoothedRoadCorrection   = smoothedRoadCorrection;
+            s.CachedAvoidDirection     = cachedAvoidDirection;
+            s.CachedBrakeMagnitude     = cachedBrakeMagnitude;
+            s.EmergencyBrakeActive     = emergencyBrakeActive;
+
+            s.SteerTTC               = steerTTC;
+            s.BrakeTTC               = brakeTTC;
+            s.CachedBrakeThreatPos   = cachedBrakeThreatPos;
+            s.CachedBrakeThreatStamp = cachedBrakeThreatStamp;
+            s.HasSteerThreat         = hasSteerThreat;
+            s.HasBrakeThreat         = hasBrakeThreat;
+
+            s.NavDistCenter = navAssistDistCenter;
+            s.NavDistLeft   = navAssistDistLeft;
+            s.NavDistRight  = navAssistDistRight;
+            s.NavDistBehind = navAssistDistBehind;
+
+            history[historyHead] = s;
+            historyHead = (historyHead + 1) % HISTORY_CAPACITY;
+            if (historyCount < HISTORY_CAPACITY) historyCount++;
+        }
+
         /// <summary>Composes pathPolyline ahead of the vehicle. Sets
         /// pathPolylineFromGps. Polyline is empty if no source is available
         /// (truly off-road and node dump missing) — callers must handle
@@ -15636,6 +16415,10 @@ namespace GrandTheftAccessibility
 
             // Persistence guard: require the same conclusion two scans running
             // so a single noisy polyline frame can't trigger a brake.
+            // (Kept as a local streak instead of migrating to the rolling
+            // history buffer — adding a curve-intent field to the snapshot
+            // just for this one consumer would be exactly the kind of bloat
+            // the buffer rationale calls out.)
             curveBrakeStreak++;
             if (curveBrakeStreak < 2) return 0f;
 
