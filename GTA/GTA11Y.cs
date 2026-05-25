@@ -7899,6 +7899,22 @@ namespace GrandTheftAccessibility
                     float playerMoved = (playerVeh.Position - cachedBrakeThreatFirstSeenPlayerPos).Length();
                     if (firstSeenAgeMs > 3000 && playerMoved < 1f)
                         clearReasonWedged = true;
+                    // Creeping-under-brake gate: the original 3s+<1m window
+                    // misses the dominant failure pattern in
+                    // driveassist-2026-05-25-103730 — car creeps at 2-3 m/s
+                    // under a latched emergency brake (so playerMoved exceeds
+                    // 1 m well before 3 s, and the original gate never fires)
+                    // while the cached threat XYZ stays pinned ahead of us.
+                    // Once the threat has persisted >1.2 s while we're still
+                    // slow AND emergencyBrakeActive is latched AND the same
+                    // XYZ is still right in front (<6 m), it's almost
+                    // certainly a phantom or unreachable feature — clear it
+                    // and let the next scan re-evaluate.
+                    else if (firstSeenAgeMs > 1200
+                        && emergencyBrakeActive
+                        && vehicleSpeed < 2.0f
+                        && toCached.Length() < 6f)
+                        clearReasonWedged = true;
                 }
                 if (clearReasonPast || clearReasonWedged)
                 {
