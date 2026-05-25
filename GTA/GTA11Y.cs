@@ -7110,10 +7110,16 @@ namespace GrandTheftAccessibility
                 return false;
 
             // Monotonic-drop count: increment if TTC dropped from last seen sample.
+            // Symmetric thresholds (+/-0.04 s) so jitter in either direction is
+            // treated as no-change. The previous values (-0.02 trigger / +0.05
+            // reset) were 2.5x asymmetric: a 30 ms TTC increase from sensor
+            // noise reset the streak, while a 25 ms decrease counted as a real
+            // approach trend. Symmetric +/-0.04 keeps the count moving only
+            // for genuine sustained TTC trends.
             float prev = entityLastTtc.ContainsKey(handle) ? entityLastTtc[handle] : ttc;
             int count = entityMonotonicCount.ContainsKey(handle) ? entityMonotonicCount[handle] : 0;
-            if (ttc < prev - 0.02f) count++;
-            else if (ttc > prev + 0.05f) count = 0;
+            if (ttc < prev - 0.04f) count++;
+            else if (ttc > prev + 0.04f) count = 0;
             entityLastTtc[handle] = ttc;
             entityMonotonicCount[handle] = count;
 
