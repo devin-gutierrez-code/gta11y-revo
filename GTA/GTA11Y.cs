@@ -241,7 +241,8 @@ namespace GrandTheftAccessibility
                     };
             }
         }
-        private bool wasObstacleInBrakeZone = false; // Track if obstacle was in brake zone last frame (for first-contact detection)
+        private bool wasObstacleInBrakeZone = false; // Track latched emergency-brake critical-zone state (release-hysteresis gated)
+        private int criticalZoneArmFrames = 0;        // Consecutive enter-frames; arm only after CRITICAL_ARM_FRAMES
 
         // Last-announced location strings for the autodrive informational
         // announcements. Empty until the first announcement; updated only on
@@ -8492,7 +8493,36 @@ namespace GrandTheftAccessibility
                     : cachedAvoidDirection;
             }
 
-            bool obstacleInCriticalZone = closestBrakeDistance <= minBrakeDist && closestBrakeDistance < 999f;
+            // Real release-distance hysteresis. The old single-threshold
+            // gate (obstacleInCriticalZone = dist <= minBrakeDist) flips on/off
+            // every frame when raycast distance jitters across the threshold,
+            // re-firing the Tolk "Emergency brake!" line and re-latching
+            // emergencyBrakeActive at the underlying scan cadence. Separate
+            // ENTER and RELEASE distances stop that flip-flop:
+            //   ENTER   = minBrakeDist            (3 m assist / 5 m full)
+            //   RELEASE = minBrakeDist + 1.5 m    (4.5 m / 6.5 m)
+            // wasObstacleInBrakeZone now tracks the latched zone state, not
+            // just last-frame entry, so the release threshold is what unlatches
+            // it. Also requires >= CRITICAL_ARM_FRAMES consecutive entry frames
+            // before firing — a single noisy scan can't slam the brake.
+            const float CRITICAL_RELEASE_MARGIN = 1.5f;
+            const int CRITICAL_ARM_FRAMES = 2;
+            float releaseDist = minBrakeDist + CRITICAL_RELEASE_MARGIN;
+            bool obstacleEnter   = closestBrakeDistance <= minBrakeDist && closestBrakeDistance < 999f;
+            bool obstacleRelease = closestBrakeDistance > releaseDist || closestBrakeDistance >= 999f;
+            if (obstacleEnter) criticalZoneArmFrames++;
+            else criticalZoneArmFrames = 0;
+            bool obstacleInCriticalZone;
+            if (wasObstacleInBrakeZone)
+            {
+                // Already latched — only unlatch when we cross the release band.
+                obstacleInCriticalZone = !obstacleRelease;
+            }
+            else
+            {
+                // Not latched — arm only after N consecutive entry frames.
+                obstacleInCriticalZone = obstacleEnter && criticalZoneArmFrames >= CRITICAL_ARM_FRAMES;
+            }
 
             if (obstacleInCriticalZone && !wasObstacleInBrakeZone && !cachedIsBraking && vehicleSpeed > 1f)
             {
