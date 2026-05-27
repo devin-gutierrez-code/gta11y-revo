@@ -213,6 +213,17 @@ namespace GrandTheftAccessibility
         // "stuck against same spot, cache never clears" pattern.
         private long cachedBrakeThreatFirstSeenStamp = 0;
         private GTA.Math.Vector3 cachedBrakeThreatFirstSeenPlayerPos = GTA.Math.Vector3.Zero;
+        // Iter-11 Patch I: 3-frame distance history for the drove-past
+        // confirmation. The legacy single-frame fwdDot<=0.15 predicate fires
+        // on momentary heading swings during evasion — F5650 in
+        // driveassist-2026-05-27-171958 cleared the cache 26 times in 1 sec
+        // before the -84.8 health impact. We now require BOTH fwdDot<=0.15
+        // AND distance-to-threat rose by >0.5 m across the last 3 frames.
+        // The history is reset when the cache clears, on teleport-reset,
+        // and when a new threat replaces a different one.
+        private float[] cachedBrakeDistHistory = new float[3];
+        private int cachedBrakeDistIdx = 0;
+        private bool cachedBrakeDistHistoryValid = false;
         // Same for the closest steer-relevant threat.
         private GTA.Math.Vector3 cachedSteerThreatPos = GTA.Math.Vector3.Zero;
         private GTA.Math.Vector3 cachedSteerThreatVel = GTA.Math.Vector3.Zero;
@@ -8226,6 +8237,10 @@ namespace GrandTheftAccessibility
                 cachedBrakeThreatPos = GTA.Math.Vector3.Zero;
                 cachedBrakeThreatStamp = 0;
                 cachedBrakeThreatFirstSeenStamp = 0;
+                // Iter-11 Patch I: reset distance history when cache empties
+                // so a future re-acquisition starts a fresh measurement.
+                cachedBrakeDistHistoryValid = false;
+                cachedBrakeDistIdx = 0;
             }
             if (closestSteerThreatPos != GTA.Math.Vector3.Zero)
             {
@@ -8262,14 +8277,47 @@ namespace GrandTheftAccessibility
                 GTA.Math.Vector3 toCached = cachedBrakeThreatPos - playerVeh.Position;
                 bool clearReasonPast = false;
                 bool clearReasonWedged = false;
+
+                // Iter-11 Patch I: update the 3-frame distance ring for the
+                // drove-past confirmation. Sample the current distance every
+                // tick the cache is non-zero; when a new threat replaces a
+                // moved one (>3 m position delta from prior sample), reset
+                // the ring so the rising-distance test isn't fooled by the
+                // change of identity.
+                float curDist = toCached.Length();
+                if (cachedBrakeDistHistoryValid)
+                {
+                    float prevDist = cachedBrakeDistHistory[cachedBrakeDistIdx];
+                    if (Math.Abs(curDist - prevDist) > 3f)
+                    {
+                        // Probable cache identity change — reset history.
+                        cachedBrakeDistHistoryValid = false;
+                        cachedBrakeDistIdx = 0;
+                    }
+                }
+                cachedBrakeDistHistory[cachedBrakeDistIdx] = curDist;
+                cachedBrakeDistIdx = (cachedBrakeDistIdx + 1) % 3;
+                if (!cachedBrakeDistHistoryValid && cachedBrakeDistIdx == 0)
+                    cachedBrakeDistHistoryValid = true;
+
                 if (toCached.LengthSquared() > 0.0001f)
                 {
                     GTA.Math.Vector3 toCachedN = GTA.Math.Vector3.Normalize(toCached);
                     GTA.Math.Vector3 vfwd = isReversing ? -playerVeh.ForwardVector : playerVeh.ForwardVector;
                     float fwdDot = GTA.Math.Vector3.Dot(vfwd, toCachedN);
-                    // <=0.15 covers behind (negative) and very oblique side
-                    // hits the brake cone would also reject.
-                    if (fwdDot <= 0.15f) clearReasonPast = true;
+                    // Iter-11 Patch I: drove-past also requires the distance
+                    // to have risen by >0.5 m across the 3-frame ring. A
+                    // momentary heading swing during evasion (fwdDot dipping
+                    // below 0.15 for one frame) no longer wipes the cache;
+                    // the threat must actually be receding for at least
+                    // 50 ms (3 frames at ~60 fps) of measured motion.
+                    bool distRising = false;
+                    if (cachedBrakeDistHistoryValid)
+                    {
+                        float oldest = cachedBrakeDistHistory[cachedBrakeDistIdx];
+                        if (curDist - oldest > 0.5f) distRising = true;
+                    }
+                    if (fwdDot <= 0.15f && distRising) clearReasonPast = true;
                 }
                 if (!clearReasonPast && cachedBrakeThreatFirstSeenStamp > 0)
                 {
@@ -16441,6 +16489,10 @@ namespace GrandTheftAccessibility
             lastNonZeroAvoidDirTicks = 0;
             proposedAvoidDirection = 0;
             avoidDirHoldFrames = 0;
+            // Iter-11 Patch I: reset distance history on teleport so the
+            // post-teleport rising-distance check isn't fooled by the jump.
+            cachedBrakeDistHistoryValid = false;
+            cachedBrakeDistIdx = 0;
             // Path polyline rebuilds on the next BuildPathPolyline call;
             // clearing it here prevents Stanley from steering toward an OLD
             // road node before the rebuild runs.
