@@ -251,6 +251,16 @@ namespace GrandTheftAccessibility
         // 0 → 1 transition takes 200 ms — fast enough for emergencies, smooth enough
         // not to feel like a slam.
         private const float BRAKE_RAMP_RATE = 5.0f;
+        // Iter-11 Patch M: asymmetric urgent-up ramp rate. The default 5.0/sec
+        // (0->1 in 200 ms) is the right comfort shape for routine brakes but
+        // 200 ms is too long when liveBrakeTarget jumps from 0 to high
+        // magnitude at highway speed — driveassist-2026-05-27-171958 F3542
+        // (-83.2 health) impact happened with rampedBrake=0.341 because the
+        // ramp was still climbing from 0. URGENT path: when the target leaps
+        // ahead of the ramp by >0.3 AND speed > 10 m/s, ramp up at 12/sec
+        // (0->1 in 83 ms). Down-ramp stays at the comfort rate so brake
+        // release isn't grabby.
+        private const float BRAKE_RAMP_RATE_URGENT = 12.0f;
 
         // Lane-keeping state. lastRoadCorrection is the previous frame's raw road
         // steer output; we use it to rate-limit changes so a noisy lookahead point
@@ -11320,11 +11330,21 @@ namespace GrandTheftAccessibility
             // The brake control input lerps toward the target rather than snapping.
             // This is the "no more jerky brake" fix. With BRAKE_RAMP_RATE = 5.0/sec,
             // a 0 → 1 transition takes ~200 ms, which feels firm but physical.
-            float rampStep = BRAKE_RAMP_RATE * Math.Max(deltaTime, 0.016f);
+            // Iter-11 Patch M: asymmetric urgent-up path. When the brake
+            // target jumps ahead of the ramped value by >0.3 AND the car is
+            // moving fast enough that 200 ms ramp latency means meters of
+            // unbraked closing distance, use BRAKE_RAMP_RATE_URGENT (12/sec)
+            // for that frame's UP-ramp only. Down-ramp stays at the comfort
+            // rate so brake release doesn't lurch.
+            float effRampUpRate = BRAKE_RAMP_RATE;
+            if (liveBrakeTarget - rampedBrakeInput > 0.3f && playerVeh.Speed > 10f)
+                effRampUpRate = BRAKE_RAMP_RATE_URGENT;
+            float rampStepUp = effRampUpRate * Math.Max(deltaTime, 0.016f);
+            float rampStepDown = BRAKE_RAMP_RATE * Math.Max(deltaTime, 0.016f);
             if (liveBrakeTarget > rampedBrakeInput)
-                rampedBrakeInput = Math.Min(liveBrakeTarget, rampedBrakeInput + rampStep);
+                rampedBrakeInput = Math.Min(liveBrakeTarget, rampedBrakeInput + rampStepUp);
             else
-                rampedBrakeInput = Math.Max(liveBrakeTarget, rampedBrakeInput - rampStep);
+                rampedBrakeInput = Math.Max(liveBrakeTarget, rampedBrakeInput - rampStepDown);
 
             // ---- MAJOR-INTERVENTION INPUT REFUSAL (Full mode only) ----
             // When the mod is actively braking, in recovery/alignment, or running a
