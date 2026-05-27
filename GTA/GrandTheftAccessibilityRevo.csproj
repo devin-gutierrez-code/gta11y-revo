@@ -24,6 +24,16 @@
          67k+ nodes from DurtyFree/gta-v-data-dumps). Consumed by NodeGraph
          in MapDb.cs for the path-aware drive assist. -->
     <None Include="scripts\gta11y-nodes.json.gz" CopyToOutputDirectory="PreserveNewest" />
+    <!-- GTA V's own AI handling info table (Sports/Average/Crap/Truck +
+         per-class curve angle->speed lookup). Bundled so VehicleAIHandling.cs
+         can load it next to the DLL when the user doesn't override via
+         ModSettings. -->
+    <None Include="vehicleaihandlinginfo.meta" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- VehicleAIHandling.cs uses XDocument for parsing the bundled .meta XML. -->
+    <Reference Include="System.Xml.Linq" />
   </ItemGroup>
 
 </Project>

@@ -90,8 +90,27 @@ namespace GrandTheftAccessibility
         // (mode changes, teleports, recovery searches). Captured for the F1
         // "player-indicated failure" debug snapshot so a play-tester can mark
         // a failure moment and see what the assist had just decided.
-        private readonly string[] driveDecisionLog = new string[5];
+        // Ring of recent drive-assist decisions. Iter-9 Patch F bumped this
+        // 5 -> 30 so the F1 (and AUTO-COLLISION) snapshot captures ~6 seconds
+        // of decisions instead of ~1 second at the typical ~5 decisions/sec
+        // rate. RecordDriveDecision and the LogCollisionSnapshot reader both
+        // operate modulo the array length so only the constant changes.
+        private readonly string[] driveDecisionLog = new string[30];
         private int driveDecisionLogCount = 0;
+        // Monotonically incrementing failure-snapshot sequence number; F1 and
+        // auto-collision events both consume from this counter so the user can
+        // cross-reference markers across analysis tools.
+        private int collisionMarkerSeq = 0;
+        // Auto-collision last-fire-time so multi-frame contact doesn't flood
+        // the log. 1 s cooldown matches the player's F1 reflex window.
+        private long autoCollisionLastTicks = 0;
+        private const long AUTO_COLLISION_COOLDOWN_TICKS = 10000000; // 1 s
+        private const float AUTO_COLLISION_HEALTH_DROP = 5f;
+        // Tracks chassis health between scans for the auto-collision signal.
+        // Independent of lastVehicleHealth at line 790 which feeds the speech
+        // "your engine is damaged" feedback feature.
+        private float autoCollisionLastHealth = -1f;
+        private int autoCollisionLastVehHandle = 0;
 
         // Navigation Assist - Track last hit to reduce repetitive beeping when stationary
         private float lastNavHitDistance = -1f;
@@ -149,12 +168,17 @@ namespace GrandTheftAccessibility
         private int cachedAvoidDirection = 0;
         // Hysteresis on the avoidance direction so per-scan ping-pong doesn't
         // yaw-oscillate the wheel. Tracks the last proposed direction and how
-        // many consecutive frames we've seen it. Only a *sign flip* against the
-        // currently published direction triggers the hold; clearing to 0 or
-        // sticking to the same sign publishes immediately.
+        // many consecutive frames we've seen it. A sign flip against the most
+        // recent non-zero published direction (within AVOID_DIR_MEMORY_TICKS)
+        // triggers the hold — including the +1 -> 0 -> -1 sequence that the
+        // earlier 3-frame gate let through because it compared to a zero
+        // cached value. Clearing to 0 still publishes immediately.
         private int proposedAvoidDirection = 0;
         private int avoidDirHoldFrames = 0;
-        private const int AVOID_DIR_FLIP_HOLD = 3;
+        private const int AVOID_DIR_FLIP_HOLD = 6;                  // ~100 ms at 60 fps
+        private int lastNonZeroAvoidDir = 0;                        // most recent non-zero publishedAvoidDir
+        private long lastNonZeroAvoidDirTicks = 0;                  // wall-clock for memory decay
+        private const long AVOID_DIR_MEMORY_TICKS = 5000000;        // 500 ms — clear memory after this idle
         private bool cachedIsFullMode = false;
         private bool cachedIsBraking = false; // True when system is actively braking (blocks throttle in full mode)
 
@@ -287,9 +311,18 @@ namespace GrandTheftAccessibility
         private float lastValidRoadDistance = 999f;    // Distance to last valid same-direction road node
         private long offRoadStartTicks = 0;            // When we started being far from road (for 5-second timer)
         private bool wasCloseToRoad = true;            // Track if we were recently close to road
+        // Iter-10 Patch C: hysteresis on the close-to-road reset path. Without
+        // this, a single frame of "close to road" (e.g. a shoulder clip
+        // during off-road drift) wipes the 5 s off-road accumulator and the
+        // timeout teleport never fires. driveassist-2026-05-25-231603 F5397
+        // shows the car off-road for 30 s without an offroad-timeout teleport
+        // for exactly this reason. The accumulator now only clears after
+        // OFFROAD_RESET_HYSTERESIS_MS of CONTINUOUS close-band frames.
+        private long closeToRoadConfirmTicks = 0;
+        private const long OFFROAD_RESET_HYSTERESIS_MS = 1000;
         private const float ROAD_CLOSE_THRESHOLD_BASE = 15f; // Base max distance to be considered "on road"
         private const float ROAD_FAR_THRESHOLD_BASE = 10f;   // Base distance for timer (increased from 8)
-        private const long ROAD_TELEPORT_DELAY_TICKS = 100000000; // 10 seconds (gradual recovery runs first)
+        private const long ROAD_TELEPORT_DELAY_TICKS = 50000000;  // 5 seconds (was 10; at 30 m/s the old window let the car drift 300 m off-road before recovery teleport — audit driveassist-2026-05-25-121415)
         private const long ROAD_TELEPORT_COOLDOWN_TICKS = 30000000; // 3 second cooldown between teleports
         private long lastTeleportTicks = 0;              // Last time we teleported
 
@@ -427,6 +460,10 @@ namespace GrandTheftAccessibility
         private Dictionary<int, float> entityLastTtc = new Dictionary<int, float>();
         private Dictionary<int, int> entityMonotonicCount = new Dictionary<int, int>();
         private long entityTrackingLastPrune = 0;
+        // Iter-9 Patch H: throttle for the EVENT brake-reject log lines so a
+        // single tailed lead vehicle doesn't flood the log every scan.
+        private Dictionary<int, long> entityLastRejectLogTicks = new Dictionary<int, long>();
+        private const long BRAKE_REJECT_LOG_COOLDOWN_TICKS = 10000000; // 1 s
 
         // Pre-impact brake warning beep
         private const float BRAKE_WARN_TTC_MAX = 1.8f;        // Start warning at this TTC
@@ -474,6 +511,39 @@ namespace GrandTheftAccessibility
         // player enters a new vehicle so wrong-way spawns get corrected.
         private int lastDriveAssistVehicleHandle = 0;
         private long vehicleEntryTicks = 0;
+        // Teleport detection: the player can move long distances (custom warps,
+        // in-game teleports, fast-travel) without changing vehicle handle, so
+        // the per-vehicle-change reset below misses the carryover. Track last
+        // observed position and treat any planar jump > TELEPORT_JUMP_M as a
+        // teleport, clearing the same state the vehicle-change path clears
+        // PLUS the threat caches and path polyline (which would otherwise
+        // continue steering / braking toward the OLD location).
+        private GTA.Math.Vector3 lastDriveAssistVehiclePos = GTA.Math.Vector3.Zero;
+        private bool lastDriveAssistVehiclePosValid = false;
+        // Iter-9 Patch C lowered this from 50 m to 10 m. The 50 m threshold
+        // was sized for player long-range teleports (>500 m), but
+        // driveassist-2026-05-25-180748 showed CheckRoadTeleport jumps were
+        // 15-25 m and never tripped the iter-7 reset. CheckRoadTeleport also
+        // calls ResetForTeleport() directly now; this constant is a defensive
+        // belt-and-suspenders for any other code path that moves the vehicle.
+        private const float TELEPORT_JUMP_M = 10f;
+        // Iter-9 Patch C: after any teleport (player or CheckRoadTeleport),
+        // hold a moderate brake for ~500 ms so the next 1-2 scans can rebuild
+        // a fresh threat picture before the car continues approaching anything
+        // at the new location. Field is set by ResetForTeleport(); consumed by
+        // ApplyCachedSteeringInputs which floors liveBrakeTarget at 0.4 while
+        // active.
+        private long postTeleportBrakeHoldUntilTicks = 0;
+        // Iter-10 Patch E: shorter / gentler post-teleport brake hold. The
+        // original 500 ms × 0.4 floor combined with the reverse-arrest
+        // velocity (-5 m/s set inside TeleportToNearestRoad) reliably
+        // stalled the car to zero before recovery could engage — every one
+        // of the 7 teleports in driveassist-2026-05-25-231603 shows this.
+        // 250 ms × 0.25 floor still dampens the immediate post-teleport
+        // approach but releases in time for recovery steering to take over
+        // before speed hits zero.
+        private const long POST_TELEPORT_BRAKE_HOLD_TICKS = 2500000; // 250 ms
+        private const float POST_TELEPORT_BRAKE_FLOOR = 0.25f;
         // Count consecutive cycles where GetLaneCenterGuidance returned no valid
         // road. Lane-keep can momentarily fail at sharp curves, overpass shadows,
         // or odd node layouts; flipping to alignment on a single failure caused
@@ -492,8 +562,12 @@ namespace GrandTheftAccessibility
         // polyline exists, even while the car is badly rotated off the road
         // tangent. A sustained large heading error counts as a lane-keep
         // failure so recovery engages BEFORE the polyline collapses at ~75 deg.
-        private const float LANEKEEP_SKEW_FAIL_ANGLE = 38f;
-        private const int LANEKEEP_SKEW_FAIL_FRAMES = 10;
+        // Tightened 2026-05-25 (driveassist-2026-05-25-121415 audit): the old
+        // 38 deg / 10 frame gate let skewAngle climb to 94 deg with mode still
+        // LaneKeeping (F26733). 30 deg / 6 frames catches off-ramp / sharp-
+        // corner misalignments while they're still correctable.
+        private const float LANEKEEP_SKEW_FAIL_ANGLE = 30f;
+        private const int LANEKEEP_SKEW_FAIL_FRAMES = 6;
         private int skewFailureStreak = 0;
         // PERSISTENT-SKEW ESCALATION. The 4-layer stuck recovery (see
         // MonitorStuckAutodrive) only fires when speed < 0.7 m/s, which means a
@@ -524,6 +598,21 @@ namespace GrandTheftAccessibility
         // sign of headingDelta flips frame-to-frame as the angle wraps; latching
         // one direction keeps the car committed to a single U-turn.
         private int recoveryUturnDir = 0;
+        // Iter-9 Patch E: dense-traffic-aware recovery pause. When a recovery
+        // target is being pursued but the path is physically blocked by 2+
+        // vehicles within 10 m and the car is creeping (<2 m/s for ~800 ms),
+        // hold a brake and suppress the recovery steer until the surroundings
+        // clear (no vehicle within 5 m for 500 ms). Prevents the F3527-style
+        // contact-collision-while-trying-to-recover-through-traffic failure.
+        private long recoveryPausedSinceTicks = 0;
+        private long recoveryLastClearTicks = 0;
+        private bool recoveryPauseLogged = false;
+        private const int RECOVERY_PAUSE_RESUME_MS = 500;
+        private const int RECOVERY_PAUSE_STALL_MS = 800;
+        private const float RECOVERY_PAUSE_CLOSE_R = 5f;
+        private const float RECOVERY_PAUSE_BLOCK_R = 10f;
+        private const int RECOVERY_PAUSE_BLOCK_COUNT = 2;
+        private const float RECOVERY_PAUSE_BRAKE = 0.6f;
 
         // ============================================
         // ROLLING HISTORY BUFFER — per-frame snapshot of the drive-assist
@@ -587,9 +676,17 @@ namespace GrandTheftAccessibility
         // 800 ms and shorten the "all OK" confirm to 250 ms so the gap between
         // "can return to LaneKeeping" and "can flip back out" is wider than the
         // observed flip cadence.
-        private const int MODE_CHANGE_HYSTERESIS_MS   = 800;
+        // Iter-10 Patch G (2026-05-26): driveassist-2026-05-26-000252 still
+        // showed 398 mode-change events / 8 min = 49 flips/min even after
+        // iter-9 widening. Bump MODE_CHANGE_HYSTERESIS to 1500 ms (halves
+        // max flip rate) and bump LANEKEEP_CONFIRM to 700 ms so a brief
+        // on-road flicker mid-recovery can't yank us back. ALIGN_CONFIRM
+        // stays at 250 ms — the goal is to dampen flip-back-to-LaneKeeping,
+        // not the entry into recovery (Patches A & B already make entry
+        // instant for clear failures).
+        private const int MODE_CHANGE_HYSTERESIS_MS   = 1500;
         private const int ALIGN_CONFIRM_MS            = 250;
-        private const int LANEKEEP_CONFIRM_MS         = 250;
+        private const int LANEKEEP_CONFIRM_MS         = 700;
         private const int LANEKEEP_FAILURE_STREAK_CAP = 20;
         // Fraction of OK frames in the confirm window below which we consider
         // failure sustained. Strict "any OK frame = abort" caused false
@@ -2819,15 +2916,20 @@ namespace GrandTheftAccessibility
                         raycastCounter++;
 
                         // Detection range. On-foot keeps the tight 5m; in-vehicle
-                        // scales with stopping-distance physics (a~5 m/s^2 + 0.55s
-                        // reaction): range >= 0.1*v^2 + 0.55*v. Linear v*3.0
-                        // approximates the curve well up to ~40 m/s.
-                        //   v=10 -> 30m,  v=20 -> 60m,  v=30 -> 90m,  v>=40 -> 120m
-                        // Old 26m cap left only ~0.7s of warning at 67 mph.
+                        // scales by the meta brake-distance formula for the
+                        // current vehicle class (iter-8). A truck (Max=120m)
+                        // gets longer lookahead than a sports car (Max=120m
+                        // but Min=8m — ramps faster). 1.3x margin so brake
+                        // has time to ramp up. Old `vehicleSpeed * 3.0f`
+                        // formula was class-agnostic and identical for every
+                        // vehicle.
                         float maxRange = 5f;
-                        if (inVehicle)
+                        if (inVehicle && Game.Player.Character.CurrentVehicle != null)
                         {
-                            maxRange = Math.Min(120f, Math.Max(10f, vehicleSpeed * 3.0f));
+                            var navAi = VehicleAIHandlingRegistry.GetForVehicle(
+                                Game.Player.Character.CurrentVehicle);
+                            float la = navAi.BrakeLookaheadForSpeed(vehicleSpeed) * 1.3f;
+                            maxRange = Math.Min(120f, Math.Max(10f, la));
                         }
 
                         GTA.Math.Vector3 playerPos = Game.Player.Character.Position;
@@ -3269,7 +3371,18 @@ namespace GrandTheftAccessibility
                         // off-road car often has to be braked to a full stop
                         // and U-turned; if the assist shut off below 2 m/s it
                         // could never finish the maneuver (the car sat stuck).
-                        if (vehicleSpeed > 2f || currentDriveMode != DriveMode.LaneKeeping)
+                        // Iter-10 Patch F: also stay alive while emergency
+                        // brake is latched OR a meaningful ramped brake is
+                        // still applied — otherwise an impact that decelerates
+                        // the car below 2 m/s mid-emergency snap-zeroes
+                        // rampedBrakeInput in the else-branch below and
+                        // releases the brake AT the moment of collision.
+                        // driveassist-2026-05-26-000252 AUTO-COLLISION #2 at
+                        // F2616 and #15 at F7830 are this exact pattern.
+                        if (vehicleSpeed > 2f
+                            || currentDriveMode != DriveMode.LaneKeeping
+                            || emergencyBrakeActive
+                            || rampedBrakeInput > 0.1f)
                         {
                             // DETECTION: Process at 30-50ms intervals based on speed
                             float speedFactor = Math.Min(vehicleSpeed / 30f, 1f);
@@ -3321,7 +3434,29 @@ namespace GrandTheftAccessibility
                 {
                     driveLogger.Start();
                     if (driveLogger.IsRunning)
+                    {
+                        // Iter-9 Patch F: startup banner + iter-version sentinel.
+                        // Banner lines (# prefix) are written exactly once per
+                        // log-session so post-hoc analysis tools can instantly
+                        // identify which build's patches are active without
+                        // grepping for every event line. Bump iter-version when
+                        // a new iteration's patches land in the working tree.
+                        //
+                        // Iter-10 Patch O (2026-05-27): bump iter9 -> iter10.
+                        // The original string was never updated when iter-10's
+                        // seven patches (A-G) landed, so two iter-10 logs were
+                        // misread as iter-9 during analysis. Future iterations
+                        // MUST update this string when their patches land.
+                        driveLogger.Write("# GTA11Y drive-assist log");
+                        driveLogger.Write("# Build: iter10 (iter-9: F:enriched G:auto-coll H:reject-why "
+                            + "A:lat-brake B:close-spd C:teleport-hook D:elev-static E:dense-pause; "
+                            + "iter-10: A:streak-eject B:severe-skew C:offroad-hyst D:skew-curve-brake "
+                            + "E:post-tp-hold F:brake-preserve G:thrash-damp O:iter-banner)");
+                        driveLogger.Write("# vehicleaihandling: " + VehicleAIHandlingRegistry.LoadedFrom);
+                        driveLogger.Write("# Started: " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+                        driveLogger.Write("[F" + driveLogFrameCount + "] EVENT iter-version: iter10");
                         Tolk.Speak("Drive assist debug logging started", true);
+                    }
                 }
                 else if (!driveLogEnabled && driveLogWasEnabled)
                 {
@@ -3336,6 +3471,41 @@ namespace GrandTheftAccessibility
                         ? Game.Player.Character.CurrentVehicle : null;
                     if (logVeh != null || isAutodriving)
                         LogDriveAssistFrame(logVeh);
+
+                    // Iter-9 Patch G: auto-collision detection. Compare chassis
+                    // health frame-to-frame; a drop >= AUTO_COLLISION_HEALTH_DROP
+                    // while the car is moving and on the ground is treated as a
+                    // collision and emits the same snapshot shape as the F1
+                    // player marker. The cooldown prevents multi-frame contact
+                    // from flooding the log with duplicates.
+                    if (logVeh != null && !logVeh.IsInAir)
+                    {
+                        float curH = logVeh.HealthFloat;
+                        bool sameVeh = logVeh.Handle == autoCollisionLastVehHandle;
+                        if (sameVeh && autoCollisionLastHealth > 0f)
+                        {
+                            float drop = autoCollisionLastHealth - curH;
+                            long sinceLast = DateTime.Now.Ticks - autoCollisionLastTicks;
+                            if (drop >= AUTO_COLLISION_HEALTH_DROP
+                                && logVeh.Speed > 1f
+                                && sinceLast > AUTO_COLLISION_COOLDOWN_TICKS)
+                            {
+                                LogCollisionSnapshot("AUTO-COLLISION",
+                                    "healthDelta=-" + drop.ToString("F1"));
+                                autoCollisionLastTicks = DateTime.Now.Ticks;
+                            }
+                        }
+                        autoCollisionLastHealth = curH;
+                        autoCollisionLastVehHandle = logVeh.Handle;
+                    }
+                    else
+                    {
+                        // On foot or aircraft: reset baseline so re-entering a
+                        // vehicle doesn't fire a spurious AUTO-COLLISION from
+                        // the old health value.
+                        autoCollisionLastHealth = -1f;
+                        autoCollisionLastVehHandle = 0;
+                    }
                 }
 
                 // ============================================
@@ -6679,6 +6849,22 @@ namespace GrandTheftAccessibility
                 setupSettings();
             }
 
+            // ---- vehicleaihandlinginfo.meta loader (iter-8) ----
+            // Drive-assist consults this for per-class curve target speeds and
+            // brake-lookahead distances. See VehicleAIHandling.cs for details.
+            try
+            {
+                string modSettingsFolder = @Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments)
+                    + "/Rockstar Games/GTA V/ModSettings";
+                string modDllFolder = System.IO.Path.GetDirectoryName(
+                    System.Reflection.Assembly.GetExecutingAssembly().Location);
+                VehicleAIHandlingRegistry.LoadOrFallback(modDllFolder, modSettingsFolder);
+            }
+            catch
+            {
+                // Non-fatal: GetForVehicle() will lazy-init the hardcoded
+                // fallback if the loader didn't get a chance to run.
+            }
         }
 
         void saveSettings()
@@ -7095,7 +7281,7 @@ namespace GrandTheftAccessibility
         /// dropping for the required number of cycles. Single-frame spikes from
         /// stream-in or normal jitter fail this check.
         /// </summary>
-        private bool BrakeThreatPassesEntityGates(int handle, float ttc, long nowTicks)
+        private bool BrakeThreatPassesEntityGates(int handle, float ttc, long nowTicks, bool isPedestrian, float playerSpeedMs)
         {
             // Track first-seen time.
             if (!entityFirstSeenTicks.ContainsKey(handle))
@@ -7103,27 +7289,97 @@ namespace GrandTheftAccessibility
                 entityFirstSeenTicks[handle] = nowTicks;
                 entityLastTtc[handle] = ttc;
                 entityMonotonicCount[handle] = 0;
-                return false; // first sighting — refuse to brake
+                // First sighting is silent — too noisy to log every new
+                // entity passing the cone gate; would flood the log in
+                // any traffic situation.
+                return false;
             }
 
+            long ageMs = (nowTicks - entityFirstSeenTicks[handle]) / 10000;
             if (nowTicks - entityFirstSeenTicks[handle] < ENTITY_AGE_MIN_TICKS)
+            {
+                LogBrakeReject(handle, "age-too-young ageMs=" + ageMs + " needed="
+                    + (ENTITY_AGE_MIN_TICKS / 10000), nowTicks);
                 return false;
+            }
+
+            // Iter-9 Patch B: high-speed imminent-threat bypass. The 3-frame
+            // monotonic-drop gate adds ~150 ms latency. At 30 m/s closing on
+            // a stopped lead vehicle, that's 4.5 m of distance lost before
+            // brake arms (markers F1591, F9672, F9785, F8350 in driveassist-
+            // 2026-05-25-180748 are this scenario). When the player is
+            // already at meaningful speed AND TTC is below 1.0 s, the
+            // monotonic streak isn't worth waiting for — arm now. The
+            // entity-age floor (100 ms, above) still protects against
+            // stream-in false positives.
+            if (ttc < 1.0f && ttc > 0f && playerSpeedMs > 8f)
+            {
+                // Still update the streak fields so we don't double-count if
+                // monotonic logic later sees this entity.
+                float prevTtc = entityLastTtc.ContainsKey(handle) ? entityLastTtc[handle] : ttc;
+                entityLastTtc[handle] = ttc;
+                if (entityMonotonicCount.ContainsKey(handle))
+                    entityMonotonicCount[handle] = Math.Max(entityMonotonicCount[handle], BRAKE_MONOTONIC_FRAMES);
+                else
+                    entityMonotonicCount[handle] = BRAKE_MONOTONIC_FRAMES;
+                return true;
+            }
 
             // Monotonic-drop count: increment if TTC dropped from last seen sample.
-            // Symmetric thresholds (+/-0.04 s) so jitter in either direction is
-            // treated as no-change. The previous values (-0.02 trigger / +0.05
-            // reset) were 2.5x asymmetric: a 30 ms TTC increase from sensor
-            // noise reset the streak, while a 25 ms decrease counted as a real
-            // approach trend. Symmetric +/-0.04 keeps the count moving only
-            // for genuine sustained TTC trends.
+            // Vehicles use symmetric thresholds (+/-0.04 s) — that's the Bug E
+            // fix from the prior iteration which stopped stale traffic from
+            // randomly tripping brake.
+            // Pedestrians use a slightly asymmetric pair (drop 0.025 / reset
+            // 0.05): driveassist-2026-05-25-111452 showed visible peds at
+            // 5-12 m failing to trip brake because the symmetric 0.04 gate
+            // was too conservative for slow-streaming-in peds whose TTC
+            // samples are noisy on first acquisition. Peds move at 1-2 m/s,
+            // so an asymmetric threshold here can't generate phantom approach
+            // trends (their actual TTC trend on approach is monotonically
+            // strong).
+            float dropThresh  = isPedestrian ? 0.025f : 0.04f;
+            float resetThresh = isPedestrian ? 0.05f  : 0.04f;
             float prev = entityLastTtc.ContainsKey(handle) ? entityLastTtc[handle] : ttc;
             int count = entityMonotonicCount.ContainsKey(handle) ? entityMonotonicCount[handle] : 0;
-            if (ttc < prev - 0.04f) count++;
-            else if (ttc > prev + 0.04f) count = 0;
+            bool resetByRise = ttc > prev + resetThresh;
+            if (ttc < prev - dropThresh) count++;
+            else if (resetByRise) count = 0;
             entityLastTtc[handle] = ttc;
             entityMonotonicCount[handle] = count;
 
-            return count >= BRAKE_MONOTONIC_FRAMES;
+            bool passed = count >= BRAKE_MONOTONIC_FRAMES;
+            if (!passed)
+            {
+                // Distinguish "TTC rising — entity moving away" from
+                // "monotonic streak still building." Both are valid reasons
+                // brake didn't arm; logging the distinction lets us spot a
+                // gate misconfiguration in the next log.
+                if (resetByRise)
+                    LogBrakeReject(handle, "ttc-rising prev=" + prev.ToString("F2")
+                        + " curr=" + ttc.ToString("F2"), nowTicks);
+                else
+                    LogBrakeReject(handle, "monotonic-streak count=" + count
+                        + " needed=" + BRAKE_MONOTONIC_FRAMES
+                        + " ttc=" + ttc.ToString("F2"), nowTicks);
+            }
+            return passed;
+        }
+
+        // Iter-9 Patch H: throttled log emission for brake-gate rejections.
+        // Callers of BrakeThreatPassesEntityGates have already gated the
+        // entity on "forward + in cone + ttc better than current best", so
+        // anything that reaches this function is a serious candidate; that's
+        // why a "didn't pass" outcome warrants logging. 1 s per-entity cooldown
+        // prevents sustained tailing from spamming.
+        private void LogBrakeReject(int handle, string reason, long nowTicks)
+        {
+            if (driveLogger == null || !driveLogger.IsRunning) return;
+            long last;
+            if (entityLastRejectLogTicks.TryGetValue(handle, out last)
+                && nowTicks - last < BRAKE_REJECT_LOG_COOLDOWN_TICKS) return;
+            entityLastRejectLogTicks[handle] = nowTicks;
+            driveLogger.Write("[F" + driveLogFrameCount
+                + "] EVENT brake-reject: entity=" + handle + " reason=" + reason);
         }
 
         /// <summary>
@@ -7143,6 +7399,7 @@ namespace GrandTheftAccessibility
                 entityFirstSeenTicks.Remove(h);
                 entityLastTtc.Remove(h);
                 entityMonotonicCount.Remove(h);
+                entityLastRejectLogTicks.Remove(h);
             }
             var staleLatch = new List<int>();
             foreach (var kv in adjacentLatchUntilTicks)
@@ -7329,7 +7586,7 @@ namespace GrandTheftAccessibility
                 // AND visibility-aged (kills spawn-in false TTC) AND monotonic-dropping.
                 if (dir == "ahead" && ttc < closestBrakeTTC
                     && IsInBrakeCone(playerVeh, ped.Position)
-                    && BrakeThreatPassesEntityGates(ped.Handle, ttc, DateTime.Now.Ticks))
+                    && BrakeThreatPassesEntityGates(ped.Handle, ttc, DateTime.Now.Ticks, isPedestrian: true, playerSpeedMs: vehicleSpeed))
                 {
                     closestBrakeTTC = ttc;
                     closestBrakeDistance = dist;
@@ -7376,7 +7633,7 @@ namespace GrandTheftAccessibility
                 // Together these gates kill the "sudden brake out of nowhere" complaint.
                 if (dir == "ahead" && ttc < closestBrakeTTC
                     && IsInBrakeCone(playerVeh, veh.Position)
-                    && BrakeThreatPassesEntityGates(veh.Handle, ttc, gateNow))
+                    && BrakeThreatPassesEntityGates(veh.Handle, ttc, gateNow, isPedestrian: false, playerSpeedMs: vehicleSpeed))
                 {
                     closestBrakeTTC = ttc;
                     closestBrakeDistance = dist;
@@ -7393,14 +7650,17 @@ namespace GrandTheftAccessibility
             // Direction depends on whether we're reversing
             // ============================================
             GTA.Math.Vector3 startPos = playerPos + new GTA.Math.Vector3(0, 0, 0.5f);
-            // Obstacle look-ahead derived from stopping-distance physics
-            // (a~5 m/s^2 + 0.55s reaction): range >= 0.1*v^2 + 0.55*v.
-            // Linear v*3.5 approximates that curve through ~40 m/s, raised cap
-            // 80 -> 150 because the old cap left only ~13 m of buffer past
-            // stopping distance at 67 mph (audit failures in
-            // driveassist-2026-05-25-012227.log — every shapecast row "none").
-            //   v=15 -> 53m,  v=25 -> 88m,  v=30 -> 105m,  v=40 -> 140m
-            float rayRange = Math.Min(150f, Math.Max(15f, vehicleSpeed * 3.5f));
+            // Obstacle look-ahead: iter-8 derives this from GTA V's own AI
+            // handling table for the current vehicle class instead of the
+            // older class-agnostic `vehicleSpeed * 3.5f` formula. The meta's
+            // BrakeLookaheadForSpeed blends MinBrakeDistance->MaxBrakeDistance
+            // by speed/MaxSpeedAtBrakeDistance — a truck gets longer ray
+            // range than a sports car at the same speed. 1.3x margin so the
+            // brake has time to ramp up rather than firing at the last
+            // possible moment. Same 15-150 m clamp as before for safety.
+            var rayAi = VehicleAIHandlingRegistry.GetForVehicle(playerVeh);
+            float rayRange = Math.Min(150f, Math.Max(15f,
+                rayAi.BrakeLookaheadForSpeed(vehicleSpeed) * 1.3f));
 
             // Use the direction we're actually traveling
             GTA.Math.Vector3 travelDir = isReversing ? -flatForward : flatForward;
@@ -7556,8 +7816,26 @@ namespace GrandTheftAccessibility
             //    used by the nav-assist center brake source) before promoting to
             //    a brake threat. Surface-normal "wall faces us" head-on still
             //    bypasses this check below.
+            // Iter-9 Patch D: elevation-aware static-wall gate.
+            // The original `staticHitNorm.Z <= 0.60` filter correctly accepts
+            // vertical walls but REJECTS the top surface of a curb / step /
+            // low platform — those have normalZ ≈ 1.0 yet the car can't drive
+            // through them. Driveassist-2026-05-25-180748 F7970/F8030/F8056
+            // (3 collisions, same location, all logged as STATIC-REJECTED
+            // dist=0.7 normalZ=1.00) is exactly this pattern.
+            //
+            // Add a parallel acceptance gate based on HIT ELEVATION relative
+            // to the vehicle chassis: anything 0.3 m–2.0 m above the chassis
+            // is at bumper-to-roof height and unswervable regardless of
+            // surface orientation. Below 0.3 m we still reject (road surface,
+            // manhole, low rumble strip). Above 2.0 m we still reject
+            // (overpass, overhead sign — we drive under those).
+            float staticRelZ = staticDist > 0f
+                ? staticHitPos.Z - playerVeh.Position.Z : 0f;
+            bool staticIsVerticalSurface = Math.Abs(staticHitNorm.Z) <= 0.60f;
+            bool staticIsBumperHeightHit = staticRelZ >= 0.30f && staticRelZ <= 2.0f;
             bool staticHitValid = staticDist > 0f
-                && Math.Abs(staticHitNorm.Z) <= 0.60f;
+                && (staticIsVerticalSurface || staticIsBumperHeightHit);
             if (staticHitValid)
             {
                 // Wall facing us head-on? swerve-clearance check.
@@ -7601,7 +7879,8 @@ namespace GrandTheftAccessibility
                         + "] shapecast: STATIC dist=" + staticDist.ToString("F1")
                         + " range=" + staticRange.ToString("F0")
                         + " radius=" + staticRadius.ToString("F1")
-                        + " normalZ=" + staticHitNorm.Z.ToString("F2"));
+                        + " normalZ=" + staticHitNorm.Z.ToString("F2")
+                        + " relZ=" + staticRelZ.ToString("F2"));
             }
             else if (staticDist > 0f && driveLogger != null && driveLogger.IsRunning)
             {
@@ -7609,7 +7888,8 @@ namespace GrandTheftAccessibility
                 // confirm Fix 1 is filtering the right surfaces.
                 driveLogger.Write("[F" + driveLogFrameCount
                     + "] shapecast: STATIC-REJECTED dist=" + staticDist.ToString("F1")
-                    + " normalZ=" + staticHitNorm.Z.ToString("F2"));
+                    + " normalZ=" + staticHitNorm.Z.ToString("F2")
+                    + " relZ=" + staticRelZ.ToString("F2"));
             }
 
             // ============================================
@@ -7706,10 +7986,11 @@ namespace GrandTheftAccessibility
                         : 0;
                 // A head-on wall is promoted to a brake threat even if the
                 // lateral cone check is marginal — a swerve would just plow in.
+                bool navCenterIsPed = navAssistPedCenter != null && navAssistPedCenter.Exists();
                 bool navCenterBrakeOk = ttc < closestBrakeTTC
                                         && (IsInBrakeCone(playerVeh, navCenterPos) || wallFacesUs)
                                         && (navCenterHandle == 0
-                                            || BrakeThreatPassesEntityGates(navCenterHandle, ttc, DateTime.Now.Ticks));
+                                            || BrakeThreatPassesEntityGates(navCenterHandle, ttc, DateTime.Now.Ticks, navCenterIsPed, vehicleSpeed));
                 if (navCenterBrakeOk)
                 {
                     closestBrakeTTC = ttc;
@@ -7783,9 +8064,36 @@ namespace GrandTheftAccessibility
                         closestSteerThreatVel = GTA.Math.Vector3.Zero;
                     }
                 }
-                // NOTE: side hazards feed steering only. Rails on the side produce
-                // a stronger swerve via the rail-lane-conflict boost in
-                // ApplySteeringAssist; they do not contribute to braking.
+                // Iter-9 Patch A: lateral entities can ALSO be brake threats
+                // when they're inside our forward lane corridor. The center
+                // cone misses lane-mate vehicles that are 1-2 m off-axis;
+                // driveassist-2026-05-25-180748 markers F758/F1240/F2606/
+                // F8673 are all this exact scenario (L or R sees a vehicle
+                // at 10-20 m, C=none, player collides within 1 s).
+                Entity leftEnt = (Entity)navAssistVehicleLeft ?? (Entity)navAssistPedLeft;
+                if (leftEnt != null && leftEnt.Exists())
+                {
+                    GTA.Math.Vector3 toLE = leftEnt.Position - playerPos;
+                    float lFwd = GTA.Math.Vector3.Dot(playerVeh.ForwardVector, toLE);
+                    float lLat = Math.Abs(GTA.Math.Vector3.Dot(playerVeh.RightVector, toLE));
+                    float lDist = toLE.Length();
+                    if (lFwd > 0.3f && lLat < 2.5f && lDist < 12f && ttc < closestBrakeTTC)
+                    {
+                        bool lIsPed = navAssistPedLeft != null && navAssistPedLeft.Exists();
+                        if (BrakeThreatPassesEntityGates(leftEnt.Handle, ttc, DateTime.Now.Ticks, lIsPed, vehicleSpeed))
+                        {
+                            closestBrakeTTC = ttc;
+                            closestBrakeDistance = lDist;
+                            closestBrakeType = lIsPed ? "pedestrian" : "vehicle";
+                            closestBrakeThreatPos = leftEnt.Position;
+                            closestBrakeThreatVel = navAssistVehicleLeft != null && navAssistVehicleLeft.Exists()
+                                ? navAssistVehicleLeft.Velocity
+                                : (navAssistPedLeft != null && navAssistPedLeft.Exists()
+                                    ? navAssistPedLeft.Velocity
+                                    : GTA.Math.Vector3.Zero);
+                        }
+                    }
+                }
             }
 
             // Right obstacle from nav assist - ONLY affects steering (steer left to avoid)
@@ -7831,7 +8139,33 @@ namespace GrandTheftAccessibility
                         closestSteerThreatVel = GTA.Math.Vector3.Zero;
                     }
                 }
-                // NOTE: side hazards feed steering only. See left block.
+                // Iter-9 Patch A: mirror of the Left block — promote
+                // lateral-detected entities in the forward lane corridor to
+                // brake threats.
+                Entity rightEnt = (Entity)navAssistVehicleRight ?? (Entity)navAssistPedRight;
+                if (rightEnt != null && rightEnt.Exists())
+                {
+                    GTA.Math.Vector3 toRE = rightEnt.Position - playerPos;
+                    float rFwd = GTA.Math.Vector3.Dot(playerVeh.ForwardVector, toRE);
+                    float rLat = Math.Abs(GTA.Math.Vector3.Dot(playerVeh.RightVector, toRE));
+                    float rDist = toRE.Length();
+                    if (rFwd > 0.3f && rLat < 2.5f && rDist < 12f && ttc < closestBrakeTTC)
+                    {
+                        bool rIsPed = navAssistPedRight != null && navAssistPedRight.Exists();
+                        if (BrakeThreatPassesEntityGates(rightEnt.Handle, ttc, DateTime.Now.Ticks, rIsPed, vehicleSpeed))
+                        {
+                            closestBrakeTTC = ttc;
+                            closestBrakeDistance = rDist;
+                            closestBrakeType = rIsPed ? "pedestrian" : "vehicle";
+                            closestBrakeThreatPos = rightEnt.Position;
+                            closestBrakeThreatVel = navAssistVehicleRight != null && navAssistVehicleRight.Exists()
+                                ? navAssistVehicleRight.Velocity
+                                : (navAssistPedRight != null && navAssistPedRight.Exists()
+                                    ? navAssistPedRight.Velocity
+                                    : GTA.Math.Vector3.Zero);
+                        }
+                    }
+                }
             }
 
             // Store for reference - use steer TTC for general threat tracking
@@ -7994,22 +8328,46 @@ namespace GrandTheftAccessibility
             // alignment-mode triggers that capped throttle.
             // ============================================
             bool sameVehicle = (playerVeh.Handle == lastDriveAssistVehicleHandle);
-            if (!sameVehicle)
+            // Teleport detection: same vehicle handle but position has jumped.
+            // BIG_Z_CHANGE in the log is the same signal we want to react to.
+            // Skip the check on the first frame (lastDriveAssistVehiclePosValid)
+            // and when the vehicle just changed (handled below).
+            bool teleported = false;
+            if (sameVehicle && lastDriveAssistVehiclePosValid)
+            {
+                GTA.Math.Vector3 dp = playerVeh.Position - lastDriveAssistVehiclePos;
+                float planar = (float)Math.Sqrt(dp.X * dp.X + dp.Y * dp.Y);
+                if (planar > TELEPORT_JUMP_M) teleported = true;
+            }
+            lastDriveAssistVehiclePos = playerVeh.Position;
+            lastDriveAssistVehiclePosValid = true;
+
+            if (!sameVehicle || teleported)
             {
                 lastDriveAssistVehicleHandle = playerVeh.Handle;
                 vehicleEntryTicks = DateTime.Now.Ticks;
-                // Reset alignment state so prior vehicle's mode can't bleed in.
+                // Reset alignment state so prior vehicle / location can't bleed in.
                 currentDriveMode = DriveMode.LaneKeeping;
                 alignmentEngageReverse = false;
-                // Drop rolling history — prior vehicle's snapshots are stale.
+                // Drop rolling history — prior snapshots are stale.
                 historyHead = 0;
                 historyCount = 0;
                 lastModeChangeTicks = DateTime.Now.Ticks;
-                // Reset lane-snap memory; prior vehicle was likely in a
+                // Reset lane-snap memory; prior location was likely a
                 // different lane / road class.
                 lastLaneIndex = int.MinValue;
                 // Reset persistent-skew tracker.
                 persistentSkewStartTicks = 0;
+                // TELEPORT-ONLY EXTRA RESETS. The vehicle-change path above
+                // already covered the per-vehicle state. Teleports need to
+                // additionally clear the cached threat data and path polyline
+                // because the OLD location's obstacles / road tangent would
+                // otherwise drive 1-2 frames of wrong steering / braking at
+                // the NEW location.
+                if (teleported)
+                {
+                    ResetForTeleport("planar-jump");
+                }
             }
 
             // Lane-keep first. Sets isOnValidRoad as a side effect.
@@ -8053,6 +8411,20 @@ namespace GrandTheftAccessibility
                 skewFailureStreak = 0;
             if (skewFailureStreak >= LANEKEEP_SKEW_FAIL_FRAMES)
                 laneKeepOk = false;
+            // Iter-10 Patch B: SEVERE-SKEW INSTANT EJECT. The 6-frame streak
+            // above is the right gate for moderate skew (~30°), but at 55°+
+            // the car is essentially sideways — there's no flicker scenario
+            // where one frame at that angle should be excused as transient
+            // noise. Force laneKeepOk=false on the very first frame and
+            // pre-load the streak so a subsequent OK flicker can't reset it
+            // back to LaneKeeping immediately.
+            const float LANEKEEP_SKEW_SEVERE_ANGLE = 55f;
+            if (Math.Abs(roadHeadingDelta) > LANEKEEP_SKEW_SEVERE_ANGLE)
+            {
+                laneKeepOk = false;
+                if (skewFailureStreak < LANEKEEP_SKEW_FAIL_FRAMES)
+                    skewFailureStreak = LANEKEEP_SKEW_FAIL_FRAMES;
+            }
 
             // PERSISTENT-SKEW ESCALATION. Track how long we've been pinned in
             // a heavily-skewed state outside LaneKeeping. Once past the bypass
@@ -8152,8 +8524,18 @@ namespace GrandTheftAccessibility
                     FractionLaneKeepOkInLastMs(ALIGN_CONFIRM_MS) < ALIGN_OK_FRACTION_MAX;
                 bool legacyFallback = !HistorySpansAtLeastMs(ALIGN_CONFIRM_MS)
                     && laneKeepFailureStreak >= LANEKEEP_FAILURE_HYSTERESIS;
-                useLaneKeep = laneKeepOk
-                    || !(sustainedFailure || legacyFallback);
+                // Iter-10 Patch A: SATURATED-STREAK EJECT. If
+                // laneKeepFailureStreak has hit its cap (20), we've already
+                // registered 20 distinct failure events — overwhelming
+                // evidence the car isn't actually lane-keeping. The cap must
+                // not be a stable resting state. Force the mode out of
+                // LaneKeeping regardless of momentary laneKeepOk flickers.
+                // driveassist-2026-05-25-231603 F5397 was 30 seconds in
+                // mode=LaneKeeping with failStreak=20 and skewAngle=70.5° —
+                // exactly the limbo this gate fixes.
+                bool streakSaturated = laneKeepFailureStreak >= LANEKEEP_FAILURE_STREAK_CAP;
+                useLaneKeep = (laneKeepOk && !streakSaturated)
+                    || !(sustainedFailure || legacyFallback || streakSaturated);
             }
             else
             {
@@ -8289,10 +8671,84 @@ namespace GrandTheftAccessibility
                     isOnValidRoad = true;            // Downstream code expects a guidance source.
                     roadHeadingDelta = recoveryHeadingDelta;
                     hasLeadVehicle = false;
+
+                    // Iter-9 Patch E: dense-traffic-aware pause. F3527 in
+                    // driveassist-2026-05-25-180748 collided at 0.46 m/s
+                    // while recovery was steering it through a parking-lot-
+                    // density cluster. Pause-mode: count nearby vehicles
+                    // within RECOVERY_PAUSE_BLOCK_R (10 m); if >=2 AND the
+                    // car has been stalled <2 m/s for RECOVERY_PAUSE_STALL_MS,
+                    // hold a brake (RECOVERY_PAUSE_BRAKE) and zero the
+                    // recovery steer so the car doesn't fight to push
+                    // through traffic. Resume when no vehicle within
+                    // RECOVERY_PAUSE_CLOSE_R for RECOVERY_PAUSE_RESUME_MS.
+                    long nowEPause = DateTime.Now.Ticks;
+                    int nearbyBlockCount = 0;
+                    int nearbyCloseCount = 0;
+                    foreach (Vehicle nv in World.GetNearbyVehicles(playerVeh.Position,
+                        RECOVERY_PAUSE_BLOCK_R + 0.1f))
+                    {
+                        if (nv == null || !nv.Exists()) continue;
+                        if (nv.Handle == playerVeh.Handle) continue;
+                        float nd = playerVeh.Position.DistanceTo(nv.Position);
+                        if (nd <= RECOVERY_PAUSE_BLOCK_R) nearbyBlockCount++;
+                        if (nd <= RECOVERY_PAUSE_CLOSE_R) nearbyCloseCount++;
+                    }
+                    bool stalled = vehicleSpeed < 2f
+                        && VehicleStoppedForLastMs(2f, RECOVERY_PAUSE_STALL_MS);
+                    bool blockedEnough = nearbyBlockCount >= RECOVERY_PAUSE_BLOCK_COUNT;
+
+                    if (nearbyCloseCount == 0) recoveryLastClearTicks = nowEPause;
+
+                    // Enter pause if blocked AND stalled, or stay paused until
+                    // the resume gate (clear for RECOVERY_PAUSE_RESUME_MS) is
+                    // met. recoveryLastClearTicks is updated whenever the
+                    // close-band is empty; the resume comparison reads it.
+                    bool wasPaused = recoveryPausedSinceTicks > 0;
+                    bool stayPaused = wasPaused
+                        && (nowEPause - recoveryLastClearTicks) < RECOVERY_PAUSE_RESUME_MS * 10000;
+                    bool nowPaused = (blockedEnough && stalled) || stayPaused;
+
+                    if (nowPaused)
+                    {
+                        if (!wasPaused)
+                        {
+                            recoveryPausedSinceTicks = nowEPause;
+                            if (driveLogger != null && driveLogger.IsRunning)
+                                driveLogger.Write("[F" + driveLogFrameCount
+                                    + "] EVENT recovery-paused: nearbyVehicles=" + nearbyBlockCount
+                                    + " speed=" + vehicleSpeed.ToString("F2"));
+                            RecordDriveDecision("recovery-paused: blockers=" + nearbyBlockCount);
+                            recoveryPauseLogged = true;
+                        }
+                        // Override outputs: hold brake, drop the recovery
+                        // steer so the wheel doesn't push toward the target
+                        // through bodies.
+                        if (recoveryBrakeRequest < RECOVERY_PAUSE_BRAKE)
+                            recoveryBrakeRequest = RECOVERY_PAUSE_BRAKE;
+                        roadSteerCorrection = 0f;
+                    }
+                    else if (wasPaused)
+                    {
+                        // Resume: surroundings cleared for the required ms.
+                        if (driveLogger != null && driveLogger.IsRunning && recoveryPauseLogged)
+                            driveLogger.Write("[F" + driveLogFrameCount
+                                + "] EVENT recovery-resumed: clearMs="
+                                + ((nowEPause - recoveryLastClearTicks) / 10000));
+                        RecordDriveDecision("recovery-resumed");
+                        recoveryPausedSinceTicks = 0;
+                        recoveryPauseLogged = false;
+                    }
                 }
                 else
                 {
                     recoveryBrakeRequest = 0f;
+                    // Leaving recovery — clear the pause state too.
+                    if (recoveryPausedSinceTicks > 0)
+                    {
+                        recoveryPausedSinceTicks = 0;
+                        recoveryPauseLogged = false;
+                    }
                 }
             }
 
@@ -8482,21 +8938,42 @@ namespace GrandTheftAccessibility
             // (cachedBrakeMagnitude = 1.0). The game's actual brake/ABS physics handle
             // the deceleration curve, which feels natural instead of teleporting speed.
             // ============================================
-            // AVOID-DIRECTION HYSTERESIS (Mechanism C fix). The per-scan threat
-            // priority can ping-pong between two sources (e.g. ped-ahead vs
-            // wall-from-static-cast) and flip avoidDirection sign every 1-3
-            // frames, yaw-oscillating the wheel. Require sign flips to be
-            // sustained for AVOID_DIR_FLIP_HOLD frames before they take effect.
-            // Clearing to 0 or sticking on the same sign publishes immediately.
+            // AVOID-DIRECTION HYSTERESIS. The per-scan threat priority can
+            // ping-pong between two sources (e.g. ped-ahead vs wall-from-
+            // static-cast) and flip avoidDirection sign on neighbouring
+            // frames, yaw-oscillating the wheel. The previous gate compared
+            // only against cachedAvoidDirection, so +1 -> 0 -> -1 published
+            // -1 instantly because the intermediate 0 reset the cache. New
+            // log driveassist-2026-05-25-111452 F478-F502 is exactly that
+            // pattern.
+            //
+            // Now: track the most recent NON-ZERO published direction (with a
+            // 500 ms memory window). Opposite-sign re-acquisition against
+            // memory requires AVOID_DIR_FLIP_HOLD consecutive frames before
+            // publishing — even when the immediately previous cached value
+            // was zero. Clearing to 0 still publishes immediately because
+            // zero is always safe.
+            long avoidNow = DateTime.Now.Ticks;
+            bool memoryStale = lastNonZeroAvoidDir == 0
+                || (avoidNow - lastNonZeroAvoidDirTicks) > AVOID_DIR_MEMORY_TICKS;
             int publishedAvoidDir;
-            if (avoidDirection == 0 || avoidDirection == cachedAvoidDirection || cachedAvoidDirection == 0)
+            if (avoidDirection == 0)
             {
+                publishedAvoidDir = 0;
+                proposedAvoidDirection = 0;
+                avoidDirHoldFrames = 0;
+            }
+            else if (memoryStale || avoidDirection == lastNonZeroAvoidDir)
+            {
+                // No conflicting recent memory, or same sign as memory —
+                // publish immediately.
                 publishedAvoidDir = avoidDirection;
                 proposedAvoidDirection = avoidDirection;
                 avoidDirHoldFrames = 0;
             }
             else
             {
+                // Opposite sign vs recent memory — require sustained evidence.
                 if (avoidDirection == proposedAvoidDirection)
                     avoidDirHoldFrames++;
                 else
@@ -8506,7 +8983,12 @@ namespace GrandTheftAccessibility
                 }
                 publishedAvoidDir = avoidDirHoldFrames >= AVOID_DIR_FLIP_HOLD
                     ? avoidDirection
-                    : cachedAvoidDirection;
+                    : (cachedAvoidDirection != 0 ? cachedAvoidDirection : lastNonZeroAvoidDir);
+            }
+            if (publishedAvoidDir != 0)
+            {
+                lastNonZeroAvoidDir = publishedAvoidDir;
+                lastNonZeroAvoidDirTicks = avoidNow;
             }
 
             // Real release-distance hysteresis. The old single-threshold
@@ -8960,8 +9442,14 @@ namespace GrandTheftAccessibility
             float vehicleSpeed = playerVeh.Speed;
             float vehicleHeading = playerVeh.Heading;
 
-            // Search range scales with speed: 15m at low speed, up to 60m at highway speed
-            float searchRange = Math.Max(15f, Math.Min(60f, vehicleSpeed * 3f));
+            // Search range scales with speed AND vehicle class (iter-8). Was
+            // a class-agnostic `vehicleSpeed * 3f`; now uses the meta brake-
+            // lookahead formula so a truck (longer required following gap)
+            // looks further ahead than a sports car at the same speed.
+            // Same 15-60 m clamp preserves the existing ACC range envelope.
+            var accAi = VehicleAIHandlingRegistry.GetForVehicle(playerVeh);
+            float searchRange = Math.Max(15f, Math.Min(60f,
+                accAi.BrakeLookaheadForSpeed(vehicleSpeed) * 1.3f));
 
             Vehicle[] nearbyVehicles = World.GetNearbyVehicles(playerPos, searchRange);
             if (nearbyVehicles == null || nearbyVehicles.Length == 0)
@@ -9947,12 +10435,26 @@ namespace GrandTheftAccessibility
                     }
                 }
 
-                // If there's any road node nearby, we're probably on a curve - don't teleport
+                // If there's any road node nearby, we're probably on a curve - don't teleport.
+                // Iter-10 Patch C: don't wipe the off-road accumulator on
+                // every flicker into the close-band; require sustained
+                // proximity. See OFFROAD_RESET_HYSTERESIS_MS.
                 if (anyNodeNearby)
                 {
-                    wasCloseToRoad = true;
-                    offRoadStartTicks = 0;
+                    if (closeToRoadConfirmTicks == 0)
+                        closeToRoadConfirmTicks = now;
+                    else if ((now - closeToRoadConfirmTicks) / 10000 > OFFROAD_RESET_HYSTERESIS_MS)
+                    {
+                        wasCloseToRoad = true;
+                        offRoadStartTicks = 0;
+                    }
                     return;
+                }
+                else
+                {
+                    // Genuinely not near any node — clear the confirm timer so
+                    // a future flicker into the close-band has to re-accumulate.
+                    closeToRoadConfirmTicks = 0;
                 }
             }
 
@@ -9969,6 +10471,7 @@ namespace GrandTheftAccessibility
                 if (TeleportToNearestRoad(playerVeh))
                 {
                     lastTeleportTicks = now;
+                    ResetForTeleport("collision-imminent");
                 }
                 return;
             }
@@ -9985,6 +10488,7 @@ namespace GrandTheftAccessibility
                 if (TeleportToNearestRoad(playerVeh))
                 {
                     lastTeleportTicks = now;
+                    ResetForTeleport("far-from-road");
                 }
                 return;
             }
@@ -9992,6 +10496,11 @@ namespace GrandTheftAccessibility
             // Condition 3: Moderately far from road for 5+ seconds
             if (currentRoadDistance > roadFarThreshold)
             {
+                // Iter-10 Patch C: clear the close-to-road accumulator the
+                // moment we're confirmed off-road — a future flicker back into
+                // the close-band has to re-accumulate from zero before the
+                // 5 s off-road timer resets.
+                closeToRoadConfirmTicks = 0;
                 if (wasCloseToRoad)
                 {
                     // Just went off-road, start timer
@@ -10010,15 +10519,25 @@ namespace GrandTheftAccessibility
                     if (TeleportToNearestRoad(playerVeh))
                     {
                         lastTeleportTicks = now;
+                        ResetForTeleport("offroad-timeout");
                     }
                     return;
                 }
             }
             else
             {
-                // Close to road - reset tracking
-                wasCloseToRoad = true;
-                offRoadStartTicks = 0;
+                // Close to road - reset tracking only after sustained proximity
+                // (iter-10 Patch C). A single frame of "close" no longer wipes
+                // the 5 s off-road accumulator — a shoulder-clip during an
+                // off-road drift used to spuriously reset and leave the car
+                // stuck off-road for 30 s+ (driveassist-2026-05-25-231603 F5397).
+                if (closeToRoadConfirmTicks == 0)
+                    closeToRoadConfirmTicks = now;
+                else if ((now - closeToRoadConfirmTicks) / 10000 > OFFROAD_RESET_HYSTERESIS_MS)
+                {
+                    wasCloseToRoad = true;
+                    offRoadStartTicks = 0;
+                }
             }
         }
 
@@ -10654,6 +11173,18 @@ namespace GrandTheftAccessibility
                 && cachedHandbrakeMagnitude < 0.1f)
                 liveBrakeTarget = accBrakeOut;
 
+            // ---- POST-TELEPORT BRAKE HOLD (iter-9 Patch C) ----
+            // ResetForTeleport sets postTeleportBrakeHoldUntilTicks to a
+            // 500 ms-from-now timestamp. While the hold is active we floor
+            // liveBrakeTarget at POST_TELEPORT_BRAKE_FLOOR (0.4). This stops
+            // the car from immediately closing on a fresh obstacle at the new
+            // location while the next 1-2 scans rebuild threat data after a
+            // CheckRoadTeleport jump. Has no effect outside the hold window.
+            if (postTeleportBrakeHoldUntilTicks > 0
+                && DateTime.Now.Ticks < postTeleportBrakeHoldUntilTicks
+                && liveBrakeTarget < POST_TELEPORT_BRAKE_FLOOR)
+                liveBrakeTarget = POST_TELEPORT_BRAKE_FLOOR;
+
             // ---- BRAKE RAMP ----
             // The brake control input lerps toward the target rather than snapping.
             // This is the "no more jerky brake" fix. With BRAKE_RAMP_RATE = 5.0/sec,
@@ -10663,6 +11194,74 @@ namespace GrandTheftAccessibility
                 rampedBrakeInput = Math.Min(liveBrakeTarget, rampedBrakeInput + rampStep);
             else
                 rampedBrakeInput = Math.Max(liveBrakeTarget, rampedBrakeInput - rampStep);
+
+            // ---- MAJOR-INTERVENTION INPUT REFUSAL (Full mode only) ----
+            // When the mod is actively braking, in recovery/alignment, or running a
+            // handbrake/reverse/stuck-recovery maneuver, the player's raw control
+            // reads must not reach the game — otherwise continued throttle/brake/
+            // steer fight the mod's _SET_CONTROL_NORMAL writes below.
+            //
+            // CRITICAL: DISABLE_CONTROL_ACTION must be called BEFORE the mod's own
+            // SetControlNormal writes for this frame, otherwise a later DISABLE
+            // zeroes out the simulated value the mod just wrote. Placing it here
+            // (after BRAKE RAMP, before STEER URGENCY / APPLY STEERING) means all
+            // subsequent SetControlNormal calls in this function correctly
+            // override the disabled state.
+            //
+            // The composite deliberately does NOT trigger on steer correction
+            // magnitude alone — smoothedRoadCorrection is routinely ±0.5-0.9 in
+            // normal curved-road cruising, and using it as a trigger caps speed
+            // at ~5 mph (driveassist-2026-05-25-115625 frames 100-2451 show this
+            // exactly: stable 1.9-2.2 m/s with mode=LaneKeeping and no brake).
+            // The genuine "intervention" signals below are sufficient.
+            // Three intervention layers, each disabling only the controls
+            // that would actually fight the mod:
+            //   brakeIntervening: mod is braking or armed — lock throttle so
+            //                     player can't override; lock brake so player
+            //                     can't lift it during the emergency.
+            //   totalTakeover:    handbrake turn / reverse U-turn / stuck
+            //                     autodrive — mod owns everything.
+            //   inRecoveryMode:   currentDriveMode != LaneKeeping but no
+            //                     active braking. Lock steering (mod is
+            //                     pursuing a recovery target) but ALLOW
+            //                     throttle and brake. Iteration-5 didn't
+            //                     gate throttle on drive mode at all; iter-6
+            //                     did and capped median speed at 2.6 m/s vs
+            //                     iter-5's 8.8 (cross-log trend in
+            //                     driveassist-2026-05-25-121415 audit).
+            //                     Recovery forward-crawl writes 0.5 throttle;
+            //                     letting the player add their own throttle
+            //                     on top lets the car actually progress
+            //                     toward the recovery target.
+            bool brakeIntervening = cachedIsFullMode && (
+                emergencyBrakeActive
+                || brakeArmed
+                || rampedBrakeInput > 0.05f
+                || liveBrakeTarget > 0.05f);
+            bool totalTakeover = cachedIsFullMode && (
+                cachedHandbrakeMagnitude > 0.1f
+                || alignmentEngageReverse
+                || stuckAutodriveEngaged);
+            bool inRecoveryMode = cachedIsFullMode && currentDriveMode != DriveMode.LaneKeeping;
+
+            // Steering: any time the mod is owning the wheel.
+            if (brakeIntervening || totalTakeover || inRecoveryMode)
+                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 59, true); // VEH_MOVE_LEFT_RIGHT
+
+            // Brake / handbrake: only when the mod is actively braking.
+            if (brakeIntervening || totalTakeover)
+            {
+                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 72, true); // VEH_BRAKE
+                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 76, true); // VEH_HANDBRAKE
+            }
+
+            // Throttle: when actively braking or total-takeover. Plain recovery
+            // mode does NOT lock throttle — the player should be able to add
+            // forward power on top of the recovery forward-crawl. On a
+            // reversing car, control 71 IS the brake (the existing throttle-
+            // lockout block honors this), so skip the disable there.
+            if ((brakeIntervening || totalTakeover) && !brakingAReversingCar)
+                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 71, true); // VEH_ACCELERATE
 
             // ---- PER-FRAME STEER URGENCY RECOMPUTE ----
             // Re-scale the cached steering correction by live steer-threat urgency.
@@ -15751,6 +16350,70 @@ namespace GrandTheftAccessibility
             catch { }
         }
 
+        // Iter-9 Patch C: reset all location-specific drive-assist state.
+        // Called from:
+        //   - the planar-jump branch in ProcessSteeringAssist (covers player
+        //     long-range teleports and any other code path that warps the
+        //     vehicle without touching the handle)
+        //   - CheckRoadTeleport's 3 fire sites (covers the mod-initiated
+        //     teleports whose short jumps the planar-jump gate misses)
+        // Also schedules a 500 ms post-teleport brake hold so the car doesn't
+        // continue closing on whatever's at the new location while the next
+        // 1-2 scans rebuild a fresh threat picture.
+        private void ResetForTeleport(string source)
+        {
+            cachedBrakeThreatPos = GTA.Math.Vector3.Zero;
+            cachedBrakeThreatVel = GTA.Math.Vector3.Zero;
+            cachedBrakeThreatStamp = 0;
+            cachedBrakeThreatFirstSeenStamp = 0;
+            cachedSteerThreatPos = GTA.Math.Vector3.Zero;
+            cachedSteerThreatVel = GTA.Math.Vector3.Zero;
+            cachedSteerThreatStamp = 0;
+            emergencyBrakeActive = false;
+            wasObstacleInBrakeZone = false;
+            criticalZoneArmFrames = 0;
+            brakeArmed = false;
+            rampedBrakeInput = 0f;
+            cachedBrakeMagnitude = 0f;
+            cachedSteerCorrection = 0f;
+            smoothedSteerCorrection = 0f;
+            smoothedRoadCorrection = 0f;
+            lastRoadCorrection = 0f;
+            cachedAvoidDirection = 0;
+            lastNonZeroAvoidDir = 0;
+            lastNonZeroAvoidDirTicks = 0;
+            proposedAvoidDirection = 0;
+            avoidDirHoldFrames = 0;
+            // Path polyline rebuilds on the next BuildPathPolyline call;
+            // clearing it here prevents Stanley from steering toward an OLD
+            // road node before the rebuild runs.
+            pathPolyline.Clear();
+            ppGoalInitialized = false;
+            hasRecoveryTarget = false;
+            recoveryTargetPos = GTA.Math.Vector3.Zero;
+            recoveryTargetHeading = 0f;
+            recoveryTargetDistance = 999f;
+            // A 30 deg post-teleport heading diff vs a stale road tangent
+            // isn't a real skew, so don't carry the streak across.
+            skewFailureStreak = 0;
+            laneKeepFailureStreak = 0;
+            // Schedule the post-teleport brake hold.
+            postTeleportBrakeHoldUntilTicks = DateTime.Now.Ticks + POST_TELEPORT_BRAKE_HOLD_TICKS;
+            // Update the position cache so the planar-jump check doesn't
+            // re-fire next scan from the same data.
+            try
+            {
+                Vehicle v = Game.Player.Character != null && Game.Player.Character.IsInVehicle()
+                    ? Game.Player.Character.CurrentVehicle : null;
+                if (v != null) lastDriveAssistVehiclePos = v.Position;
+            }
+            catch { }
+            if (driveLogger != null && driveLogger.IsRunning)
+                driveLogger.Write("[F" + driveLogFrameCount
+                    + "] EVENT teleport-reset: source=" + source);
+            RecordDriveDecision("teleport-reset: source=" + source);
+        }
+
         // Pushes one discrete drive-assist decision onto the ring buffer. Kept
         // cheap so it can be called from the per-tick decision paths. The F1
         // failure snapshot reads the last 5 back out.
@@ -15771,22 +16434,39 @@ namespace GrandTheftAccessibility
         // moment; the block captures everything needed to diagnose it later.
         private void LogPlayerIndicatedFailure()
         {
+            if (driveLogger == null || !driveLogger.IsRunning)
+            {
+                Tolk.Speak("Failure marker needs drive assist debug logging turned on.", true);
+                return;
+            }
+            if (LogCollisionSnapshot("PLAYER-INDICATED-FAILURE", null))
+                Tolk.Speak("Failure marked in drive assist log.", true);
+            else
+                Tolk.Speak("Failure marker error.", true);
+        }
+
+        // Shared snapshot writer used by the F1 player marker (Patch F) and by
+        // auto-collision detection (Patch G). The tag distinguishes them in
+        // the log so post-hoc analysis can either merge or separate the two
+        // populations. Extra is a one-line annotation appended to the marker
+        // header (auto-collision uses it to record healthDelta=...). Returns
+        // true on success.
+        private bool LogCollisionSnapshot(string tag, string extra)
+        {
             try
             {
-                if (driveLogger == null || !driveLogger.IsRunning)
-                {
-                    Tolk.Speak("Failure marker needs drive assist debug logging turned on.", true);
-                    return;
-                }
+                if (driveLogger == null || !driveLogger.IsRunning) return false;
 
                 Ped player = Game.Player.Character;
                 Vehicle veh = player.IsInVehicle() ? player.CurrentVehicle : null;
                 GTA.Math.Vector3 pos = veh != null ? veh.Position : player.Position;
+                collisionMarkerSeq++;
 
-                StringBuilder sb = new StringBuilder(2400);
+                StringBuilder sb = new StringBuilder(2800);
                 sb.AppendLine("==================================================");
-                sb.AppendLine("[F" + driveLogFrameCount + "] PLAYER-INDICATED-FAILURE  t="
-                    + DateTime.Now.ToString("HH:mm:ss.fff"));
+                sb.AppendLine("[F" + driveLogFrameCount + "] " + tag + " #" + collisionMarkerSeq
+                    + (string.IsNullOrEmpty(extra) ? "" : "  " + extra)
+                    + "  t=" + DateTime.Now.ToString("HH:mm:ss.fff"));
                 sb.AppendLine("==================================================");
 
                 // 1. Exact vehicle coordinates.
@@ -15885,7 +16565,76 @@ namespace GrandTheftAccessibility
                     sb.AppendLine("  health: (on-foot) player=" + player.HealthFloat.ToString("F0"));
                 }
 
-                // 8. Most recent 5 drive-assist decisions (newest last).
+                // 8. Cached threat dump (Iter-9 Patch F). If a marker shows
+                //    obstacles nearby but no brake, this section tells us
+                //    whether the threat was cached but didn't make it through
+                //    the gates, vs. never cached at all.
+                long now = DateTime.Now.Ticks;
+                if (cachedBrakeThreatPos != GTA.Math.Vector3.Zero)
+                {
+                    long ageMs = cachedBrakeThreatStamp > 0
+                        ? (now - cachedBrakeThreatStamp) / 10000 : -1;
+                    long firstSeenMs = cachedBrakeThreatFirstSeenStamp > 0
+                        ? (now - cachedBrakeThreatFirstSeenStamp) / 10000 : -1;
+                    sb.AppendLine("  cached-brake-threat: pos=" + FmtV(cachedBrakeThreatPos)
+                        + " ageMs=" + ageMs + " firstSeenMs=" + firstSeenMs
+                        + " velMag=" + cachedBrakeThreatVel.Length().ToString("F1"));
+                }
+                else
+                {
+                    sb.AppendLine("  cached-brake-threat: (none)");
+                }
+                if (cachedSteerThreatPos != GTA.Math.Vector3.Zero)
+                {
+                    long sAgeMs = cachedSteerThreatStamp > 0
+                        ? (now - cachedSteerThreatStamp) / 10000 : -1;
+                    sb.AppendLine("  cached-steer-threat: pos=" + FmtV(cachedSteerThreatPos)
+                        + " ageMs=" + sAgeMs
+                        + " velMag=" + cachedSteerThreatVel.Length().ToString("F1"));
+                }
+                else
+                {
+                    sb.AppendLine("  cached-steer-threat: (none)");
+                }
+
+                // 9. Brake-pipeline detail (Iter-9 Patch F). Distinguishes
+                //    "no brake fired" from "brake fired but blended down" etc.
+                sb.AppendLine("  brake-detail: armed=" + brakeArmed
+                    + " rampedBrake=" + rampedBrakeInput.ToString("F2")
+                    + " cachedBrakeMag=" + cachedBrakeMagnitude.ToString("F2")
+                    + " recoveryBrake=" + recoveryBrakeRequest.ToString("F2")
+                    + " curveBrake=" + curveBrakeRequest.ToString("F2")
+                    + " accBrake=" + accBrakeOut.ToString("F2")
+                    + " emergency=" + emergencyBrakeActive
+                    + " handbrake=" + cachedHandbrakeMagnitude.ToString("F2"));
+
+                // 10. Lane / road / skew detail.
+                long skewMs = persistentSkewStartTicks > 0
+                    ? (now - persistentSkewStartTicks) / 10000 : 0;
+                sb.AppendLine("  road-detail: polylineCount=" + pathPolyline.Count
+                    + " closestPolySeg=" + lastClosestPolySeg
+                    + " skewMs=" + skewMs
+                    + " skewStreak=" + skewFailureStreak
+                    + " failStreak=" + laneKeepFailureStreak
+                    + " roadCorrSmoothed=" + smoothedRoadCorrection.ToString("F2")
+                    + " mode=" + currentDriveMode);
+
+                // 11. Vehicle-handling dump from the iter-8 registry (only
+                //     meaningful when in a vehicle).
+                if (veh != null)
+                {
+                    int gtaClass = Function.Call<int>(Hash.GET_VEHICLE_CLASS, veh);
+                    VehicleAIHandlingInfo aiInfo = VehicleAIHandlingRegistry.GetForVehicle(veh);
+                    sb.AppendLine("  vehicle-handling: gtaClass=" + gtaClass
+                        + " aiHandling=" + (aiInfo != null ? aiInfo.Name : "(null)")
+                        + " Min=" + (aiInfo != null ? aiInfo.MinBrakeDistance.ToString("F1") : "?")
+                        + " Max=" + (aiInfo != null ? aiInfo.MaxBrakeDistance.ToString("F1") : "?")
+                        + " MaxAt=" + (aiInfo != null ? aiInfo.MaxSpeedAtBrakeDistance.ToString("F1") : "?")
+                        + " source=" + VehicleAIHandlingRegistry.LoadedFrom);
+                }
+
+                // 12. Most recent drive-assist decisions (newest last). Ring
+                //     size was bumped 5 -> 30 in iter-9 Patch F.
                 sb.AppendLine("  recent-decisions (newest last):");
                 int total = driveDecisionLogCount;
                 if (total == 0)
@@ -15904,11 +16653,11 @@ namespace GrandTheftAccessibility
 
                 sb.AppendLine("==================================================");
                 driveLogger.Write(sb.ToString().TrimEnd());
-                Tolk.Speak("Failure marked in drive assist log.", true);
+                return true;
             }
             catch
             {
-                Tolk.Speak("Failure marker error.", true);
+                return false;
             }
         }
 
@@ -16422,9 +17171,28 @@ namespace GrandTheftAccessibility
         /// sized to shed the excess speed before the turn; otherwise 0.</summary>
         private float ComputeCurveBrake(Vehicle veh)
         {
-            if (pathPolyline.Count < 3) { curveBrakeStreak = 0; return 0f; }
+            // Iter-10 Patch D: skew-aware brake floor. Independent of the
+            // polyline-driven curve detection below, if the car is already
+            // significantly skewed against the road tangent at meaningful
+            // speed, the physics model has already lost the bend — fire some
+            // brake regardless of what the meta vSafe says. Catches the
+            // SPORTS_CAR case where meta vSafe @ 22° = 42 m/s and the existing
+            // min(physics, meta) gate still lets the car oversteer
+            // (driveassist-2026-05-25-231603 F2480: 29 m/s at 16.8° skew with
+            // curveBrake=0). All early returns below propagate this floor.
+            float skewBrakeFloor = 0f;
+            {
+                float skewMag = Math.Abs(roadHeadingDelta);
+                if (skewMag > 15f && veh.Speed > 8f)
+                {
+                    skewBrakeFloor = 0.2f + Math.Min(0.4f, (skewMag - 15f) / 30f * 0.4f);
+                    if (skewBrakeFloor > CURVE_BRAKE_MAX) skewBrakeFloor = CURVE_BRAKE_MAX;
+                }
+            }
+
+            if (pathPolyline.Count < 3) { curveBrakeStreak = 0; return skewBrakeFloor; }
             float speed = veh.Speed;
-            if (speed < 4f) { curveBrakeStreak = 0; return 0f; }
+            if (speed < 4f) { curveBrakeStreak = 0; return skewBrakeFloor; }
 
             int start = lastClosestPolySeg;
             if (start < 0) start = 0;
@@ -16458,21 +17226,40 @@ namespace GrandTheftAccessibility
                 arc += l1;
             }
 
-            if (maxTurnDeg < CURVE_SHARP_ANGLE_DEG) { curveBrakeStreak = 0; return 0f; }
+            if (maxTurnDeg < CURVE_SHARP_ANGLE_DEG) { curveBrakeStreak = 0; return skewBrakeFloor; }
 
             // Turn radius from chord/angle: R ~= s / (2 sin(theta/2)).
             float turnRad = maxTurnDeg / 57.29578f;
             float sinHalf = (float)Math.Sin(turnRad / 2f);
-            if (sinHalf < 0.01f) { curveBrakeStreak = 0; return 0f; }
+            if (sinHalf < 0.01f) { curveBrakeStreak = 0; return skewBrakeFloor; }
             float R = curveSegLen / (2f * sinHalf);
-            float vSafe = (float)Math.Sqrt(CURVE_LATERAL_ACCEL_MAX * R);
+            float vSafePhysics = (float)Math.Sqrt(CURVE_LATERAL_ACCEL_MAX * R);
 
-            if (speed <= vSafe) { curveBrakeStreak = 0; return 0f; }
-            // Only brake when the bend is close enough to matter (~3 s away).
-            if (distToTurn < 0.5f || distToTurn > speed * 3f)
+            // META-INFORMED TARGET SPEED (iter-8). The physics-only vSafe
+            // ignores vehicle class — a sports car and a truck see the same
+            // limit at the same radius even though their grip differs. GTA V's
+            // own AI uses an angle->speed table per vehicle handling class;
+            // fold that in as a second upper bound and take the more
+            // conservative of the two. min() keeps us safe even if the meta
+            // table is generous at a given angle (physics still applies).
+            var aiInfo = VehicleAIHandlingRegistry.GetForVehicle(veh);
+            float vSafeMeta = aiInfo.MaxSpeedForAngle(maxTurnDeg);
+            float vSafe = Math.Min(vSafePhysics, vSafeMeta);
+
+            if (speed <= vSafe) { curveBrakeStreak = 0; return skewBrakeFloor; }
+            // Only brake when the bend is close enough to matter. The lookahead
+            // distance comes from the meta's class-aware brake-distance
+            // triplet (MinBrakeDistance / MaxBrakeDistance /
+            // MaxSpeedAtBrakeDistance) instead of the old class-agnostic
+            // `speed * 3f`. Trucks (Max=120m) get longer lookahead than
+            // sports cars (Max=120m but Min=8m). 1.3x margin so brake has
+            // time to ramp up rather than firing at the last possible moment.
+            float lookahead = aiInfo.BrakeLookaheadForSpeed(speed) * 1.3f;
+            if (lookahead < 6f) lookahead = 6f;
+            if (distToTurn < 0.5f || distToTurn > lookahead)
             {
                 curveBrakeStreak = 0;
-                return 0f;
+                return skewBrakeFloor;
             }
 
             // Persistence guard: require the same conclusion two scans running
@@ -16482,12 +17269,16 @@ namespace GrandTheftAccessibility
             // just for this one consumer would be exactly the kind of bloat
             // the buffer rationale calls out.)
             curveBrakeStreak++;
-            if (curveBrakeStreak < 2) return 0f;
+            if (curveBrakeStreak < 2) return skewBrakeFloor;
 
             float decel = (speed * speed - vSafe * vSafe) / (2f * Math.Max(distToTurn, 1f));
             float brake = decel / 6.0f;            // ~6 m/s^2 firm braking maps to 1.0
             if (brake < 0f) brake = 0f;
             if (brake > CURVE_BRAKE_MAX) brake = CURVE_BRAKE_MAX;
+            // Iter-10 Patch D: skew floor wins if larger than the curve-
+            // driven brake (the car is already misaligned, so brake harder
+            // than the curve table alone would suggest).
+            if (skewBrakeFloor > brake) brake = skewBrakeFloor;
             return brake;
         }
 
