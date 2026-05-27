@@ -9023,6 +9023,24 @@ namespace GrandTheftAccessibility
                 // Always allow braking for very imminent threats regardless of preference
                 if (closestBrakeTTC < 0.5f && closestBrakeDistance > BRAKE_MIN_USEFUL_DIST)
                     hasBrakeThreat = true;
+
+                // Iter-11 Patch H: decouple brake from steer for forward-cone
+                // threats. The high-speed branch above narrows the brake gate
+                // to closestBrakeTTC < 0.8f when steering is preferred, which
+                // is the structural cause of 14 (48%) of the player markers
+                // in driveassist-2026-05-27-171958 — rear-end collisions at
+                // skew 5-30° where the mod chose swerve over brake even
+                // though the vehicle ahead was unavoidable. For a TRULY
+                // forward threat (angle < 25°), brake and steer should both
+                // engage in parallel — the brake pipeline (rampedBrakeInput)
+                // and steer pipeline (combinedSteer) write distinct outputs,
+                // so coexistence has no architectural conflict.
+                if (angleToObstacle < 25f
+                    && closestBrakeTTC < brakeThreshold
+                    && closestBrakeDistance > BRAKE_MIN_USEFUL_DIST)
+                {
+                    hasBrakeThreat = true;
+                }
             }
 
             // ============================================
