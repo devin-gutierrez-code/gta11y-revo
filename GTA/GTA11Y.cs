@@ -8719,7 +8719,20 @@ namespace GrandTheftAccessibility
                     bool wasPaused = recoveryPausedSinceTicks > 0;
                     bool stayPaused = wasPaused
                         && (nowEPause - recoveryLastClearTicks) < RECOVERY_PAUSE_RESUME_MS * 10000;
-                    bool nowPaused = (blockedEnough && stalled) || stayPaused;
+                    // Iter-11 Patch L: 8-second hard timeout escape hatch.
+                    // driveassist-2026-05-27-171958 showed 48 pause/resume
+                    // events but at least 5 PLAYER markers stuck in pause
+                    // for 10+ seconds because the jam blockers never moved.
+                    // The resume gate (close-band empty for 500 ms) cannot
+                    // fire in a true traffic jam. Force-resume after 8 s of
+                    // continuous pause so the recovery steer + brake pipeline
+                    // can at least try to nudge through. The existing
+                    // UpdateStuckRecovery escalation will take over if the
+                    // nudge doesn't make progress.
+                    const long RECOVERY_PAUSE_HARD_TIMEOUT_TICKS = 80000000L; // 8 s
+                    bool hardTimeout = wasPaused
+                        && (nowEPause - recoveryPausedSinceTicks) > RECOVERY_PAUSE_HARD_TIMEOUT_TICKS;
+                    bool nowPaused = ((blockedEnough && stalled) || stayPaused) && !hardTimeout;
 
                     if (nowPaused)
                     {
@@ -8742,12 +8755,22 @@ namespace GrandTheftAccessibility
                     }
                     else if (wasPaused)
                     {
-                        // Resume: surroundings cleared for the required ms.
+                        // Resume: either surroundings cleared, OR iter-11
+                        // Patch L 8-second hard timeout fired. Log
+                        // distinguishes the two so post-hoc analysis can
+                        // count how often the timeout escape was needed.
                         if (driveLogger != null && driveLogger.IsRunning && recoveryPauseLogged)
-                            driveLogger.Write("[F" + driveLogFrameCount
-                                + "] EVENT recovery-resumed: clearMs="
-                                + ((nowEPause - recoveryLastClearTicks) / 10000));
-                        RecordDriveDecision("recovery-resumed");
+                        {
+                            if (hardTimeout)
+                                driveLogger.Write("[F" + driveLogFrameCount
+                                    + "] EVENT recovery-pause-timeout: pausedMs="
+                                    + ((nowEPause - recoveryPausedSinceTicks) / 10000));
+                            else
+                                driveLogger.Write("[F" + driveLogFrameCount
+                                    + "] EVENT recovery-resumed: clearMs="
+                                    + ((nowEPause - recoveryLastClearTicks) / 10000));
+                        }
+                        RecordDriveDecision(hardTimeout ? "recovery-pause-timeout" : "recovery-resumed");
                         recoveryPausedSinceTicks = 0;
                         recoveryPauseLogged = false;
                     }
