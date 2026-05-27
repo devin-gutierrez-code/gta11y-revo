@@ -220,6 +220,21 @@ namespace GrandTheftAccessibility
         // How long a cached threat remains "trusted" (5 detection cycles ~ 250 ms).
         // Beyond this we don't try to recompute — wait for the next full scan.
         private const long THREAT_CACHE_VALID_TICKS = 2500000; // 250 ms
+        // Iter-11 Patch J: speed-scaled cache validity. A 250 ms-old threat
+        // position is 4 m off at 16 m/s and 6 m off at 25 m/s — exactly the
+        // F2894 (-102.6 health) error magnitude. Floor at 800000 ticks (80 ms)
+        // so we never starve under the next full scan's latency. Used at the
+        // hasLiveBrakeThreat staleness check in ApplyCachedSteeringInputs.
+        private const long THREAT_CACHE_VALID_TICKS_MIN = 800000; // 80 ms floor
+        private long ThreatCacheValidTicksForSpeed(float speedMs)
+        {
+            // At 8 m/s -> 2,500,000 (unchanged 250 ms).
+            // At 16 m/s -> 1,250,000 (125 ms).
+            // At 25 m/s -> 800,000 (80 ms floor).
+            float scale = 8f / Math.Max(8f, speedMs);
+            long scaled = (long)(THREAT_CACHE_VALID_TICKS * scale);
+            return Math.Max(THREAT_CACHE_VALID_TICKS_MIN, scaled);
+        }
 
         // Brake input ramps toward target at this rate (per second). 5.0 means a full
         // 0 → 1 transition takes 200 ms — fast enough for emergencies, smooth enough
@@ -11141,8 +11156,12 @@ namespace GrandTheftAccessibility
             // brake input would lag a full detection cycle.
             float liveBrakeTarget = cachedBrakeMagnitude;
             float liveTtc = float.MaxValue;
+            // Iter-11 Patch J: speed-scaled cache validity — at highway speed
+            // a 250 ms-old threat pos is 4-6 m off, exactly the F2894 (-102.6
+            // health) error magnitude.
+            long brakeCacheValidTicks = ThreatCacheValidTicksForSpeed(playerVeh.Speed);
             bool hasLiveBrakeThreat = cachedBrakeThreatPos != GTA.Math.Vector3.Zero
-                && (nowStamp - cachedBrakeThreatStamp) < THREAT_CACHE_VALID_TICKS;
+                && (nowStamp - cachedBrakeThreatStamp) < brakeCacheValidTicks;
             if (hasLiveBrakeThreat)
             {
                 liveTtc = CalculateTTC(playerVeh, cachedBrakeThreatPos, cachedBrakeThreatVel);
@@ -11304,8 +11323,11 @@ namespace GrandTheftAccessibility
             // away), urgency falls and we steer less — preventing over-correction
             // between detection cycles.
             float liveSteer = cachedSteerCorrection;
+            // Iter-11 Patch J: same speed-scaled validity for the steer cache —
+            // a steer threat 250 ms old at 25 m/s is 6 m off-axis and the
+            // pure-pursuit steer would chase a phantom.
             if (cachedSteerThreatPos != GTA.Math.Vector3.Zero
-                && (nowStamp - cachedSteerThreatStamp) < THREAT_CACHE_VALID_TICKS)
+                && (nowStamp - cachedSteerThreatStamp) < ThreatCacheValidTicksForSpeed(playerVeh.Speed))
             {
                 float liveSteerTtc = CalculateTTC(playerVeh, cachedSteerThreatPos, cachedSteerThreatVel);
                 float steerThr = cachedIsFullMode ? STEER_THRESHOLD_FULL : STEER_THRESHOLD_ASSIST;
