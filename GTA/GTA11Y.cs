@@ -10888,7 +10888,18 @@ namespace GrandTheftAccessibility
             if (hasBrakeThreat)
             {
                 float brakeUrgency = Math.Max(0f, 1f - (brakeTTC / brakeThreshold));
-                brakeMag = brakeUrgency * brakeUrgency;
+                // Iter-11 Patch K: speed-blended brake magnitude. The
+                // squared-urgency curve is the right comfort shape at city
+                // speed (gentle taper, low-urgency threats barely register)
+                // but it's catastrophic at highway speed — urgency=0.4 squared
+                // is only 0.16 brake, exactly the F6786 (-143.6 health)
+                // catastrophic-impact pattern. Blend squared (low speed) into
+                // linear (highway) so urgency=0.4 becomes 0.4 brake at >=20 m/s.
+                float pSpeed = playerVeh.Speed;
+                float speedBlend = Math.Min(1f, Math.Max(0f, (pSpeed - 8f) / 12f));
+                float squaredMag = brakeUrgency * brakeUrgency;
+                float linearMag = brakeUrgency;
+                brakeMag = squaredMag * (1f - speedBlend) + linearMag * speedBlend;
             }
             // No else needed - brakeMag stays at 0 if no brake threat
 
