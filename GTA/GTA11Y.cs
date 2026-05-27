@@ -105,7 +105,13 @@ namespace GrandTheftAccessibility
         // the log. 1 s cooldown matches the player's F1 reflex window.
         private long autoCollisionLastTicks = 0;
         private const long AUTO_COLLISION_COOLDOWN_TICKS = 10000000; // 1 s
-        private const float AUTO_COLLISION_HEALTH_DROP = 5f;
+        // Iter-11 Patch N: raised 5f -> 10f to suppress false positives from
+        // scraping a curb / dropping off a ledge / fall damage. Three -6 to -8
+        // healthDelta auto-collisions in driveassist-2026-05-27-171958
+        // (F11991/F9918/F11824) were not real collisions. Real impacts in the
+        // same log were all -30 or worse, so 10f catches every drive-assist-
+        // relevant event without polluting the marker set.
+        private const float AUTO_COLLISION_HEALTH_DROP = 10f;
         // Tracks chassis health between scans for the auto-collision signal.
         // Independent of lastVehicleHealth at line 790 which feeds the speech
         // "your engine is damaged" feedback feature.
@@ -3486,8 +3492,14 @@ namespace GrandTheftAccessibility
                         {
                             float drop = autoCollisionLastHealth - curH;
                             long sinceLast = DateTime.Now.Ticks - autoCollisionLastTicks;
+                            // Iter-11 Patch N: also tighten speed gate
+                            // 1f -> 3f. Below 3 m/s the energy of any impact
+                            // is sub-collision (parking-lot tap, low-curb
+                            // bump). Both knobs combine: only events that
+                            // both crossed the 10f health threshold AND
+                            // happened at meaningful speed count.
                             if (drop >= AUTO_COLLISION_HEALTH_DROP
-                                && logVeh.Speed > 1f
+                                && logVeh.Speed > 3f
                                 && sinceLast > AUTO_COLLISION_COOLDOWN_TICKS)
                             {
                                 LogCollisionSnapshot("AUTO-COLLISION",
