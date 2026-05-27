@@ -3489,14 +3489,20 @@ namespace GrandTheftAccessibility
                         // seven patches (A-G) landed, so two iter-10 logs were
                         // misread as iter-9 during analysis. Future iterations
                         // MUST update this string when their patches land.
+                        //
+                        // Iter-11 Patch P (2026-05-27): bump iter10 -> iter11
+                        // and list the iter-11 patch letters (N L J I K H M P).
                         driveLogger.Write("# GTA11Y drive-assist log");
-                        driveLogger.Write("# Build: iter10 (iter-9: F:enriched G:auto-coll H:reject-why "
+                        driveLogger.Write("# Build: iter11 (iter-9: F:enriched G:auto-coll H:reject-why "
                             + "A:lat-brake B:close-spd C:teleport-hook D:elev-static E:dense-pause; "
                             + "iter-10: A:streak-eject B:severe-skew C:offroad-hyst D:skew-curve-brake "
-                            + "E:post-tp-hold F:brake-preserve G:thrash-damp O:iter-banner)");
+                            + "E:post-tp-hold F:brake-preserve G:thrash-damp O:iter-banner; "
+                            + "iter-11: N:auto-coll-tune L:recovery-timeout J:cache-validity-scale "
+                            + "I:drove-past-3frame K:brake-mag-blend H:brake-steer-decouple "
+                            + "M:asymmetric-ramp P:iter-banner)");
                         driveLogger.Write("# vehicleaihandling: " + VehicleAIHandlingRegistry.LoadedFrom);
                         driveLogger.Write("# Started: " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
-                        driveLogger.Write("[F" + driveLogFrameCount + "] EVENT iter-version: iter10");
+                        driveLogger.Write("[F" + driveLogFrameCount + "] EVENT iter-version: iter11");
                         Tolk.Speak("Drive assist debug logging started", true);
                     }
                 }
