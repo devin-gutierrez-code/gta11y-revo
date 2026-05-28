@@ -310,6 +310,19 @@ namespace GrandTheftAccessibility
         private bool wasObstacleInBrakeZone = false; // Track latched emergency-brake critical-zone state (release-hysteresis gated)
         private int criticalZoneArmFrames = 0;        // Consecutive enter-frames; arm only after CRITICAL_ARM_FRAMES
 
+        // Iter-12 Patch Q: surface-aware off-road detection. The existing
+        // distance-only logic in CheckRoadTeleport conflates dirt-road nodes
+        // in GTA V's nav graph with real roads — Sandy Shores has dirt nodes
+        // within 5-15 m of the player even when they're 50+ m into pure
+        // desert. GET_STREET_NAME_AT_COORD returns streetHash=0 anywhere
+        // off a named street, so a SUSTAINED streetHash=0 reading is a
+        // strong off-road signal independent of nav-node distance. Hysteresis
+        // (500 ms) prevents false-positives in large parking lots and during
+        // momentary nav-mesh-glitch frames.
+        private long offNamedStreetSinceTicks = 0;
+        private bool offNamedStreetLogged = false;
+        private const long OFF_NAMED_STREET_HYSTERESIS_MS = 500;
+
         // Last-announced location strings for the autodrive informational
         // announcements. Empty until the first announcement; updated only on
         // transition so the system speaks "Entering Vinewood" once, not every tick.
@@ -9526,6 +9539,25 @@ namespace GrandTheftAccessibility
         }
 
         /// <summary>
+        /// Iter-12 Patch Q: returns true if the position is on a named street.
+        /// GET_STREET_NAME_AT_COORD writes a street-name hash and a crossing
+        /// hash; the street-name hash is non-zero only on named roads (paved
+        /// or dirt with a name). Pure off-road (open desert, fields, large
+        /// parking lots, construction zones) all return streetHash=0. This
+        /// complements IS_POINT_ON_ROAD which returns true for any nav-graph
+        /// node including unnamed dirt nodes in Sandy Shores.
+        /// </summary>
+        private bool IsOnNamedStreet(GTA.Math.Vector3 position)
+        {
+            OutputArgument outStreet   = new OutputArgument();
+            OutputArgument outCrossing = new OutputArgument();
+            // GET_STREET_NAME_AT_COORD = 0x2EB41072B4C1E4C0
+            Function.Call((Hash)0x2EB41072B4C1E4C0,
+                position.X, position.Y, position.Z, outStreet, outCrossing);
+            return outStreet.GetResult<uint>() != 0;
+        }
+
+        /// <summary>
         /// Checks if a stationary obstacle is actually in the vehicle's projected travel lane.
         /// Combines road context with lane-width analysis to filter false positives from
         /// parked cars on shoulders. Moving obstacles always pass this check.
@@ -10532,6 +10564,49 @@ namespace GrandTheftAccessibility
 
             bool foundNode = FindNearestSameDirectionRoadNode(playerVeh, out nodePos, out nodeHeading, out currentRoadDistance);
             lastValidRoadDistance = foundNode ? currentRoadDistance : 999f;
+
+            // Iter-12 Patch Q: surface-aware off-road override. The nav-node
+            // distance above can be small even in pure desert because GTA V's
+            // nav graph includes dirt-road nodes in Sandy Shores and other
+            // off-road regions — the dirt node is physically on the sand, not
+            // raised pavement, so its distance never exceeds roadFarThreshold.
+            // driveassist-2026-05-27-182748 ran 10 minutes with extensive
+            // off-road driving and ZERO offroad-timeout teleports as a
+            // result.
+            //
+            // GET_STREET_NAME_AT_COORD returns streetHash=0 anywhere off a
+            // named street (dirt or paved). Sustained streetHash=0 for
+            // >OFF_NAMED_STREET_HYSTERESIS_MS forces currentRoadDistance to a
+            // large value so the existing distance gates (conditions 2 and 3
+            // below) fire correctly. Hysteresis avoids tripping in parking
+            // lots and on momentary nav-mesh frames.
+            bool onNamedStreet = IsOnNamedStreet(playerVeh.Position);
+            if (onNamedStreet)
+            {
+                offNamedStreetSinceTicks = 0;
+                offNamedStreetLogged = false;
+            }
+            else if (offNamedStreetSinceTicks == 0)
+            {
+                offNamedStreetSinceTicks = now;
+            }
+            bool sustainedOffNamedStreet = offNamedStreetSinceTicks > 0
+                && (now - offNamedStreetSinceTicks) / 10000 > OFF_NAMED_STREET_HYSTERESIS_MS;
+            if (sustainedOffNamedStreet)
+            {
+                // Force the downstream distance gates to see us as off-road.
+                // 50 m is well above the largest roadFarThreshold (20 m at
+                // max speed scale) so conditions 2 and 3 will trip cleanly.
+                if (currentRoadDistance < 50f) currentRoadDistance = 50f;
+                lastValidRoadDistance = 50f;
+                if (!offNamedStreetLogged && driveLogger != null && driveLogger.IsRunning)
+                {
+                    driveLogger.Write("[F" + driveLogFrameCount
+                        + "] EVENT off-named-street: sustainedMs="
+                        + ((now - offNamedStreetSinceTicks) / 10000));
+                    offNamedStreetLogged = true;
+                }
+            }
 
             // Scale thresholds based on vehicle speed - faster driving = more tolerance
             // At 15 m/s (~33 mph), add 50% to thresholds; at 30 m/s (~67 mph), add 100%
@@ -16548,6 +16623,12 @@ namespace GrandTheftAccessibility
             // post-teleport rising-distance check isn't fooled by the jump.
             cachedBrakeDistHistoryValid = false;
             cachedBrakeDistIdx = 0;
+            // Iter-12 Patch Q: post-teleport position is on a road by
+            // construction (TeleportToNearestRoad puts us on the nearest
+            // valid node). Clear the off-named-street tracking so we don't
+            // immediately re-trigger the off-road override at the new spot.
+            offNamedStreetSinceTicks = 0;
+            offNamedStreetLogged = false;
             // Path polyline rebuilds on the next BuildPathPolyline call;
             // clearing it here prevents Stanley from steering toward an OLD
             // road node before the rebuild runs.
