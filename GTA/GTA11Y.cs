@@ -3505,17 +3505,23 @@ namespace GrandTheftAccessibility
                         //
                         // Iter-11 Patch P (2026-05-27): bump iter10 -> iter11
                         // and list the iter-11 patch letters (N L J I K H M P).
+                        //
+                        // Iter-12 Patch R (2026-05-27): bump iter11 -> iter12
+                        // and add the iter-12 patch list (Q:street-surface,
+                        // R:iter-banner). Standing convention from Patch O / P:
+                        // every iteration's last commit bumps this string.
                         driveLogger.Write("# GTA11Y drive-assist log");
-                        driveLogger.Write("# Build: iter11 (iter-9: F:enriched G:auto-coll H:reject-why "
+                        driveLogger.Write("# Build: iter12 (iter-9: F:enriched G:auto-coll H:reject-why "
                             + "A:lat-brake B:close-spd C:teleport-hook D:elev-static E:dense-pause; "
                             + "iter-10: A:streak-eject B:severe-skew C:offroad-hyst D:skew-curve-brake "
                             + "E:post-tp-hold F:brake-preserve G:thrash-damp O:iter-banner; "
                             + "iter-11: N:auto-coll-tune L:recovery-timeout J:cache-validity-scale "
                             + "I:drove-past-3frame K:brake-mag-blend H:brake-steer-decouple "
-                            + "M:asymmetric-ramp P:iter-banner)");
+                            + "M:asymmetric-ramp P:iter-banner; "
+                            + "iter-12: Q:street-surface R:iter-banner)");
                         driveLogger.Write("# vehicleaihandling: " + VehicleAIHandlingRegistry.LoadedFrom);
                         driveLogger.Write("# Started: " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
-                        driveLogger.Write("[F" + driveLogFrameCount + "] EVENT iter-version: iter11");
+                        driveLogger.Write("[F" + driveLogFrameCount + "] EVENT iter-version: iter12");
                         Tolk.Speak("Drive assist debug logging started", true);
                     }
                 }
