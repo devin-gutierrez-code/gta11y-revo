@@ -778,6 +778,45 @@ namespace GrandTheftAccessibility
         private const long  STUCK_LAYER2_TICKS  = 100000000; // 10 s of reverse-out before escalating to auto-drive
         private const long  STUCK_LAYER3_TICKS  = 80000000;  // 8 s of auto-drive with no progress before teleport
 
+        // ---- iter-13 Patch S: mode-agnostic "no planar progress" stall arm ----
+        // The Sandy Shores trap (driveassist-2026-05-29-103153 failures #1-12)
+        // oscillates LaneKeeping<->RecoveringToRoad every ~1.5 s. The recovery-
+        // gated stuckSinceTicks zeroes on every LaneKeeping re-entry, so the 2.5 s
+        // detector never fires. This second timer keys off PHYSICAL reality —
+        // off-lane/skewed AND no planar (XY) movement — and only resets on real
+        // motion, so the mode flip can't disarm it.
+        private long noProgressSinceTicks = 0;
+        private GTA.Math.Vector3 noProgressAnchorPos = GTA.Math.Vector3.Zero;
+        private const long  NOPROGRESS_DETECT_TICKS = 30000000; // 3.0 s pinned before arming
+        private const float NOPROGRESS_MOVE_M       = 3.0f;     // planar move that counts as progress
+        private const float NOPROGRESS_SKEW_ANGLE   = 35f;      // only arms while genuinely off-lane
+
+        // ---- iter-13 Patch T: active pivot (turn-in-place) maneuver ----
+        // Stanley can't rotate a stationary car and blind users supply no
+        // throttle, so a car teleported facing ~180 deg off-lane never turns.
+        // The pivot drives a 3-point shuffle (forward+lock, reverse+counter-lock)
+        // through the EXISTING recovery machinery (alignmentEngageReverse +
+        // recovery forward-crawl) to physically rotate the nose toward the lane.
+        private bool  pivotEscapeActive    = false;
+        private bool  pivotPhaseForward    = true;
+        private long  pivotPhaseSinceTicks = 0;
+        private long  pivotStartTicks      = 0;
+        private int   pivotTurnSign        = 0;     // +1 = rotate nose toward +heading-delta
+        private const float PIVOT_SKEW_ANGLE  = 45f;       // engage when skew beyond this
+        private const float PIVOT_DONE_ANGLE  = 20f;       // disengage when aligned within this
+        private const float PIVOT_SPEED_GATE  = 3.0f;      // only pivot at low speed
+        private const long  PIVOT_PHASE_TICKS = 12000000;  // 1.2 s per forward/reverse bite
+        private const long  PIVOT_MAX_TICKS   = 80000000;  // 8 s hard cap, then fall through to autodrive
+
+        // ---- iter-13 Patch V: lane-end speed governor ----
+        private float prevRoadHeadingDeltaAbs   = 0f;      // last |roadHeadingDelta| for skew-rate
+        private long  prevRoadHeadingDeltaTicks = 0;       // when prevRoadHeadingDeltaAbs was sampled
+        private long  laneCollapseAtSpeedTicks  = 0;       // when the polyline last vanished at speed
+        private const float LANE_END_SAFE_SPEED = 6f;      // m/s to slow to before a lane ends
+
+        // ---- iter-13 Patch W: throttle-takeover announcement latch ----
+        private bool  throttleTakeoverAnnounced = false;
+
         // ============================================
         // PATH-AWARE DRIVE ASSIST (path polyline + Stanley controller)
         // ============================================
@@ -3511,17 +3550,19 @@ namespace GrandTheftAccessibility
                         // R:iter-banner). Standing convention from Patch O / P:
                         // every iteration's last commit bumps this string.
                         driveLogger.Write("# GTA11Y drive-assist log");
-                        driveLogger.Write("# Build: iter12 (iter-9: F:enriched G:auto-coll H:reject-why "
+                        driveLogger.Write("# Build: iter13 (iter-9: F:enriched G:auto-coll H:reject-why "
                             + "A:lat-brake B:close-spd C:teleport-hook D:elev-static E:dense-pause; "
                             + "iter-10: A:streak-eject B:severe-skew C:offroad-hyst D:skew-curve-brake "
                             + "E:post-tp-hold F:brake-preserve G:thrash-damp O:iter-banner; "
                             + "iter-11: N:auto-coll-tune L:recovery-timeout J:cache-validity-scale "
                             + "I:drove-past-3frame K:brake-mag-blend H:brake-steer-decouple "
                             + "M:asymmetric-ramp P:iter-banner; "
-                            + "iter-12: Q:street-surface R:iter-banner)");
+                            + "iter-12: Q:street-surface R:iter-banner; "
+                            + "iter-13: S:noprogress-arm S2:relock-fix T:pivot-escape "
+                            + "U:recovery-heading-weight V:lane-end-governor W:takeover-ux X:iter-banner)");
                         driveLogger.Write("# vehicleaihandling: " + VehicleAIHandlingRegistry.LoadedFrom);
                         driveLogger.Write("# Started: " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
-                        driveLogger.Write("[F" + driveLogFrameCount + "] EVENT iter-version: iter12");
+                        driveLogger.Write("[F" + driveLogFrameCount + "] EVENT iter-version: iter13");
                         Tolk.Speak("Drive assist debug logging started", true);
                     }
                 }
@@ -8742,9 +8783,11 @@ namespace GrandTheftAccessibility
                         driveLogger.Write("[F" + driveLogFrameCount + "] EVENT recovery-search:"
                             + " found=" + hasRecoveryTarget
                             + " targetPos=" + FmtV(recoveryTargetPos)
+                            + " vehHeading=" + playerVeh.Heading.ToString("F1")
                             + " targetHeading=" + recoveryTargetHeading.ToString("F1")
                             + " dist=" + recoveryTargetDistance.ToString("F1")
-                            + " headingDelta=" + recoveryHeadingDelta.ToString("F1"));
+                            + " headingDelta=" + recoveryHeadingDelta.ToString("F1")
+                            + " flipAvoided=" + (Math.Abs(recoveryHeadingDelta) <= 120f));
                     RecordDriveDecision("recovery-search: found=" + hasRecoveryTarget
                         + " dist=" + recoveryTargetDistance.ToString("F1"));
                 }
@@ -10411,7 +10454,18 @@ namespace GrandTheftAccessibility
 
                 // Z penalty strongly de-prioritises stacked-deck nodes without
                 // hard-rejecting them (recovery must always find SOMETHING).
-                float score = d + Math.Abs(hd) / 6f + Math.Abs(p.Z - playerPos.Z) * 2f;
+                // iter-13 Patch U: the old /6 heading weight let a 51 m node
+                // pointing ~180 deg the wrong way win on distance alone (the
+                // airport-freeway failure: car aimed NE, lane wanted SE, and
+                // recovery still chased the far/flipped target). Weight heading
+                // at full strength, add a hard de-prioritisation for near-180
+                // flips, and penalise far targets — all soft (never reject) so a
+                // recovery node is always found.
+                float headPenalty = Math.Abs(hd);
+                float flipPenalty = Math.Abs(hd) > 120f ? 200f : 0f;
+                float farPenalty  = d > 30f ? (d - 30f) * 3f : 0f;
+                float score = d + headPenalty + flipPenalty + farPenalty
+                            + Math.Abs(p.Z - playerPos.Z) * 2f;
                 if (score < bestScore)
                 {
                     bestScore = score;
@@ -10775,38 +10829,89 @@ namespace GrandTheftAccessibility
             long now = DateTime.Now.Ticks;
             float speed = playerVeh.Speed;
             bool inRecovery = currentDriveMode != DriveMode.LaneKeeping;
+            float skewMag = Math.Abs(roadHeadingDelta);
 
-            // Already escalating: exit the moment the car is no longer in a
-            // recovery situation or has physically moved clear of the wedge.
+            // iter-13 Patch S: mode-agnostic no-progress arm. Independent of the
+            // LaneKeeping<->Recovery oscillation that defeats the recovery-gated
+            // detector below. Keys off physical reality: off-lane/skewed (or in
+            // recovery) AND below the stall speed AND no real planar movement.
+            // The anchor only resets on >3 m of actual travel, so flipping modes
+            // can't restart the clock.
+            bool offLaneOrSkewed = skewMag > NOPROGRESS_SKEW_ANGLE || inRecovery;
+            bool noProgressArm = false;
+            if (offLaneOrSkewed && speed < STUCK_SPEED_THRESHOLD)
+            {
+                if (noProgressSinceTicks == 0)
+                {
+                    noProgressSinceTicks = now;
+                    noProgressAnchorPos = playerVeh.Position;
+                }
+                else if (PlanarDist(playerVeh.Position, noProgressAnchorPos) > NOPROGRESS_MOVE_M)
+                {
+                    noProgressSinceTicks = now;      // genuine progress — restart the clock
+                    noProgressAnchorPos = playerVeh.Position;
+                }
+                else if (now - noProgressSinceTicks > NOPROGRESS_DETECT_TICKS)
+                {
+                    noProgressArm = true;
+                }
+            }
+            else
+            {
+                noProgressSinceTicks = 0;
+            }
+
+            // Already escalating: exit once the car has physically moved clear of
+            // the wedge OR rotated back into alignment. While a pivot is running
+            // we must NOT exit just because the mode briefly flipped to
+            // LaneKeeping (that flip is the trap itself) — stay engaged until the
+            // skew is actually resolved or the car has moved.
             if (stuckLayer > 0)
             {
-                bool movedClear = World.GetDistance(playerVeh.Position, stuckPosition)
+                bool movedClear = PlanarDist(playerVeh.Position, stuckPosition)
                                     > STUCK_FREED_DISTANCE;
-                if (!inRecovery || movedClear)
+                bool alignedNow = skewMag < PIVOT_DONE_ANGLE;
+                bool stillStuck = inRecovery || noProgressArm || pivotEscapeActive;
+                if (movedClear || alignedNow || !stillStuck)
                 {
+                    if (pivotEscapeActive && driveLogger != null && driveLogger.IsRunning)
+                        driveLogger.Write("[F" + driveLogFrameCount + "] EVENT pivot-done:"
+                            + " reason=" + (movedClear ? "movedClear" : alignedNow ? "aligned" : "modeExit")
+                            + " finalSkew=" + roadHeadingDelta.ToString("F1")
+                            + " elapsedMs=" + ((now - pivotStartTicks) / 10000));
                     Tolk.Speak("Vehicle freed.", true);
+                    pivotEscapeActive = false;
                     ResetStuckRecovery();
                     return;
                 }
             }
             else
             {
-                // Not yet stuck — watch for a stall in a recovery mode.
-                if (inRecovery && speed < STUCK_SPEED_THRESHOLD)
+                // Not yet stuck — watch for a stall in a recovery mode OR the
+                // mode-agnostic no-progress arm (Patch S). noProgressArm fires
+                // on its own 3 s timer, so it can enter Layer 1 directly.
+                if ((inRecovery && speed < STUCK_SPEED_THRESHOLD) || noProgressArm)
                 {
                     if (stuckSinceTicks == 0)
                         stuckSinceTicks = now;
-                    else if (now - stuckSinceTicks > STUCK_DETECT_TICKS)
+                    else if (now - stuckSinceTicks > STUCK_DETECT_TICKS || noProgressArm)
                     {
                         // Enter Layer 1.
                         stuckLayer = 1;
                         stuckPosition = playerVeh.Position;
                         stuckLayerSinceTicks = now;
+                        if (driveLogger != null && driveLogger.IsRunning)
+                            driveLogger.Write("[F" + driveLogFrameCount + "] EVENT stuck-arm:"
+                                + " mode=" + currentDriveMode
+                                + " skew=" + roadHeadingDelta.ToString("F1")
+                                + " speed=" + speed.ToString("F2")
+                                + " arming=" + (noProgressArm ? "noprogress" : "recovery")
+                                + " noProgressMs=" + (noProgressSinceTicks > 0 ? (now - noProgressSinceTicks) / 10000 : 0));
                     }
                 }
                 else
                 {
-                    stuckSinceTicks = 0; // moving fine / not in recovery
+                    stuckSinceTicks = 0; // moving fine / not stalled
                 }
                 if (stuckLayer == 0) return;
             }
@@ -10817,32 +10922,108 @@ namespace GrandTheftAccessibility
                 if (!playerVeh.IsOnAllWheels)
                 {
                     Function.Call(Hash.SET_VEHICLE_ON_GROUND_PROPERLY, playerVeh, 5.0f);
-                    Tolk.Speak("Vehicle stuck. Righting vehicle, backing up.", true);
+                    Tolk.Speak("Vehicle stuck. Righting vehicle.", true);
+                }
+                // iter-13 Patch T: when the car is skewed it needs to ROTATE, not
+                // just back straight out (a straight reverse re-wedges at the same
+                // angle — the Sandy Shores failure). Begin the pivot shuffle.
+                if (skewMag > PIVOT_SKEW_ANGLE && speed < PIVOT_SPEED_GATE)
+                {
+                    pivotEscapeActive = true;
+                    pivotPhaseForward = true;
+                    pivotPhaseSinceTicks = now;
+                    pivotStartTicks = now;
+                    // Rotate the nose toward the target lane direction. Sign
+                    // convention matches GetAlignmentRecoverySteer: a positive
+                    // heading delta wants a positive (right) forward-steer input.
+                    float pivotDelta = hasRecoveryTarget ? recoveryHeadingDelta : roadHeadingDelta;
+                    pivotTurnSign = pivotDelta >= 0f ? 1 : -1;
+                    Tolk.Speak("Drive assist stuck. Turning to align.", true);
+                    if (driveLogger != null && driveLogger.IsRunning)
+                        driveLogger.Write("[F" + driveLogFrameCount + "] EVENT pivot-begin:"
+                            + " turnSign=" + pivotTurnSign
+                            + " headingDelta=" + pivotDelta.ToString("F1"));
                 }
                 else
                 {
                     Tolk.Speak("Drive assist stuck. Backing up.", true);
+                    if (driveLogger != null && driveLogger.IsRunning)
+                        driveLogger.Write("[F" + driveLogFrameCount + "] EVENT stuck-layer:"
+                            + " layer=2 reason=reverse skew=" + roadHeadingDelta.ToString("F1"));
                 }
                 stuckLayer = 2;
                 stuckLayerSinceTicks = now;
             }
 
-            // ---- LAYER 2: reverse out of the obstacle ----
+            // ---- LAYER 2: pivot-in-place (skewed) OR straight reverse-out ----
             if (stuckLayer == 2)
             {
-                // Reuse the alignment reverse machinery — ApplyCachedSteeringInputs
-                // backs the car up while alignmentEngageReverse is set. Steer
-                // straight back; the higher layers handle a failed reverse.
-                alignmentEngageReverse = true;
-                roadSteerCorrection = 0f;
-                isOnValidRoad = true;
-
-                if (now - stuckLayerSinceTicks > STUCK_LAYER2_TICKS)
+                if (pivotEscapeActive)
                 {
-                    // Escalate to Layer 3 — hand control to the auto-drive feature.
-                    EngageStuckAutodrive(playerVeh);
+                    // 3-point shuffle through the existing recovery machinery.
+                    // Forward bite: full lock toward the target (the recovery
+                    // forward-crawl in ApplyCachedSteeringInputs propels it).
+                    // Reverse bite: alignmentEngageReverse backs the car up; the
+                    // OPPOSITE steer sign keeps rotating the nose the same way
+                    // (reversing inverts perceived steering). Alternate phases on
+                    // a timer until aligned or the hard cap.
+                    if (now - pivotPhaseSinceTicks > PIVOT_PHASE_TICKS)
+                    {
+                        pivotPhaseForward = !pivotPhaseForward;
+                        pivotPhaseSinceTicks = now;
+                        if (driveLogger != null && driveLogger.IsRunning)
+                            driveLogger.Write("[F" + driveLogFrameCount + "] EVENT pivot-phase:"
+                                + " phase=" + (pivotPhaseForward ? "forward" : "reverse")
+                                + " skew=" + roadHeadingDelta.ToString("F1")
+                                + " elapsedMs=" + ((now - pivotStartTicks) / 10000));
+                    }
+
+                    // Force a recovery mode so the downstream steer uses recovery
+                    // authority + the forward-crawl runs (both gate on
+                    // currentDriveMode != LaneKeeping). Does not re-stamp
+                    // lastModeChangeTicks (already stamped earlier this pass).
+                    currentDriveMode = DriveMode.AligningHeading;
+                    isOnValidRoad = true;
+                    alignmentEngageReverse = !pivotPhaseForward;
+                    roadSteerCorrection = pivotPhaseForward ? pivotTurnSign : -pivotTurnSign;
+
+                    if (now - pivotStartTicks > PIVOT_MAX_TICKS)
+                    {
+                        // Pivot couldn't align (boxed in on all sides) — hand off
+                        // to the auto-drive wander as the last resort.
+                        pivotEscapeActive = false;
+                        if (driveLogger != null && driveLogger.IsRunning)
+                            driveLogger.Write("[F" + driveLogFrameCount + "] EVENT pivot-done:"
+                                + " reason=timeout finalSkew=" + roadHeadingDelta.ToString("F1")
+                                + " elapsedMs=" + ((now - pivotStartTicks) / 10000));
+                        EngageStuckAutodrive(playerVeh);
+                    }
+                }
+                else
+                {
+                    // Straight reverse-out (low-skew wedge). Reuse the alignment
+                    // reverse machinery; higher layers handle a failed reverse.
+                    alignmentEngageReverse = true;
+                    roadSteerCorrection = 0f;
+                    isOnValidRoad = true;
+
+                    if (now - stuckLayerSinceTicks > STUCK_LAYER2_TICKS)
+                    {
+                        if (driveLogger != null && driveLogger.IsRunning)
+                            driveLogger.Write("[F" + driveLogFrameCount + "] EVENT stuck-layer:"
+                                + " layer=3 reason=reverse-timeout");
+                        EngageStuckAutodrive(playerVeh);
+                    }
                 }
             }
+        }
+
+        /// <summary>Planar (XY-only) distance — Z is ignored so a car climbing or
+        /// dropping a slope while wedged still reads as "no progress".</summary>
+        private static float PlanarDist(GTA.Math.Vector3 a, GTA.Math.Vector3 b)
+        {
+            float dx = a.X - b.X, dy = a.Y - b.Y;
+            return (float)Math.Sqrt(dx * dx + dy * dy);
         }
 
         /// <summary>Layer 3 entry: engage the auto-drive wander task so the game
@@ -10932,6 +11113,8 @@ namespace GrandTheftAccessibility
             stuckLayerSinceTicks = 0;
             stuckAutodriveEngaged = false;
             stuckPosition = GTA.Math.Vector3.Zero;
+            pivotEscapeActive = false;
+            noProgressSinceTicks = 0;
         }
 
         /// <summary>
@@ -11501,6 +11684,36 @@ namespace GrandTheftAccessibility
             if ((brakeIntervening || totalTakeover) && !brakingAReversingCar)
                 Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 71, true); // VEH_ACCELERATE
 
+            // ---- iter-13 Patch W: TAKEOVER UX CUE ----
+            // totalTakeover = the assist is actively driving (reverse U-turn,
+            // pivot reverse bite, handbrake turn, stuck autodrive) and has locked
+            // the throttle. A blind player otherwise feels only a dead pedal with
+            // no explanation (the Fort Zancudo "wouldn't let me control the
+            // throttle" complaint). Announce on the transition only (latched),
+            // with a distinct double-pulse rumble, and announce the hand-back on
+            // release. Routine braking keeps its own "Hard braking!" cue.
+            bool throttleTakenNow = totalTakeover && !brakingAReversingCar;
+            if (throttleTakenNow && !throttleTakeoverAnnounced)
+            {
+                string takeoverKind = stuckAutodriveEngaged ? "autodrive"
+                    : pivotEscapeActive ? "pivot"
+                    : alignmentEngageReverse ? "reverse" : "maneuver";
+                Tolk.Speak("Assist driving. Hands off throttle.", true);
+                TriggerRumble(0.5f, 120, true); // double pulse = distinct from threat rumble
+                throttleTakeoverAnnounced = true;
+                if (driveLogger != null && driveLogger.IsRunning)
+                    driveLogger.Write("[F" + driveLogFrameCount + "] EVENT takeover:"
+                        + " kind=" + takeoverKind + " throttleLocked=true");
+            }
+            else if (!throttleTakenNow && throttleTakeoverAnnounced)
+            {
+                Tolk.Speak("You have throttle.", true);
+                throttleTakeoverAnnounced = false;
+                if (driveLogger != null && driveLogger.IsRunning)
+                    driveLogger.Write("[F" + driveLogFrameCount + "] EVENT takeover-release:"
+                        + " throttleLocked=false");
+            }
+
             // ---- PER-FRAME STEER URGENCY RECOMPUTE ----
             // Re-scale the cached steering correction by live steer-threat urgency.
             // If the threat became less imminent (speed dropped, or threat moved
@@ -11597,7 +11810,14 @@ namespace GrandTheftAccessibility
                 && !hasLiveBrakeThreat
                 && playerVeh.Speed < 4f)
             {
-                Function.Call((Hash)0xE8A25867FBA3B05E, 0, 71, 0.5f);
+                // iter-13 Patch W: let the player add throttle on top of the
+                // crawl (max, not override) so they can speed an escape/pivot
+                // forward bite instead of fighting a fixed 0.5. Throttle is not
+                // locked in this branch (totalTakeover is false here), so the
+                // player's read is live.
+                float playerThrottle = Function.Call<float>(Hash.GET_CONTROL_NORMAL, 0, 71);
+                float crawl = Math.Max(0.5f, playerThrottle);
+                Function.Call((Hash)0xE8A25867FBA3B05E, 0, 71, crawl);
             }
 
             // ---- HANDBRAKE FOR CORRECTIVE TURNS (Full only) ----
@@ -17084,7 +17304,21 @@ namespace GrandTheftAccessibility
                 s.Heading   = veh.Heading;
             }
 
-            s.IsOnValidRoad       = isOnValidRoad;
+            // iter-13 Patch S2: break the self-fulfilling re-lock. The mode
+            // block force-sets isOnValidRoad=true on every LaneKeeping re-entry
+            // (so downstream steering has a guidance source during a blip), and
+            // WasOnValidRoadForLastMs reads THIS field — so a car pinned 53 deg
+            // skewed at 0 speed kept "confirming" it was on-road and re-locking
+            // LaneKeeping every ~1.5 s (Sandy Shores trap). Record what is
+            // physically true into the rolling history: a demonstrably skewed +
+            // stopped car is NOT lane-keeping, so the return-to-LaneKeeping
+            // confirm can no longer be satisfied while it sits there. Narrowly
+            // conjoined (skew + near-stopped) so normal stop-and-go pointed down
+            // the lane (skew ~ 0) still records on-road and returns promptly.
+            bool physicallyOnLane = isOnValidRoad
+                && !(Math.Abs(roadHeadingDelta) > LANEKEEP_SKEW_FAIL_ANGLE
+                     && veh != null && veh.Speed < 1.0f);
+            s.IsOnValidRoad       = physicallyOnLane;
             s.RoadHeadingDelta    = roadHeadingDelta;
             s.LaneLateralError    = lastLaneLateralError;
             s.ClosestPolySegIdx   = lastClosestPolySeg;
@@ -17315,6 +17549,11 @@ namespace GrandTheftAccessibility
             {
                 isOnValidRoad = false;
                 roadHeadingDelta = 0f;
+                // iter-13 Patch V: the lane just ran out. If we were moving fast
+                // when it vanished, stamp it so ComputeCurveBrake governs speed
+                // down instead of letting the car coast off the end at speed.
+                if (veh != null && veh.Speed > LANE_END_SAFE_SPEED)
+                    laneCollapseAtSpeedTicks = DateTime.Now.Ticks;
                 return 0f;
             }
 
@@ -17439,6 +17678,53 @@ namespace GrandTheftAccessibility
                     skewBrakeFloor = 0.2f + Math.Min(0.4f, (skewMag - 15f) / 30f * 0.4f);
                     if (skewBrakeFloor > CURVE_BRAKE_MAX) skewBrakeFloor = CURVE_BRAKE_MAX;
                 }
+            }
+
+            // iter-13 Patch V: LANE-END SPEED GOVERNOR. The absolute-skew floor
+            // above only fires once the car is ALREADY misaligned. These three
+            // terms brake BEFORE the car departs the lane at speed (the Fort
+            // Zancudo failure: held a lane at 21 m/s, the lane ended, the car
+            // shot off and collided). All terms only RAISE the floor (max), so
+            // they can never reduce existing braking.
+            long vNow = DateTime.Now.Ticks;
+            float curSkewAbs = Math.Abs(roadHeadingDelta);
+            // (1) SKEW-RATE: skew climbing fast at speed = the bend is getting
+            //     away from us. React before the absolute angle is large.
+            if (prevRoadHeadingDeltaTicks != 0 && veh.Speed > 8f)
+            {
+                float dtSec = (vNow - prevRoadHeadingDeltaTicks) / 10000000f;
+                if (dtSec > 0.001f)
+                {
+                    float skewRate = (curSkewAbs - prevRoadHeadingDeltaAbs) / dtSec;
+                    if (skewRate > 40f)
+                    {
+                        float rateBrake = Math.Min(CURVE_BRAKE_MAX, 0.3f + skewRate / 200f);
+                        if (rateBrake > skewBrakeFloor) skewBrakeFloor = rateBrake;
+                    }
+                }
+            }
+            prevRoadHeadingDeltaAbs = curSkewAbs;
+            prevRoadHeadingDeltaTicks = vNow;
+            // (2) POLYLINE COLLAPSE: the road just vanished underneath us at
+            //     speed (ComputeStanleySteer stamped laneCollapseAtSpeedTicks).
+            //     Apply a firm-but-comfortable floor for a short window instead
+            //     of coasting off the end.
+            if (laneCollapseAtSpeedTicks != 0
+                && (vNow - laneCollapseAtSpeedTicks) < 5000000   // 500 ms window
+                && veh.Speed > LANE_END_SAFE_SPEED)
+            {
+                if (0.5f > skewBrakeFloor) skewBrakeFloor = 0.5f;
+            }
+            // (3) PATH RUN-OUT: the closest segment is within ~2 of the polyline
+            //     end and we're moving fast — shed speed toward a safe end-of-
+            //     lane crawl before we reach the last point.
+            if (pathPolyline.Count >= 2
+                && lastClosestPolySeg >= pathPolyline.Count - 3
+                && veh.Speed > LANE_END_SAFE_SPEED + 2f)
+            {
+                float over = (veh.Speed - LANE_END_SAFE_SPEED) / 12f;
+                float runoutBrake = Math.Min(CURVE_BRAKE_MAX, 0.3f + over);
+                if (runoutBrake > skewBrakeFloor) skewBrakeFloor = runoutBrake;
             }
 
             if (pathPolyline.Count < 3) { curveBrakeStreak = 0; return skewBrakeFloor; }
