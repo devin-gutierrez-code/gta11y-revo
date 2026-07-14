@@ -122,27 +122,30 @@ Place these .wav files in your scripts folder:
 
 ## Dependencies
 
-- Microsoft Visual Studio 2019 or later
-- [NAudio](https://github.com/naudio/NAudio) - Audio playback and signal generation
-- [Tolk](https://github.com/dkager/tolk) - Screen reader output
-- [Newtonsoft.Json](https://github.com/JamesNK/Newtonsoft.Json) - Settings storage
-- [Script Hook V .NET](https://github.com/crosire/scripthookvdotnet) - .NET scripting framework
+- [.NET SDK](https://dotnet.microsoft.com/download) (any recent version; the project targets .NET Framework 4.8)
+- [NAudio](https://github.com/naudio/NAudio) - Audio playback and signal generation (NuGet)
+- [Tolk](https://github.com/dkager/tolk) - Screen reader output (Tolk.dll must sit next to the game/scripts)
+- [Newtonsoft.Json](https://github.com/JamesNK/Newtonsoft.Json) - Settings storage (NuGet)
+- [Script Hook V .NET](https://github.com/crosire/scripthookvdotnet) v3.6+ - .NET scripting framework
 - [Script Hook V](https://www.dev-c.com/gtav/scripthookv/) - Native function access
-
-## Installation
-
-1. Install Script Hook V and Script Hook V .NET to your GTA V directory
-2. Build the project or obtain GrandTheftAccessibility.dll
-3. Copy GrandTheftAccessibility.dll to your GTA V scripts folder
-4. Copy all required .wav files and hashes.txt to the scripts folder
-5. Launch GTA V
 
 ## Building
 
-1. Open GTA.sln in Visual Studio
-2. Restore NuGet packages
-3. Build in Release/x64 configuration
-4. Output will be in GTA\bin\x64\Release\
+```
+dotnet build GTA\GrandTheftAccessibilityRevo.csproj
+```
+
+- Output lands in `GTA\bin\<Debug|Release>\net48\`.
+- A post-build step auto-copies the built DLLs (GrandTheftAccessibilityRevo.dll, CSCore.dll, NAudio.dll, Newtonsoft.Json.dll) into the GTA V `scripts` folder when it exists. The game folder defaults to `D:\SteamLibrary\...\Grand Theft Auto V\scripts`; override with `-p:Gta5ScriptsDir=<path>` or a `Gta5ScriptsDir` environment variable.
+- `tools\deploy.ps1` performs an explicit deploy (add `-IncludeData` on a first install to also copy the map-data files and vehicleaihandlinginfo.meta).
+
+## Installation
+
+1. Install Script Hook V and Script Hook V .NET (v3.6+) to your GTA V directory
+2. Build the project (above) or obtain GrandTheftAccessibilityRevo.dll
+3. Copy GrandTheftAccessibilityRevo.dll plus CSCore.dll, NAudio.dll, and Newtonsoft.Json.dll to your GTA V scripts folder (the post-build step or `tools\deploy.ps1` does this for you)
+4. Copy the map-data files (`gta11y-map.json`, `gta11y-nodes.json.gz`, `gta11y-junctions.json.gz`), `vehicleaihandlinginfo.meta`, all required .wav files, and hashes.txt to the scripts folder
+5. Launch GTA V
 
 ## Development History
 

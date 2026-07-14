@@ -51,3 +51,19 @@ claude.md
 # Claude Code tooling and temp files
 .claude/
 .tmp_nat.json
+
+# Drive-assist debug logs and generated triage artifacts
+driveassist-*.log
+triage/
+tools/log-index.json
+
+# Map-data build inputs and archives (large / regenerable via CodeWalker)
+navmesh_exports/
+*.7z
+
+# Python
+__pycache__/
+*.pyc
+
+# Runtime settings copies (real file lives in Documents\Rockstar Games\GTA V\ModSettings)
+gta11ySettings.json
