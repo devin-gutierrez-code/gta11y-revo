@@ -1,0 +1,4904 @@
+{
+ "version": 4,
+ "generated": {
+  "by": "build-menulabels.py",
+  "sources": {
+   "pausemenu.xml": {
+    "sha256": "d1013a6de592",
+    "mtime": "2026-07-18T16:20:44Z",
+    "bytes": 243789
+   },
+   "commands_hud.lua": {
+    "sha256": "811c1c749785",
+    "mtime": "2026-07-18T16:20:44Z",
+    "bytes": 53343
+   },
+   "eMenuPref.hpp": {
+    "sha256": "22b3de33eec7",
+    "mtime": "2026-07-20T04:46:06Z",
+    "bytes": 4480
+   }
+  }
+ },
+ "tabCount": 10,
+ "tabs": [
+  {
+   "index": 0,
+   "gxt": "PM_SCR_MAP",
+   "label": "Map",
+   "leakMenuId": null
+  },
+  {
+   "index": 1,
+   "gxt": "PM_SCR_BRF",
+   "label": "Brief",
+   "leakMenuId": 15
+  },
+  {
+   "index": 2,
+   "gxt": "PM_SCR_STA",
+   "label": "Stats",
+   "leakMenuId": null
+  },
+  {
+   "index": 3,
+   "gxt": "PM_SCR_SET",
+   "label": "Settings",
+   "leakMenuId": 24
+  },
+  {
+   "index": 4,
+   "gxt": "PM_SCR_GAM",
+   "label": "Game",
+   "leakMenuId": 75
+  },
+  {
+   "index": 5,
+   "gxt": "PM_SCR_ONL",
+   "label": "Online",
+   "leakMenuId": null
+  },
+  {
+   "index": 6,
+   "gxt": "PM_SCR_FRI",
+   "label": "Friends",
+   "leakMenuId": null
+  },
+  {
+   "index": 7,
+   "gxt": "PM_SCR_GAL",
+   "label": "Gallery",
+   "leakMenuId": null
+  },
+  {
+   "index": 8,
+   "gxt": "PM_SCR_STO",
+   "label": "Store",
+   "leakMenuId": null
+  },
+  {
+   "index": 9,
+   "gxt": "PM_SCR_RPL",
+   "label": "Rockstar Editor",
+   "leakMenuId": null
+  }
+ ],
+ "menus": [
+  {
+   "menuId": -1,
+   "uniqueName": "MENU_UNIQUE_ID_INVALID",
+   "kind": "internal",
+   "gxt": null,
+   "label": null
+  },
+  {
+   "menuId": 0,
+   "uniqueName": "MENU_UNIQUE_ID_MAP",
+   "kind": "screen",
+   "gxt": "PM_SCR_MAP",
+   "label": "Map"
+  },
+  {
+   "menuId": 1,
+   "uniqueName": "MENU_UNIQUE_ID_INFO",
+   "kind": "screen",
+   "gxt": "PM_SCR_BRF",
+   "label": "Info"
+  },
+  {
+   "menuId": 2,
+   "uniqueName": "MENU_UNIQUE_ID_FRIENDS",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Friends"
+  },
+  {
+   "menuId": 3,
+   "uniqueName": "MENU_UNIQUE_ID_GALLERY",
+   "kind": "screen",
+   "gxt": "PM_SCR_GAL",
+   "label": "Gallery"
+  },
+  {
+   "menuId": 4,
+   "uniqueName": "MENU_UNIQUE_ID_SOCIALCLUB",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Socialclub"
+  },
+  {
+   "menuId": 5,
+   "uniqueName": "MENU_UNIQUE_ID_GAME",
+   "kind": "screen",
+   "gxt": "PM_SCR_GAM",
+   "label": "Game"
+  },
+  {
+   "menuId": 6,
+   "uniqueName": "MENU_UNIQUE_ID_SETTINGS",
+   "kind": "screen",
+   "gxt": "PM_SCR_SET",
+   "label": "Settings"
+  },
+  {
+   "menuId": 7,
+   "uniqueName": "MENU_UNIQUE_ID_PLAYERS",
+   "kind": "screen",
+   "gxt": "PM_SCR_PLA",
+   "label": "Players"
+  },
+  {
+   "menuId": 8,
+   "uniqueName": "MENU_UNIQUE_ID_WEAPONS",
+   "kind": "screen",
+   "gxt": "PM_SCR_WEA",
+   "label": "Weapons"
+  },
+  {
+   "menuId": 9,
+   "uniqueName": "MENU_UNIQUE_ID_MEDALS",
+   "kind": "screen",
+   "gxt": "PM_SCR_AWA",
+   "label": "Medals"
+  },
+  {
+   "menuId": 10,
+   "uniqueName": "MENU_UNIQUE_ID_STATS",
+   "kind": "screen",
+   "gxt": "PM_SCR_STA",
+   "label": "Stats"
+  },
+  {
+   "menuId": 11,
+   "uniqueName": "MENU_UNIQUE_ID_AVAILABLE",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Available"
+  },
+  {
+   "menuId": 12,
+   "uniqueName": "MENU_UNIQUE_ID_VAGOS",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Vagos"
+  },
+  {
+   "menuId": 13,
+   "uniqueName": "MENU_UNIQUE_ID_COPS",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Cops"
+  },
+  {
+   "menuId": 14,
+   "uniqueName": "MENU_UNIQUE_ID_LOST",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Lost"
+  },
+  {
+   "menuId": 15,
+   "uniqueName": "MENU_UNIQUE_ID_HOME_MISSION",
+   "kind": "screen",
+   "gxt": "PM_PANE_MIS",
+   "label": "Home Mission"
+  },
+  {
+   "menuId": 16,
+   "uniqueName": "MENU_UNIQUE_ID_CORONA_SETTINGS",
+   "kind": "screen",
+   "gxt": "PM_SCR_SET",
+   "label": "Corona Settings"
+  },
+  {
+   "menuId": 17,
+   "uniqueName": "MENU_UNIQUE_ID_CORONA_INVITE",
+   "kind": "screen",
+   "gxt": "PM_SCR_INV",
+   "label": "Corona Invite"
+  },
+  {
+   "menuId": 18,
+   "uniqueName": "MENU_UNIQUE_ID_STORE",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Store"
+  },
+  {
+   "menuId": 19,
+   "uniqueName": "MENU_UNIQUE_ID_HOME_HELP",
+   "kind": "screen",
+   "gxt": "PM_PANE_HLP",
+   "label": "Home Help"
+  },
+  {
+   "menuId": 20,
+   "uniqueName": "MENU_UNIQUE_ID_HOME_BRIEF",
+   "kind": "screen",
+   "gxt": "PM_PANE_BRI",
+   "label": "Home Brief"
+  },
+  {
+   "menuId": 21,
+   "uniqueName": "MENU_UNIQUE_ID_HOME_FEED",
+   "kind": "screen",
+   "gxt": "PM_PANE_FEE",
+   "label": "Home Feed"
+  },
+  {
+   "menuId": 22,
+   "uniqueName": "MENU_UNIQUE_ID_SETTINGS_AUDIO",
+   "kind": "screen",
+   "gxt": "PM_PANE_AUD",
+   "label": "Settings Audio"
+  },
+  {
+   "menuId": 23,
+   "uniqueName": "MENU_UNIQUE_ID_SETTINGS_DISPLAY",
+   "kind": "screen",
+   "gxt": "PM_PANE_DIS",
+   "label": "Settings Display"
+  },
+  {
+   "menuId": 24,
+   "uniqueName": "MENU_UNIQUE_ID_SETTINGS_CONTROLS",
+   "kind": "screen",
+   "gxt": "PM_PANE_CON",
+   "label": "Settings Controls"
+  },
+  {
+   "menuId": 25,
+   "uniqueName": "MENU_UNIQUE_ID_NEW_GAME",
+   "kind": "screen",
+   "gxt": "PM_PANE_NEW",
+   "label": "New Game"
+  },
+  {
+   "menuId": 26,
+   "uniqueName": "MENU_UNIQUE_ID_LOAD_GAME",
+   "kind": "screen",
+   "gxt": "PM_PANE_LOA",
+   "label": "Load Game"
+  },
+  {
+   "menuId": 27,
+   "uniqueName": "MENU_UNIQUE_ID_SAVE_GAME",
+   "kind": "screen",
+   "gxt": "PM_SCR_SAV",
+   "label": "Save Game"
+  },
+  {
+   "menuId": 28,
+   "uniqueName": "MENU_UNIQUE_ID_HEADER",
+   "kind": "internal",
+   "gxt": null,
+   "label": "Header"
+  },
+  {
+   "menuId": 29,
+   "uniqueName": "MENU_UNIQUE_ID_HEADER_SAVE_GAME",
+   "kind": "internal",
+   "gxt": null,
+   "label": "Header Save Game"
+  },
+  {
+   "menuId": 30,
+   "uniqueName": "MENU_UNIQUE_ID_HOME",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Home"
+  },
+  {
+   "menuId": 31,
+   "uniqueName": "MENU_UNIQUE_ID_CREWS",
+   "kind": "screen",
+   "gxt": "PM_SCR_CRW",
+   "label": "Crews"
+  },
+  {
+   "menuId": 32,
+   "uniqueName": "MENU_UNIQUE_ID_SETTINGS_SAVEGAME",
+   "kind": "screen",
+   "gxt": "PM_PANE_SAV",
+   "label": "Settings Savegame"
+  },
+  {
+   "menuId": 33,
+   "uniqueName": "MENU_UNIQUE_ID_GALLERY_ITEM",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Gallery Item"
+  },
+  {
+   "menuId": 34,
+   "uniqueName": "MENU_UNIQUE_ID_FREEMODE",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Freemode"
+  },
+  {
+   "menuId": 35,
+   "uniqueName": "MENU_UNIQUE_ID_MP_CHAR_1",
+   "kind": "screen",
+   "gxt": "PM_SCR_NCH",
+   "label": "Mp Char 1"
+  },
+  {
+   "menuId": 36,
+   "uniqueName": "MENU_UNIQUE_ID_MP_CHAR_2",
+   "kind": "screen",
+   "gxt": "PM_SCR_NCH",
+   "label": "Mp Char 2"
+  },
+  {
+   "menuId": 37,
+   "uniqueName": "MENU_UNIQUE_ID_MP_CHAR_3",
+   "kind": "screen",
+   "gxt": "PM_SCR_NCH",
+   "label": "Mp Char 3"
+  },
+  {
+   "menuId": 38,
+   "uniqueName": "MENU_UNIQUE_ID_MP_CHAR_4",
+   "kind": "screen",
+   "gxt": "PM_SCR_NCH",
+   "label": "Mp Char 4"
+  },
+  {
+   "menuId": 39,
+   "uniqueName": "MENU_UNIQUE_ID_MP_CHAR_5",
+   "kind": "screen",
+   "gxt": "PM_SCR_NCH",
+   "label": "Mp Char 5"
+  },
+  {
+   "menuId": 40,
+   "uniqueName": "MENU_UNIQUE_ID_HEADER_MULTIPLAYER",
+   "kind": "internal",
+   "gxt": null,
+   "label": "Header Multiplayer"
+  },
+  {
+   "menuId": 41,
+   "uniqueName": "MENU_UNIQUE_ID_HEADER_MY_MP",
+   "kind": "internal",
+   "gxt": null,
+   "label": "Header My Mp"
+  },
+  {
+   "menuId": 42,
+   "uniqueName": "MENU_UNIQUE_ID_MISSION_CREATOR",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Mission Creator"
+  },
+  {
+   "menuId": 43,
+   "uniqueName": "MENU_UNIQUE_ID_GAME_MP",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Game Mp"
+  },
+  {
+   "menuId": 44,
+   "uniqueName": "MENU_UNIQUE_ID_LEAVE_GAME",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Leave Game"
+  },
+  {
+   "menuId": 45,
+   "uniqueName": "MENU_UNIQUE_ID_HEADER_PRE_LOBBY",
+   "kind": "internal",
+   "gxt": null,
+   "label": "Header Pre Lobby"
+  },
+  {
+   "menuId": 46,
+   "uniqueName": "MENU_UNIQUE_ID_HEADER_LOBBY",
+   "kind": "internal",
+   "gxt": null,
+   "label": "Header Lobby"
+  },
+  {
+   "menuId": 47,
+   "uniqueName": "MENU_UNIQUE_ID_PARTY",
+   "kind": "screen",
+   "gxt": "PM_SCR_PAR",
+   "label": "Party"
+  },
+  {
+   "menuId": 48,
+   "uniqueName": "MENU_UNIQUE_ID_LOBBY",
+   "kind": "screen",
+   "gxt": "PM_SCR_LOB",
+   "label": "Lobby"
+  },
+  {
+   "menuId": 49,
+   "uniqueName": "MENU_UNIQUE_ID_PLACEHOLDER",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Placeholder"
+  },
+  {
+   "menuId": 50,
+   "uniqueName": "MENU_UNIQUE_ID_STATS_CATEGORY",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Stats Category"
+  },
+  {
+   "menuId": 51,
+   "uniqueName": "MENU_UNIQUE_ID_SETTINGS_LIST",
+   "kind": "screen",
+   "gxt": null,
+   "label": null
+  },
+  {
+   "menuId": 52,
+   "uniqueName": "MENU_UNIQUE_ID_SAVE_GAME_LIST",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Save Game List"
+  },
+  {
+   "menuId": 53,
+   "uniqueName": "MENU_UNIQUE_ID_MAP_LEGEND",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Map Legend"
+  },
+  {
+   "menuId": 54,
+   "uniqueName": "MENU_UNIQUE_ID_CREWS_CATEGORY",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Crews Category"
+  },
+  {
+   "menuId": 55,
+   "uniqueName": "MENU_UNIQUE_ID_CREWS_FILTER",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Crews Filter"
+  },
+  {
+   "menuId": 56,
+   "uniqueName": "MENU_UNIQUE_ID_CREWS_CARD",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Crews Card"
+  },
+  {
+   "menuId": 57,
+   "uniqueName": "MENU_UNIQUE_ID_SPECTATOR",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Spectator"
+  },
+  {
+   "menuId": 58,
+   "uniqueName": "MENU_UNIQUE_ID_STATS_LISTITEM",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Stats Listitem"
+  },
+  {
+   "menuId": 59,
+   "uniqueName": "MENU_UNIQUE_ID_CREW_MINE",
+   "kind": "screen",
+   "gxt": "CRW_MINE",
+   "label": "Crew Mine"
+  },
+  {
+   "menuId": 60,
+   "uniqueName": "MENU_UNIQUE_ID_CREW_ROCKSTAR",
+   "kind": "screen",
+   "gxt": "CRW_ROCKSTAR",
+   "label": "Crew Rockstar"
+  },
+  {
+   "menuId": 61,
+   "uniqueName": "MENU_UNIQUE_ID_CREW_FRIENDS",
+   "kind": "screen",
+   "gxt": "CRW_FRIENDS",
+   "label": "Crew Friends"
+  },
+  {
+   "menuId": 62,
+   "uniqueName": "MENU_UNIQUE_ID_CREW_INVITES",
+   "kind": "screen",
+   "gxt": "CRW_INVITES",
+   "label": "Crew Invites"
+  },
+  {
+   "menuId": 63,
+   "uniqueName": "MENU_UNIQUE_ID_CREW_LIST",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Crew List"
+  },
+  {
+   "menuId": 64,
+   "uniqueName": "MENU_UNIQUE_ID_MISSION_CREATOR_CATEGORY",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Mission Creator Category"
+  },
+  {
+   "menuId": 65,
+   "uniqueName": "MENU_UNIQUE_ID_MISSION_CREATOR_LISTITEM",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Mission Creator Listitem"
+  },
+  {
+   "menuId": 66,
+   "uniqueName": "MENU_UNIQUE_ID_MISSION_CREATOR_STAT",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Mission Creator Stat"
+  },
+  {
+   "menuId": 67,
+   "uniqueName": "MENU_UNIQUE_ID_FRIENDS_LIST",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Friends List"
+  },
+  {
+   "menuId": 68,
+   "uniqueName": "MENU_UNIQUE_ID_FRIENDS_OPTIONS",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Friends Options"
+  },
+  {
+   "menuId": 69,
+   "uniqueName": "MENU_UNIQUE_ID_HEADER_MP_CHARACTER_SELECT",
+   "kind": "internal",
+   "gxt": null,
+   "label": "Header Mp Character Select"
+  },
+  {
+   "menuId": 70,
+   "uniqueName": "MENU_UNIQUE_ID_HEADER_MP_CHARACTER_CREATION",
+   "kind": "internal",
+   "gxt": null,
+   "label": "Header Mp Character Creation"
+  },
+  {
+   "menuId": 71,
+   "uniqueName": "MENU_UNIQUE_ID_CREATION_HERITAGE",
+   "kind": "screen",
+   "gxt": "CC_PM_OPT",
+   "label": "Creation Heritage"
+  },
+  {
+   "menuId": 72,
+   "uniqueName": "MENU_UNIQUE_ID_CREATION_LIFESTYLE",
+   "kind": "screen",
+   "gxt": "CC_PM_DET",
+   "label": "Creation Lifestyle"
+  },
+  {
+   "menuId": 73,
+   "uniqueName": "MENU_UNIQUE_ID_CREATION_YOU",
+   "kind": "screen",
+   "gxt": "PM_SCR_CCY",
+   "label": "Creation You"
+  },
+  {
+   "menuId": 74,
+   "uniqueName": "MENU_UNIQUE_ID_PARTY_LIST",
+   "kind": "screen",
+   "gxt": "PM_SCR_UNL",
+   "label": "Party List"
+  },
+  {
+   "menuId": 75,
+   "uniqueName": "MENU_UNIQUE_ID_REPLAY_MISSION",
+   "kind": "screen",
+   "gxt": "PM_REPEAT",
+   "label": "Replay Mission"
+  },
+  {
+   "menuId": 76,
+   "uniqueName": "MENU_UNIQUE_ID_REPLAY_MISSION_LIST",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Replay Mission List"
+  },
+  {
+   "menuId": 77,
+   "uniqueName": "MENU_UNIQUE_ID_REPLAY_MISSION_ACTIVITY",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Replay Mission Activity"
+  },
+  {
+   "menuId": 78,
+   "uniqueName": "MENU_UNIQUE_ID_CREW",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Crew"
+  },
+  {
+   "menuId": 79,
+   "uniqueName": "MENU_UNIQUE_ID_CREATION_HERITAGE_LIST",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Creation Heritage List"
+  },
+  {
+   "menuId": 80,
+   "uniqueName": "MENU_UNIQUE_ID_CREATION_LIFESTYLE_LIST",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Creation Lifestyle List"
+  },
+  {
+   "menuId": 81,
+   "uniqueName": "MENU_UNIQUE_ID_PLAYERS_LIST",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Players List"
+  },
+  {
+   "menuId": 82,
+   "uniqueName": "MENU_UNIQUE_ID_PLAYERS_OPTIONS",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Players Options"
+  },
+  {
+   "menuId": 83,
+   "uniqueName": "MENU_UNIQUE_ID_PLAYERS_OPTIONS_LIST",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Players Options List"
+  },
+  {
+   "menuId": 84,
+   "uniqueName": "MENU_UNIQUE_ID_PARTY_OPTIONS",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Party Options"
+  },
+  {
+   "menuId": 85,
+   "uniqueName": "MENU_UNIQUE_ID_PARTY_OPTIONS_LIST",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Party Options List"
+  },
+  {
+   "menuId": 86,
+   "uniqueName": "MENU_UNIQUE_ID_CREW_OPTIONS",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Crew Options"
+  },
+  {
+   "menuId": 87,
+   "uniqueName": "MENU_UNIQUE_ID_CREW_OPTIONS_LIST",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Crew Options List"
+  },
+  {
+   "menuId": 88,
+   "uniqueName": "MENU_UNIQUE_ID_FRIENDS_OPTIONS_LIST",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Friends Options List"
+  },
+  {
+   "menuId": 89,
+   "uniqueName": "MENU_UNIQUE_ID_FRIENDS_MP",
+   "kind": "screen",
+   "gxt": "PM_SCR_FRI",
+   "label": "Friends Mp"
+  },
+  {
+   "menuId": 90,
+   "uniqueName": "MENU_UNIQUE_ID_TEAM_SELECT",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Team Select"
+  },
+  {
+   "menuId": 91,
+   "uniqueName": "MENU_UNIQUE_ID_HOME_DIALOG",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Home Dialog"
+  },
+  {
+   "menuId": 92,
+   "uniqueName": "MENU_UNIQUE_ID_HEADER_EMPTY",
+   "kind": "internal",
+   "gxt": null,
+   "label": "Header Empty"
+  },
+  {
+   "menuId": 93,
+   "uniqueName": "MENU_UNIQUE_ID_SETTINGS_FEED",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Settings Feed"
+  },
+  {
+   "menuId": 94,
+   "uniqueName": "MENU_UNIQUE_ID_GALLERY_OPTIONS",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Gallery Options"
+  },
+  {
+   "menuId": 95,
+   "uniqueName": "MENU_UNIQUE_ID_GALLERY_OPTIONS_LIST",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Gallery Options List"
+  },
+  {
+   "menuId": 96,
+   "uniqueName": "MENU_UNIQUE_ID_BRIGHTNESS_CALIBRATION",
+   "kind": "screen",
+   "gxt": "MO_BRI",
+   "label": "Brightness Calibration"
+  },
+  {
+   "menuId": 97,
+   "uniqueName": "MENU_UNIQUE_ID_HEADER_TEXT_SELECTION",
+   "kind": "internal",
+   "gxt": null,
+   "label": "Header Text Selection"
+  },
+  {
+   "menuId": 98,
+   "uniqueName": "MENU_UNIQUE_ID_LOBBY_LIST",
+   "kind": "screen",
+   "gxt": "PM_SCR_LLI",
+   "label": "Lobby List"
+  },
+  {
+   "menuId": 99,
+   "uniqueName": "MENU_UNIQUE_ID_LOBBY_LIST_ITEM",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Lobby List Item"
+  },
+  {
+   "menuId": 100,
+   "uniqueName": "MENU_UNIQUE_ID_HEADER_CORONA",
+   "kind": "internal",
+   "gxt": null,
+   "label": "Header Corona"
+  },
+  {
+   "menuId": 101,
+   "uniqueName": "MENU_UNIQUE_ID_HEADER_CORONA_LOBBY",
+   "kind": "internal",
+   "gxt": null,
+   "label": "Header Corona Lobby"
+  },
+  {
+   "menuId": 102,
+   "uniqueName": "MENU_UNIQUE_ID_HEADER_CORONA_JOINED_PLAYERS",
+   "kind": "internal",
+   "gxt": null,
+   "label": "Header Corona Joined Players"
+  },
+  {
+   "menuId": 103,
+   "uniqueName": "MENU_UNIQUE_ID_HEADER_CORONA_INVITE_PLAYERS",
+   "kind": "internal",
+   "gxt": null,
+   "label": "Header Corona Invite Players"
+  },
+  {
+   "menuId": 104,
+   "uniqueName": "MENU_UNIQUE_ID_HEADER_CORONA_INVITE_FRIENDS",
+   "kind": "internal",
+   "gxt": null,
+   "label": "Header Corona Invite Friends"
+  },
+  {
+   "menuId": 105,
+   "uniqueName": "MENU_UNIQUE_ID_HEADER_CORONA_INVITE_CREWS",
+   "kind": "internal",
+   "gxt": null,
+   "label": "Header Corona Invite Crews"
+  },
+  {
+   "menuId": 106,
+   "uniqueName": "MENU_UNIQUE_ID_CORONA_JOINED_PLAYERS",
+   "kind": "screen",
+   "gxt": "PM_SCR_JOP",
+   "label": "Corona Joined Players"
+  },
+  {
+   "menuId": 107,
+   "uniqueName": "MENU_UNIQUE_ID_CORONA_INVITE_PLAYERS",
+   "kind": "screen",
+   "gxt": "PM_SCR_IVP",
+   "label": "Corona Invite Players"
+  },
+  {
+   "menuId": 108,
+   "uniqueName": "MENU_UNIQUE_ID_CORONA_INVITE_FRIENDS",
+   "kind": "screen",
+   "gxt": "PM_SCR_IFR",
+   "label": "Corona Invite Friends"
+  },
+  {
+   "menuId": 109,
+   "uniqueName": "MENU_UNIQUE_ID_CORONA_INVITE_CREWS",
+   "kind": "screen",
+   "gxt": "PM_SCR_ICM",
+   "label": "Corona Invite Crews"
+  },
+  {
+   "menuId": 110,
+   "uniqueName": "MENU_UNIQUE_ID_SETTINGS_FACEBOOK",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Settings Facebook"
+  },
+  {
+   "menuId": 111,
+   "uniqueName": "MENU_UNIQUE_ID_HEADER_JOINING_SCREEN",
+   "kind": "internal",
+   "gxt": null,
+   "label": "Header Joining Screen"
+  },
+  {
+   "menuId": 112,
+   "uniqueName": "MENU_UNIQUE_ID_CORONA_SETTINGS_LIST",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Corona Settings List"
+  },
+  {
+   "menuId": 113,
+   "uniqueName": "MENU_UNIQUE_ID_CORONA_DETAILS_LIST",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Corona Details List"
+  },
+  {
+   "menuId": 114,
+   "uniqueName": "MENU_UNIQUE_ID_CORONA_INVITE_LIST",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Corona Invite List"
+  },
+  {
+   "menuId": 115,
+   "uniqueName": "MENU_UNIQUE_ID_CORONA_JOINED_LIST",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Corona Joined List"
+  },
+  {
+   "menuId": 116,
+   "uniqueName": "MENU_UNIQUE_ID_HEADER_CORONA_INVITE_MATCHED_PLAYERS",
+   "kind": "internal",
+   "gxt": null,
+   "label": "Header Corona Invite Matched Players"
+  },
+  {
+   "menuId": 117,
+   "uniqueName": "MENU_UNIQUE_ID_HEADER_CORONA_INVITE_LAST_JOB_PLAYERS",
+   "kind": "internal",
+   "gxt": null,
+   "label": "Header Corona Invite Last Job Players"
+  },
+  {
+   "menuId": 118,
+   "uniqueName": "MENU_UNIQUE_ID_CORONA_INVITE_MATCHED_PLAYERS",
+   "kind": "screen",
+   "gxt": "PM_SCR_IMP",
+   "label": "Corona Invite Matched Players"
+  },
+  {
+   "menuId": 119,
+   "uniqueName": "MENU_UNIQUE_ID_CORONA_INVITE_LAST_JOB_PLAYERS",
+   "kind": "screen",
+   "gxt": "PM_SCR_ILJ",
+   "label": "Corona Invite Last Job Players"
+  },
+  {
+   "menuId": 120,
+   "uniqueName": "MENU_UNIQUE_ID_CREW_LEADERBOARDS",
+   "kind": "screen",
+   "gxt": "CRW_LEADERBOARDS",
+   "label": "Crew Leaderboards"
+  },
+  {
+   "menuId": 121,
+   "uniqueName": "MENU_UNIQUE_ID_HOME_OPEN_JOBS",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Home Open Jobs"
+  },
+  {
+   "menuId": 122,
+   "uniqueName": "MENU_UNIQUE_ID_CREW_REQUEST",
+   "kind": "screen",
+   "gxt": "CRW_REQUESTS",
+   "label": "Crew Request"
+  },
+  {
+   "menuId": 123,
+   "uniqueName": "MENU_UNIQUE_ID_HEADER_RACE",
+   "kind": "internal",
+   "gxt": null,
+   "label": "Header Race"
+  },
+  {
+   "menuId": 124,
+   "uniqueName": "MENU_UNIQUE_ID_RACE_INFO",
+   "kind": "screen",
+   "gxt": "PM_SCR_VHI",
+   "label": "Race Info"
+  },
+  {
+   "menuId": 125,
+   "uniqueName": "MENU_UNIQUE_ID_RACE_INFOLIST",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Race Infolist"
+  },
+  {
+   "menuId": 126,
+   "uniqueName": "MENU_UNIQUE_ID_RACE_LOBBYLIST",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Race Lobbylist"
+  },
+  {
+   "menuId": 127,
+   "uniqueName": "MENU_UNIQUE_ID_HEADER_BETTING",
+   "kind": "internal",
+   "gxt": null,
+   "label": "Header Betting"
+  },
+  {
+   "menuId": 128,
+   "uniqueName": "MENU_UNIQUE_ID_BETTING",
+   "kind": "screen",
+   "gxt": "PM_SCR_BET",
+   "label": "Betting"
+  },
+  {
+   "menuId": 129,
+   "uniqueName": "MENU_UNIQUE_ID_BETTING_INFOLIST",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Betting Infolist"
+  },
+  {
+   "menuId": 130,
+   "uniqueName": "MENU_UNIQUE_ID_BETTING_LOBBYLIST",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Betting Lobbylist"
+  },
+  {
+   "menuId": 131,
+   "uniqueName": "MENU_UNIQUE_ID_INCEPT_TRIGGER",
+   "kind": "internal",
+   "gxt": null,
+   "label": null
+  },
+  {
+   "menuId": 132,
+   "uniqueName": "MENU_UNIQUE_ID_SETTINGS_SIXAXIS",
+   "kind": "screen",
+   "gxt": "MO_SIXAXIS",
+   "label": "Settings Sixaxis"
+  },
+  {
+   "menuId": 133,
+   "uniqueName": "MENU_UNIQUE_ID_REPLAY_RANDOM",
+   "kind": "screen",
+   "gxt": "PM_REPEATRC",
+   "label": "Replay Random"
+  },
+  {
+   "menuId": 134,
+   "uniqueName": "MENU_UNIQUE_ID_CUTSCENE_EMPTY",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Cutscene Empty"
+  },
+  {
+   "menuId": 135,
+   "uniqueName": "MENU_UNIQUE_ID_HOME_NEWSWIRE",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Home Newswire"
+  },
+  {
+   "menuId": 136,
+   "uniqueName": "MENU_UNIQUE_ID_SETTINGS_CAMERA",
+   "kind": "screen",
+   "gxt": "PM_PANE_CAM",
+   "label": "Settings Camera"
+  },
+  {
+   "menuId": 137,
+   "uniqueName": "MENU_UNIQUE_ID_SETTINGS_GRAPHICS",
+   "kind": "screen",
+   "gxt": "PM_PANE_GFX",
+   "label": "Settings Graphics"
+  },
+  {
+   "menuId": 138,
+   "uniqueName": "MENU_UNIQUE_ID_SETTINGS_ADVANCED_GFX",
+   "kind": "screen",
+   "gxt": "PM_PANE_AGFX",
+   "label": "Settings Advanced Gfx"
+  },
+  {
+   "menuId": 139,
+   "uniqueName": "MENU_UNIQUE_ID_SETTINGS_VOICE_CHAT",
+   "kind": "screen",
+   "gxt": "MO_VOUT",
+   "label": "Settings Voice Chat"
+  },
+  {
+   "menuId": 140,
+   "uniqueName": "MENU_UNIQUE_ID_SETTINGS_MISC_CONTROLS",
+   "kind": "screen",
+   "gxt": "PM_PANE_MCON",
+   "label": "Settings Misc Controls"
+  },
+  {
+   "menuId": 141,
+   "uniqueName": "MENU_UNIQUE_ID_HELP",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Help"
+  },
+  {
+   "menuId": 142,
+   "uniqueName": "MENU_UNIQUE_ID_MOVIE_EDITOR",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Movie Editor"
+  },
+  {
+   "menuId": 143,
+   "uniqueName": "MENU_UNIQUE_ID_EXIT_TO_WINDOWS",
+   "kind": "screen",
+   "gxt": "PM_PANE_QUIT",
+   "label": "Exit To Windows"
+  },
+  {
+   "menuId": 144,
+   "uniqueName": "MENU_UNIQUE_ID_HEADER_LANDING_PAGE",
+   "kind": "internal",
+   "gxt": null,
+   "label": "Header Landing Page"
+  },
+  {
+   "menuId": 145,
+   "uniqueName": "MENU_UNIQUE_ID_SHOW_ACCOUNT_PICKER",
+   "kind": "screen",
+   "gxt": "PM_PANE_LEAVE",
+   "label": "Show Account Picker"
+  },
+  {
+   "menuId": 146,
+   "uniqueName": "MENU_UNIQUE_ID_SETTINGS_REPLAY",
+   "kind": "screen",
+   "gxt": "PM_PANE_RPY",
+   "label": "Settings Replay"
+  },
+  {
+   "menuId": 147,
+   "uniqueName": "MENU_UNIQUE_ID_REPLAY_EDITOR",
+   "kind": "screen",
+   "gxt": "PM_SCR_RPL",
+   "label": "Replay Editor"
+  },
+  {
+   "menuId": 148,
+   "uniqueName": "MENU_UNIQUE_ID_KEYMAP",
+   "kind": "screen",
+   "gxt": "PM_PANE_KEYS",
+   "label": "Keymap"
+  },
+  {
+   "menuId": 149,
+   "uniqueName": "MENU_UNIQUE_ID_KEYMAP_LIST",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Keymap List"
+  },
+  {
+   "menuId": 150,
+   "uniqueName": "MENU_UNIQUE_ID_KEYMAP_LISTITEM",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Keymap Listitem"
+  },
+  {
+   "menuId": 151,
+   "uniqueName": "MENU_UNIQUE_ID_SETTINGS_FIRST_PERSON",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Settings First Person"
+  },
+  {
+   "menuId": 152,
+   "uniqueName": "MENU_UNIQUE_ID_HEADER_LANDING_KEYMAPPING",
+   "kind": "internal",
+   "gxt": null,
+   "label": "Header Landing Keymapping"
+  },
+  {
+   "menuId": 153,
+   "uniqueName": "MENU_UNIQUE_ID_PROCESS_SAVEGAME",
+   "kind": "screen",
+   "gxt": "PM_PANE_PROC",
+   "label": "Process Savegame"
+  },
+  {
+   "menuId": 154,
+   "uniqueName": "MENU_UNIQUE_ID_PROCESS_SAVEGAME_LIST",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Process Savegame List"
+  },
+  {
+   "menuId": 155,
+   "uniqueName": "MENU_UNIQUE_ID_IMPORT_SAVEGAME",
+   "kind": "screen",
+   "gxt": "PM_PANE_IMP",
+   "label": "Import Savegame"
+  },
+  {
+   "menuId": 156,
+   "uniqueName": "MENU_UNIQUE_ID_EXIT_TO_MAIN_MENU",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Exit To Main Menu"
+  },
+  {
+   "menuId": 157,
+   "uniqueName": "MENU_UNIQUE_ID_CREDITS",
+   "kind": "screen",
+   "gxt": "UI_FLOW_SP_C_M",
+   "label": "Credits"
+  },
+  {
+   "menuId": 158,
+   "uniqueName": "MENU_UNIQUE_ID_LEGAL",
+   "kind": "screen",
+   "gxt": "UI_FLOW_SP_L_M",
+   "label": "Legal"
+  },
+  {
+   "menuId": 159,
+   "uniqueName": "MENU_UNIQUE_ID_CREDITS_LEGAL",
+   "kind": "screen",
+   "gxt": null,
+   "label": "Credits Legal"
+  },
+  {
+   "menuId": -1000,
+   "uniqueName": "SENTINEL_MINUS_1000",
+   "kind": "internal",
+   "gxt": null,
+   "label": null
+  },
+  {
+   "menuId": -1155176764,
+   "uniqueName": "HASH:LINK_FACEBOOK",
+   "kind": "hashedTrigger",
+   "gxt": "FB_LINK",
+   "label": "Facebook"
+  },
+  {
+   "menuId": -106292410,
+   "uniqueName": "HASH:PREF_PCGAMEPAD",
+   "kind": "hashedTrigger",
+   "gxt": "MO_GAMEPAD",
+   "label": "Gamepad Type"
+  },
+  {
+   "menuId": -906251687,
+   "uniqueName": "HASH:PREF_SAFEZONE_SIZE",
+   "kind": "hashedTrigger",
+   "gxt": "MO_SAFEZONE",
+   "label": "Safezone Size"
+  },
+  {
+   "menuId": 861865160,
+   "uniqueName": "HASH:RESTORE_DEFAULTS_ADVANCED_GFX",
+   "kind": "hashedTrigger",
+   "gxt": null,
+   "label": "Restore Defaults Advanced Gfx"
+  },
+  {
+   "menuId": -925456543,
+   "uniqueName": "HASH:RESTORE_DEFAULTS_AUDIO",
+   "kind": "hashedTrigger",
+   "gxt": null,
+   "label": "Restore Defaults Audio"
+  },
+  {
+   "menuId": -1461338927,
+   "uniqueName": "HASH:RESTORE_DEFAULTS_CAMERA",
+   "kind": "hashedTrigger",
+   "gxt": null,
+   "label": "Restore Defaults Camera"
+  },
+  {
+   "menuId": 91005776,
+   "uniqueName": "HASH:RESTORE_DEFAULTS_CONTROLS",
+   "kind": "hashedTrigger",
+   "gxt": null,
+   "label": "Restore Defaults Controls"
+  },
+  {
+   "menuId": 1538178187,
+   "uniqueName": "HASH:RESTORE_DEFAULTS_DISPLAY",
+   "kind": "hashedTrigger",
+   "gxt": null,
+   "label": "Restore Defaults Display"
+  },
+  {
+   "menuId": 1208601815,
+   "uniqueName": "HASH:RESTORE_DEFAULTS_FIRST_PERSON",
+   "kind": "hashedTrigger",
+   "gxt": null,
+   "label": "Restore Defaults First Person"
+  },
+  {
+   "menuId": -966454834,
+   "uniqueName": "HASH:RESTORE_DEFAULTS_GRAPHICS",
+   "kind": "hashedTrigger",
+   "gxt": null,
+   "label": "Restore Defaults Graphics"
+  },
+  {
+   "menuId": 1625312161,
+   "uniqueName": "HASH:RESTORE_DEFAULTS_MISC_CONTROLS",
+   "kind": "hashedTrigger",
+   "gxt": null,
+   "label": "Restore Defaults Misc Controls"
+  },
+  {
+   "menuId": -113535369,
+   "uniqueName": "HASH:RESTORE_DEFAULTS_VOICE_CHAT",
+   "kind": "hashedTrigger",
+   "gxt": null,
+   "label": "Restore Defaults Voice Chat"
+  },
+  {
+   "menuId": -1265285960,
+   "uniqueName": "HASH:UR_COMPLETESCAN",
+   "kind": "hashedTrigger",
+   "gxt": "MO_UR_COMPLETESCAN",
+   "label": "Complete Scan for Music"
+  },
+  {
+   "menuId": -1418582884,
+   "uniqueName": "HASH:UR_QUICKSCAN",
+   "kind": "hashedTrigger",
+   "gxt": "MO_UR_QUICKSCAN",
+   "label": "Quick Scan for Music"
+  }
+ ],
+ "rows": [
+  {
+   "menuId": 51,
+   "uniqueId": 8,
+   "headerValue": 8,
+   "screenMenuId": 22,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "MO_SFX",
+   "pref": "PREF_SFX_VOLUME",
+   "contexts": null,
+   "platform": null,
+   "ord": 0,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 38,
+   "headerValue": 38,
+   "screenMenuId": 22,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "MO_MUS",
+   "pref": "PREF_MUSIC_VOLUME_IN_MP",
+   "contexts": "*ALL*,InMP",
+   "platform": null,
+   "ord": 1,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 9,
+   "headerValue": 9,
+   "screenMenuId": 22,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "MO_MUS",
+   "pref": "PREF_MUSIC_VOLUME",
+   "contexts": "*NONE*,InMP",
+   "platform": null,
+   "ord": 1,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 43,
+   "headerValue": 43,
+   "screenMenuId": 22,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "MO_DBOOST",
+   "pref": "PREF_DIAG_BOOST",
+   "contexts": null,
+   "platform": null,
+   "ord": 2,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 13,
+   "headerValue": 13,
+   "screenMenuId": 22,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_RADIO_STATIONS",
+   "gxt": "MO_RST",
+   "pref": "PREF_RADIO_STATION",
+   "contexts": "*NONE*,OnLandingPage",
+   "platform": null,
+   "ord": 3,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 173,
+   "headerValue": 169,
+   "screenMenuId": 22,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_UR_PLAYMODE",
+   "gxt": "MO_UR_PLAYMODE",
+   "pref": "PREF_UR_PLAYMODE",
+   "contexts": "*ALL*,x64",
+   "platform": null,
+   "ord": 4,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 174,
+   "headerValue": 170,
+   "screenMenuId": 22,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_UR_AUTOSCAN",
+   "pref": "PREF_UR_AUTOSCAN",
+   "contexts": "*ALL*,x64",
+   "platform": null,
+   "ord": 5,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 14,
+   "headerValue": 14,
+   "screenMenuId": 22,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_VOICE_OUTPUT",
+   "gxt": "MO_VOUT",
+   "pref": "PREF_VOICE_OUTPUT",
+   "contexts": "*NONE*,x64",
+   "platform": null,
+   "ord": 7,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 44,
+   "headerValue": 44,
+   "screenMenuId": 22,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_VOICESPKR",
+   "pref": "PREF_VOICE_SPEAKERS",
+   "contexts": "*ALL*,PS3",
+   "platform": null,
+   "ord": 8,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 11,
+   "headerValue": 11,
+   "screenMenuId": 22,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_SPEAKER_OUTPUT",
+   "gxt": "MO_OUTP",
+   "pref": "PREF_SPEAKER_OUTPUT",
+   "contexts": "*NONE*,AUD_WIRELESSHEADSET",
+   "platform": null,
+   "ord": 6,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 166,
+   "headerValue": 162,
+   "screenMenuId": 22,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_CTRLSPKR",
+   "pref": "PREF_CTRL_SPEAKER",
+   "contexts": "*ALL*,PS4,PADSPEAKER_ENABLED,*NONE*,HEADPHONE_ENABLED",
+   "platform": null,
+   "ord": 10,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 169,
+   "headerValue": 165,
+   "screenMenuId": 22,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_CTRLSPKR",
+   "pref": "PREF_CTRL_SPEAKER_HEADPHONE",
+   "contexts": "*ALL*,PS4,PADSPEAKER_ENABLED,HEADPHONE_ENABLED",
+   "platform": null,
+   "ord": 11,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 167,
+   "headerValue": 163,
+   "screenMenuId": 22,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "MO_CTRLSPKR_VOL",
+   "pref": "PREF_CTRL_SPEAKER_VOL",
+   "contexts": "*ALL*,PS4,PADSPEAKER_ENABLED",
+   "platform": null,
+   "ord": 12,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 168,
+   "headerValue": 164,
+   "screenMenuId": 22,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_PULSEHEADSET",
+   "pref": "PREF_PULSE_HEADSET",
+   "contexts": "*ALL*,PS4,HEADPHONE_ENABLED",
+   "platform": null,
+   "ord": 13,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 45,
+   "headerValue": 45,
+   "screenMenuId": 22,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_SS_FRONTREAR",
+   "gxt": "MO_SS_FRONT",
+   "pref": "PREF_SS_FRONT",
+   "contexts": "*ALL*,SS_SUPPORTED,*NONE*,AUD_WIRELESSHEADSET",
+   "platform": null,
+   "ord": 7,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 46,
+   "headerValue": 46,
+   "screenMenuId": 22,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_SS_FRONTREAR",
+   "gxt": "MO_SS_REAR",
+   "pref": "PREF_SS_REAR",
+   "contexts": "*ALL*,SS_SUPPORTED,*NONE*,AUD_WIRELESSHEADSET",
+   "platform": null,
+   "ord": 8,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 175,
+   "headerValue": 171,
+   "screenMenuId": 22,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_AUDIO_FOCUS",
+   "pref": "PREF_AUDIO_MUTE_ON_FOCUS_LOSS",
+   "contexts": "*ALL*,x64",
+   "platform": null,
+   "ord": 9,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 29,
+   "headerValue": 29,
+   "screenMenuId": 23,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_MINIMAP_MODE",
+   "gxt": "MO_RAD",
+   "pref": "PREF_RADAR_MODE",
+   "contexts": null,
+   "platform": null,
+   "ord": 0,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 30,
+   "headerValue": 30,
+   "screenMenuId": 23,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_HUD",
+   "pref": "PREF_DISPLAY_HUD",
+   "contexts": null,
+   "platform": null,
+   "ord": 1,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 31,
+   "headerValue": 31,
+   "screenMenuId": 23,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_RETICLE_MODE",
+   "gxt": "MO_HUD_TARG",
+   "pref": "PREF_RETICULE",
+   "contexts": null,
+   "platform": null,
+   "ord": 2,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 32,
+   "headerValue": 32,
+   "screenMenuId": 23,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "MO_RET_SIZE",
+   "pref": "PREF_RETICULE_SIZE",
+   "contexts": null,
+   "platform": null,
+   "ord": 3,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 33,
+   "headerValue": 33,
+   "screenMenuId": 23,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_DISPGPS",
+   "pref": "PREF_DISPLAY_GPS",
+   "contexts": null,
+   "platform": null,
+   "ord": 4,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 154,
+   "headerValue": 150,
+   "screenMenuId": 23,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "PM_SETTING_11",
+   "pref": "PREF_BIG_RADAR",
+   "contexts": "*ALL*,InMP",
+   "platform": null,
+   "ord": 5,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 155,
+   "headerValue": 151,
+   "screenMenuId": 23,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "PM_SETTING_12",
+   "pref": "PREF_BIG_RADAR_NAMES",
+   "contexts": "*ALL*,InMP",
+   "platform": null,
+   "ord": 6,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 156,
+   "headerValue": 152,
+   "screenMenuId": 23,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_TEXT_CHAT",
+   "pref": "PREF_SHOW_TEXT_CHAT",
+   "contexts": "*ALL*,InMP,b2699",
+   "platform": null,
+   "ord": 7,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 34,
+   "headerValue": 34,
+   "screenMenuId": 23,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "MO_SAFEZONE",
+   "pref": "PREF_SAFEZONE_SIZE",
+   "contexts": null,
+   "platform": "!ps4",
+   "ord": 8,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 26,
+   "headerValue": 26,
+   "screenMenuId": 23,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_DOF",
+   "pref": "PREF_DOF",
+   "contexts": "*NONE*,x64",
+   "platform": null,
+   "ord": 9,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 27,
+   "headerValue": 27,
+   "screenMenuId": 23,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_SKFX",
+   "pref": "PREF_SKFX",
+   "contexts": null,
+   "platform": null,
+   "ord": 10,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 28,
+   "headerValue": 28,
+   "screenMenuId": 23,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_SUB",
+   "pref": "PREF_SUBTITLES",
+   "contexts": null,
+   "platform": null,
+   "ord": 11,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 178,
+   "headerValue": 174,
+   "screenMenuId": 23,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_MEASUREMENT",
+   "gxt": "MO_MEASUREMENT",
+   "pref": "PREF_MEASUREMENT_SYSTEM",
+   "contexts": null,
+   "platform": null,
+   "ord": 12,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 35,
+   "headerValue": 35,
+   "screenMenuId": 23,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_LANGUAGE",
+   "gxt": "MO_LAN",
+   "pref": "PREF_CURRENT_LANGUAGE",
+   "contexts": null,
+   "platform": null,
+   "ord": 13,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 96,
+   "headerValue": 96,
+   "screenMenuId": 137,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "GFXVID_OVERRIDE",
+   "pref": "PREF_GFX_VID_OVERRIDE",
+   "contexts": null,
+   "platform": null,
+   "ord": 0,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 67,
+   "headerValue": 67,
+   "screenMenuId": 137,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_GFX_DXVERSION",
+   "gxt": "GFX_DXVERSION",
+   "pref": "PREF_GFX_DXVERSION",
+   "contexts": null,
+   "platform": null,
+   "ord": 1,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 81,
+   "headerValue": 81,
+   "screenMenuId": 138,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_GFX_SCALING",
+   "gxt": "GFX_SCALING",
+   "pref": "PREF_GFX_SCALING",
+   "contexts": null,
+   "platform": null,
+   "ord": 5,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 60,
+   "headerValue": 60,
+   "screenMenuId": 137,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "VID_MONITOR",
+   "pref": "PREF_VID_MONITOR",
+   "contexts": null,
+   "platform": null,
+   "ord": 6,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 79,
+   "headerValue": 79,
+   "screenMenuId": 137,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "GFX_FXAA",
+   "pref": "PREF_GFX_FXAA",
+   "contexts": null,
+   "platform": null,
+   "ord": 7,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 80,
+   "headerValue": 80,
+   "screenMenuId": 137,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_GFX_MSAA",
+   "gxt": "GFX_MSAA",
+   "pref": "PREF_GFX_MSAA",
+   "contexts": null,
+   "platform": null,
+   "ord": 8,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 82,
+   "headerValue": 82,
+   "screenMenuId": 137,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "GFX_TXAA",
+   "pref": "PREF_GFX_TXAA",
+   "contexts": "*ALL*,GFX_SUPPORT_TXAA",
+   "platform": null,
+   "ord": 9,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 62,
+   "headerValue": 62,
+   "screenMenuId": 137,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_VID_VSYNC",
+   "gxt": "VID_VSYNC",
+   "pref": "PREF_VID_VSYNC",
+   "contexts": null,
+   "platform": null,
+   "ord": 10,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 63,
+   "headerValue": 63,
+   "screenMenuId": 137,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_STER",
+   "pref": "PREF_VID_STEREO",
+   "contexts": "*ANY*,VID_STEREO",
+   "platform": null,
+   "ord": 8,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 66,
+   "headerValue": 66,
+   "screenMenuId": 137,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "VID_FOCUS",
+   "pref": "PREF_VID_PAUSE_ON_FOCUS_LOSS",
+   "contexts": null,
+   "platform": null,
+   "ord": 11,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 77,
+   "headerValue": 77,
+   "screenMenuId": 137,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "GFX_DENSITY",
+   "pref": "PREF_GFX_CITY_DENSITY",
+   "contexts": null,
+   "platform": null,
+   "ord": 12,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 78,
+   "headerValue": 78,
+   "screenMenuId": 137,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "GFX_POP_VARIETY",
+   "pref": "PREF_GFX_POP_VARIETY",
+   "contexts": null,
+   "platform": null,
+   "ord": 13,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 89,
+   "headerValue": 89,
+   "screenMenuId": 137,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "GFX_DIST_SCALE",
+   "pref": "PREF_GFX_DIST_SCALE",
+   "contexts": null,
+   "platform": null,
+   "ord": 14,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 64,
+   "headerValue": 64,
+   "screenMenuId": 137,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "GFX_BUDGET",
+   "pref": "PREF_VID_STEREO_CONVERGENCE",
+   "contexts": null,
+   "platform": null,
+   "ord": 13,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 68,
+   "headerValue": 68,
+   "screenMenuId": 137,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_GFX_NIGHTLIGHTS",
+   "gxt": "GFX_TXTQ",
+   "pref": "PREF_GFX_TEXTURE_QUALITY",
+   "contexts": null,
+   "platform": null,
+   "ord": 15,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 69,
+   "headerValue": 69,
+   "screenMenuId": 137,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_GFX_SHADERQ",
+   "gxt": "GFX_SHADERQ",
+   "pref": "PREF_GFX_SHADER_QUALITY",
+   "contexts": null,
+   "platform": null,
+   "ord": 16,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 70,
+   "headerValue": 70,
+   "screenMenuId": 137,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_GFX_SHADOWS",
+   "gxt": "GFX_SHADOWQ",
+   "pref": "PREF_GFX_SHADOW_QUALITY",
+   "contexts": null,
+   "platform": null,
+   "ord": 17,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 71,
+   "headerValue": 71,
+   "screenMenuId": 137,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_GFX_REFLECTION",
+   "gxt": "GFX_REFELECTIONQ",
+   "pref": "PREF_GFX_REFLECTION_QUALITY",
+   "contexts": null,
+   "platform": null,
+   "ord": 18,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 72,
+   "headerValue": 72,
+   "screenMenuId": 137,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_GFX_MSAA",
+   "gxt": "GFX_REFLECTION_MSAA",
+   "pref": "PREF_GFX_REFLECTION_MSAA",
+   "contexts": null,
+   "platform": null,
+   "ord": 19,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 73,
+   "headerValue": 73,
+   "screenMenuId": 137,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_GFX_SHADERQ",
+   "gxt": "GFX_WATERQ",
+   "pref": "PREF_GFX_WATER_QUALITY",
+   "contexts": null,
+   "platform": null,
+   "ord": 20,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 74,
+   "headerValue": 74,
+   "screenMenuId": 137,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_GFX_NIGHTLIGHTS",
+   "gxt": "GFX_PRTQ",
+   "pref": "PREF_GFX_PARTICLES_QUALITY",
+   "contexts": null,
+   "platform": null,
+   "ord": 21,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 75,
+   "headerValue": 75,
+   "screenMenuId": 137,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_GFX_QUALITY",
+   "gxt": "GFX_GRASSQ",
+   "pref": "PREF_GFX_GRASS_QUALITY",
+   "contexts": null,
+   "platform": null,
+   "ord": 22,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 76,
+   "headerValue": 76,
+   "screenMenuId": 137,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_GFX_SOFTNESS",
+   "gxt": "GFX_SOFT_SHADOW",
+   "pref": "PREF_GFX_SHADOW_SOFTNESS",
+   "contexts": null,
+   "platform": null,
+   "ord": 23,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 86,
+   "headerValue": 86,
+   "screenMenuId": 137,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_GFX_QUALITY",
+   "gxt": "GFX_POST_FX",
+   "pref": "PREF_GFX_POST_FX",
+   "contexts": null,
+   "platform": null,
+   "ord": 24,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 88,
+   "headerValue": 88,
+   "screenMenuId": 137,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "GFX_MB_STR",
+   "pref": "PREF_GFX_MB_STRENGTH",
+   "contexts": null,
+   "platform": null,
+   "ord": 25,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 87,
+   "headerValue": 87,
+   "screenMenuId": 137,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_DOF",
+   "pref": "PREF_GFX_DOF",
+   "contexts": null,
+   "platform": null,
+   "ord": 25,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 83,
+   "headerValue": 83,
+   "screenMenuId": 137,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_GFX_ANISOT",
+   "gxt": "GFX_ANISOT",
+   "pref": "PREF_GFX_ANISOTROPIC_FILTERING",
+   "contexts": null,
+   "platform": null,
+   "ord": 26,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 84,
+   "headerValue": 84,
+   "screenMenuId": 137,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_GFX_AMBIENTOCC",
+   "gxt": "GFX_AMBIENTOCC",
+   "pref": "PREF_GFX_AMBIENT_OCCLUSION",
+   "contexts": null,
+   "platform": null,
+   "ord": 27,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 85,
+   "headerValue": 85,
+   "screenMenuId": 137,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_GFX_SHADOWS",
+   "gxt": "GFX_TESSELLATION",
+   "pref": "PREF_GFX_TESSELLATION",
+   "contexts": null,
+   "platform": null,
+   "ord": 28,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 56,
+   "headerValue": 56,
+   "screenMenuId": 137,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SCREEN_TYPE",
+   "gxt": "VID_SCR_TYPE",
+   "pref": "PREF_VID_SCREEN_TYPE",
+   "contexts": null,
+   "platform": null,
+   "ord": 2,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 57,
+   "headerValue": 57,
+   "screenMenuId": 137,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "VID_RESOLUTION",
+   "pref": "PREF_VID_RESOLUTION",
+   "contexts": null,
+   "platform": null,
+   "ord": 3,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 58,
+   "headerValue": 58,
+   "screenMenuId": 137,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "VID_REFRESH",
+   "pref": "PREF_VID_REFRESH",
+   "contexts": null,
+   "platform": null,
+   "ord": 5,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 61,
+   "headerValue": 61,
+   "screenMenuId": 137,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_VID_ASPECT",
+   "gxt": "VID_ASPECT",
+   "pref": "PREF_VID_ASPECT",
+   "contexts": null,
+   "platform": null,
+   "ord": 4,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 90,
+   "headerValue": 90,
+   "screenMenuId": 138,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "AGFX_LSHADOW",
+   "pref": "PREF_ADV_GFX_LONG_SHADOWS",
+   "contexts": null,
+   "platform": null,
+   "ord": 0,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 91,
+   "headerValue": 91,
+   "screenMenuId": 138,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "AGFX_USHADOW",
+   "pref": "PREF_ADV_GFX_ULTRA_SHADOWS",
+   "contexts": null,
+   "platform": null,
+   "ord": 1,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 92,
+   "headerValue": 92,
+   "screenMenuId": 138,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "AGFX_HD_FLIGHT",
+   "pref": "PREF_ADV_GFX_HD_FLIGHT",
+   "contexts": null,
+   "platform": null,
+   "ord": 2,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 93,
+   "headerValue": 93,
+   "screenMenuId": 138,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "AGFX_MAXLOD",
+   "pref": "PREF_ADV_GFX_MAX_LOD",
+   "contexts": null,
+   "platform": null,
+   "ord": 3,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 94,
+   "headerValue": 94,
+   "screenMenuId": 138,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "AGFX_SHADOWS_DIST",
+   "pref": "PREF_ADV_GFX_SHADOWS_DIST_MULT",
+   "contexts": null,
+   "platform": null,
+   "ord": 4,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 150,
+   "headerValue": 146,
+   "screenMenuId": 146,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_REPLAY_MEM_LIMIT",
+   "gxt": "PM_PANE_RPL_MEM_LIMIT",
+   "pref": "PREF_REPLAY_MEM_LIMIT",
+   "contexts": "*ALL*,x64",
+   "platform": null,
+   "ord": 0,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 152,
+   "headerValue": 148,
+   "screenMenuId": 146,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_REPLAY_AUTO_SAVE_RECORDING",
+   "gxt": "PM_PANE_RPL_AUTO_SAVE_RECORDING",
+   "pref": "PREF_REPLAY_AUTO_SAVE_RECORDING",
+   "contexts": null,
+   "platform": null,
+   "ord": 1,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 153,
+   "headerValue": 149,
+   "screenMenuId": 146,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_VIDEO_UPLOAD_PRIVACY",
+   "gxt": "PM_PANE_RPL_UPLOAD_PRIVACY",
+   "pref": "PREF_VIDEO_UPLOAD_PRIVACY",
+   "contexts": null,
+   "platform": null,
+   "ord": 2,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 176,
+   "headerValue": 172,
+   "screenMenuId": 146,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "REDITOR_TOOLTIP",
+   "pref": "PREF_ROCKSTAR_EDITOR_TOOLTIP",
+   "contexts": null,
+   "platform": null,
+   "ord": 3,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 177,
+   "headerValue": 173,
+   "screenMenuId": 146,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "REDITOR_EXPORT_GRAPHICS_UPGRADE",
+   "pref": "PREF_ROCKSTAR_EDITOR_EXPORT_GRAPHICS_UPGRADE",
+   "contexts": "*ALL*,x64",
+   "platform": null,
+   "ord": 4,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 101,
+   "headerValue": 97,
+   "screenMenuId": 139,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_VOICE_ENABLE",
+   "pref": "PREF_VOICE_ENABLE",
+   "contexts": null,
+   "platform": null,
+   "ord": 0,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "unpinned",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 102,
+   "headerValue": 98,
+   "screenMenuId": 139,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_OUTP_DVC",
+   "pref": "PREF_VOICE_OUTPUT_DEVICE",
+   "contexts": null,
+   "platform": null,
+   "ord": 1,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "unpinned",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 103,
+   "headerValue": 99,
+   "screenMenuId": 139,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "MO_CHAT_OVOL",
+   "pref": "PREF_VOICE_OUTPUT_VOLUME",
+   "contexts": null,
+   "platform": null,
+   "ord": 2,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "unpinned",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 104,
+   "headerValue": 100,
+   "screenMenuId": 139,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "MO_SOUND_VOL",
+   "pref": "PREF_VOICE_SOUND_VOLUME",
+   "contexts": null,
+   "platform": null,
+   "ord": 3,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "unpinned",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 105,
+   "headerValue": 101,
+   "screenMenuId": 139,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "MO_MUSIC_VOL",
+   "pref": "PREF_VOICE_MUSIC_VOLUME",
+   "contexts": null,
+   "platform": null,
+   "ord": 4,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "unpinned",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 106,
+   "headerValue": 102,
+   "screenMenuId": 139,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_TLK_ENABLE",
+   "pref": "PREF_VOICE_TALK_ENABLED",
+   "contexts": null,
+   "platform": null,
+   "ord": 5,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "unpinned",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 107,
+   "headerValue": 103,
+   "screenMenuId": 139,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_VOICE_FEEDBACK",
+   "gxt": "VOX_FEEDBACK",
+   "pref": "PREF_VOICE_FEEDBACK",
+   "contexts": null,
+   "platform": null,
+   "ord": 6,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "unpinned",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 108,
+   "headerValue": 104,
+   "screenMenuId": 139,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_INPUT_DVC",
+   "pref": "PREF_VOICE_INPUT_DEVICE",
+   "contexts": null,
+   "platform": null,
+   "ord": 7,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "unpinned",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 109,
+   "headerValue": 105,
+   "screenMenuId": 139,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_VOICE_TYPE",
+   "gxt": "MO_VCHAT_MODE",
+   "pref": "PREF_VOICE_CHAT_MODE",
+   "contexts": null,
+   "platform": null,
+   "ord": 8,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "unpinned",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 110,
+   "headerValue": 106,
+   "screenMenuId": 139,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "MO_MIC_VOL",
+   "pref": "PREF_VOICE_MIC_VOLUME",
+   "contexts": null,
+   "platform": null,
+   "ord": 9,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "unpinned",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 111,
+   "headerValue": 107,
+   "screenMenuId": 139,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "MO_MIC_SEN",
+   "pref": "PREF_VOICE_MIC_SENSITIVITY",
+   "contexts": null,
+   "platform": null,
+   "ord": 10,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "unpinned",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 48,
+   "headerValue": 48,
+   "screenMenuId": 24,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_CONTROLS_CONTEXT",
+   "gxt": "MO_CTRL_CONTEXT",
+   "pref": "PREF_CONTROLS_CONTEXT",
+   "contexts": null,
+   "platform": null,
+   "ord": 0,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 4,
+   "headerValue": 4,
+   "screenMenuId": 24,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_TARGET_CONFIG",
+   "gxt": "MO_TAR",
+   "pref": "PREF_TARGET_CONFIG",
+   "contexts": "*ALL*,InMP",
+   "platform": null,
+   "ord": 1,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 2,
+   "headerValue": 2,
+   "screenMenuId": 24,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_CONTROLS_HOLD_SPRINT",
+   "gxt": "MO_SPRINT",
+   "pref": "PREF_HOLD_SPRINT",
+   "contexts": "*NONE*,InSP,*ALL*,b2944",
+   "platform": null,
+   "ord": 2,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 3,
+   "headerValue": 3,
+   "screenMenuId": 24,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_VIB",
+   "pref": "PREF_VIBRATION",
+   "contexts": null,
+   "platform": null,
+   "ord": 2,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 5,
+   "headerValue": 5,
+   "screenMenuId": 24,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_INVERT_LOOK",
+   "gxt": "MO_INV",
+   "pref": "PREF_INVERT_LOOK",
+   "contexts": null,
+   "platform": null,
+   "ord": 3,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 0,
+   "headerValue": 0,
+   "screenMenuId": 24,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_CONTROL_CONFIG",
+   "gxt": "MO_CTY",
+   "pref": "PREF_CONTROL_CONFIG",
+   "contexts": "*NONE*,RemotePlay",
+   "platform": null,
+   "ord": 4,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 1,
+   "headerValue": 1,
+   "screenMenuId": 24,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_CONTROL_CONFIG",
+   "gxt": "MO_CTY_FPS",
+   "pref": "PREF_CONTROL_CONFIG_FPS",
+   "contexts": "*NONE*,RemotePlay",
+   "platform": null,
+   "ord": 5,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 6,
+   "headerValue": 6,
+   "screenMenuId": 24,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "MO_SENS",
+   "pref": "PREF_CONTROLLER_SENSITIVITY",
+   "contexts": null,
+   "platform": null,
+   "ord": 6,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 127,
+   "headerValue": 123,
+   "screenMenuId": 24,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "MO_FPS_LSENS",
+   "pref": "PREF_FPS_LOOK_SENSITIVITY",
+   "contexts": null,
+   "platform": null,
+   "ord": 7,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 128,
+   "headerValue": 124,
+   "screenMenuId": 24,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "MO_FPS_ASENS",
+   "pref": "PREF_FPS_AIM_SENSITIVITY",
+   "contexts": null,
+   "platform": null,
+   "ord": 8,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 140,
+   "headerValue": 136,
+   "screenMenuId": 24,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "MO_LK_SENS",
+   "pref": "PREF_LOOK_AROUND_SENSITIVITY",
+   "contexts": null,
+   "platform": null,
+   "ord": 9,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 131,
+   "headerValue": 127,
+   "screenMenuId": 24,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "MO_TPS_DZONE",
+   "pref": "PREF_AIM_DEADZONE",
+   "contexts": null,
+   "platform": null,
+   "ord": 10,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 129,
+   "headerValue": 125,
+   "screenMenuId": 24,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "MO_FPS_DZONE",
+   "pref": "PREF_FPS_AIM_DEADZONE",
+   "contexts": null,
+   "platform": null,
+   "ord": 11,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 132,
+   "headerValue": 128,
+   "screenMenuId": 24,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "MO_TPS_ACCEL",
+   "pref": "PREF_AIM_ACCELERATION",
+   "contexts": null,
+   "platform": null,
+   "ord": 12,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 130,
+   "headerValue": 126,
+   "screenMenuId": 24,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "MO_FPS_ACCEL",
+   "pref": "PREF_FPS_AIM_ACCELERATION",
+   "contexts": null,
+   "platform": null,
+   "ord": 13,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 47,
+   "headerValue": 47,
+   "screenMenuId": 24,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_SNIPE",
+   "pref": "PREF_SNIPER_ZOOM",
+   "contexts": null,
+   "platform": null,
+   "ord": 14,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 170,
+   "headerValue": 166,
+   "screenMenuId": 24,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_DHB",
+   "pref": "PREF_ALTERNATE_HANDBRAKE",
+   "contexts": "*NONE*,RemotePlay",
+   "platform": null,
+   "ord": 15,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 171,
+   "headerValue": 167,
+   "screenMenuId": 24,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_CONTROL_DRIVEBY",
+   "gxt": "MO_ADB",
+   "pref": "PREF_ALTERNATE_DRIVEBY",
+   "contexts": "*NONE*,RemotePlay",
+   "platform": null,
+   "ord": 16,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 7,
+   "headerValue": 7,
+   "screenMenuId": 24,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_LTE",
+   "pref": "PREF_CONTROLLER_LIGHT_EFFECT",
+   "contexts": "*ALL*,PS4",
+   "platform": null,
+   "ord": 18,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 112,
+   "headerValue": 108,
+   "screenMenuId": 140,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_MOUSE_TYPE",
+   "gxt": "MO_MTYPE",
+   "pref": "PREF_MOUSE_TYPE",
+   "contexts": null,
+   "platform": null,
+   "ord": 0,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 116,
+   "headerValue": 112,
+   "screenMenuId": 140,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "MO_MONFSENS",
+   "pref": "PREF_MOUSE_ON_FOOT_SCALE",
+   "contexts": null,
+   "platform": null,
+   "ord": 1,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 121,
+   "headerValue": 117,
+   "screenMenuId": 140,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "MO_MOUSEWEIGHT",
+   "pref": "PREF_MOUSE_WEIGHT_SCALE",
+   "contexts": null,
+   "platform": null,
+   "ord": 2,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 122,
+   "headerValue": 118,
+   "screenMenuId": 140,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_MOUSEACC",
+   "pref": "PREF_MOUSE_ACCELERATION",
+   "contexts": null,
+   "platform": null,
+   "ord": 3,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 141,
+   "headerValue": 137,
+   "screenMenuId": 140,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_INVERT_LOOK",
+   "gxt": "MO_INVMOUSE",
+   "pref": "PREF_INVERT_MOUSE",
+   "contexts": "*ALL*,x64",
+   "platform": null,
+   "ord": 4,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 123,
+   "headerValue": 119,
+   "screenMenuId": 140,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_KBM_TOGGLAIM",
+   "pref": "PREF_KBM_TOGGLE_AIM",
+   "contexts": null,
+   "platform": null,
+   "ord": 5,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 179,
+   "headerValue": 175,
+   "screenMenuId": 140,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_FPS_DEFAULT_AIM_TYPE",
+   "gxt": "MO_FPS_DEFAULT_AIM_TYPE",
+   "pref": "PREF_FPS_DEFAULT_AIM_TYPE",
+   "contexts": null,
+   "platform": "pc_only",
+   "ord": 6,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 113,
+   "headerValue": 109,
+   "screenMenuId": 140,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_CAM_VEH_OFF",
+   "gxt": "MO_MOUSEDRIVE",
+   "pref": "PREF_MOUSE_DRIVE",
+   "contexts": null,
+   "platform": null,
+   "ord": 7,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 114,
+   "headerValue": 110,
+   "screenMenuId": 140,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_CAM_VEH_OFF",
+   "gxt": "MO_MOUSEFLY",
+   "pref": "PREF_MOUSE_FLY",
+   "contexts": null,
+   "platform": null,
+   "ord": 8,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 115,
+   "headerValue": 111,
+   "screenMenuId": 140,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_CAM_VEH_OFF",
+   "gxt": "MO_MOUSESUB",
+   "pref": "PREF_MOUSE_SUB",
+   "contexts": null,
+   "platform": null,
+   "ord": 9,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 117,
+   "headerValue": 113,
+   "screenMenuId": 140,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "MO_MDRVSENS",
+   "pref": "PREF_MOUSE_DRIVING_SCALE",
+   "contexts": null,
+   "platform": null,
+   "ord": 10,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 118,
+   "headerValue": 114,
+   "screenMenuId": 140,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "MO_MPPILSENS",
+   "pref": "PREF_MOUSE_PLANE_SCALE",
+   "contexts": null,
+   "platform": null,
+   "ord": 11,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 119,
+   "headerValue": 115,
+   "screenMenuId": 140,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "MO_MHPILSEN",
+   "pref": "PREF_MOUSE_HELI_SCALE",
+   "contexts": null,
+   "platform": null,
+   "ord": 12,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 120,
+   "headerValue": 116,
+   "screenMenuId": 140,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "MO_MSUBSENS",
+   "pref": "PREF_MOUSE_SUB_SCALE",
+   "contexts": null,
+   "platform": null,
+   "ord": 13,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 142,
+   "headerValue": 138,
+   "screenMenuId": 140,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_MOUSEFLYINV",
+   "pref": "PREF_INVERT_MOUSE_FLYING",
+   "contexts": "*ALL*,x64",
+   "platform": null,
+   "ord": 14,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 143,
+   "headerValue": 139,
+   "screenMenuId": 140,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_MOUSESUBINV",
+   "pref": "PREF_INVERT_MOUSE_SUB",
+   "contexts": "*ALL*,x64",
+   "platform": null,
+   "ord": 15,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 144,
+   "headerValue": 140,
+   "screenMenuId": 140,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_ROLL_YAW_PITCH",
+   "gxt": "MO_MOUSEFLYSWAP",
+   "pref": "PREF_SWAP_ROLL_YAW_MOUSE_FLYING",
+   "contexts": "*ALL*,x64",
+   "platform": null,
+   "ord": 16,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 145,
+   "headerValue": 141,
+   "screenMenuId": 140,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "MO_ACMBIKE",
+   "pref": "PREF_MOUSE_AUTOCENTER_BIKE",
+   "contexts": null,
+   "platform": null,
+   "ord": 17,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 146,
+   "headerValue": 142,
+   "screenMenuId": 140,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "MO_ACMCAR",
+   "pref": "PREF_MOUSE_AUTOCENTER_CAR",
+   "contexts": null,
+   "platform": null,
+   "ord": 18,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 147,
+   "headerValue": 143,
+   "screenMenuId": 140,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "MO_ACMPLANE",
+   "pref": "PREF_MOUSE_AUTOCENTER_PLANE",
+   "contexts": null,
+   "platform": null,
+   "ord": 19,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "verified",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 125,
+   "headerValue": 121,
+   "screenMenuId": 136,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_FPS_TOGGLE",
+   "pref": "PREF_FPS_PERSISTANT_VIEW",
+   "contexts": null,
+   "platform": null,
+   "ord": 0,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 17,
+   "headerValue": 17,
+   "screenMenuId": 136,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_CAMERA_HEIGHT",
+   "gxt": "MO_CAMERAHEIGHT",
+   "pref": "PREF_CAMERA_HEIGHT",
+   "contexts": null,
+   "platform": null,
+   "ord": 1,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 133,
+   "headerValue": 129,
+   "screenMenuId": 136,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_FPS_ALVL",
+   "pref": "PREF_FPS_AUTO_LEVEL",
+   "contexts": null,
+   "platform": null,
+   "ord": 2,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 126,
+   "headerValue": 122,
+   "screenMenuId": 136,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_SLIDER",
+   "gxt": "MO_FPS_FOV",
+   "pref": "PREF_FPS_FIELD_OF_VIEW",
+   "contexts": null,
+   "platform": null,
+   "ord": 3,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 134,
+   "headerValue": 130,
+   "screenMenuId": 136,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_FPS_RAG",
+   "pref": "PREF_FPS_RAGDOLL",
+   "contexts": null,
+   "platform": null,
+   "ord": 4,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 135,
+   "headerValue": 131,
+   "screenMenuId": 136,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_FPS_ROLL",
+   "pref": "PREF_FPS_COMBATROLL",
+   "contexts": null,
+   "platform": null,
+   "ord": 5,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 136,
+   "headerValue": 132,
+   "screenMenuId": 136,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_FPS_HDB",
+   "pref": "PREF_FPS_HEADBOB",
+   "contexts": null,
+   "platform": null,
+   "ord": 6,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 137,
+   "headerValue": 133,
+   "screenMenuId": 136,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_FPS_TPC",
+   "pref": "PREF_FPS_THIRD_PERSON_COVER",
+   "contexts": null,
+   "platform": null,
+   "ord": 7,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 139,
+   "headerValue": 135,
+   "screenMenuId": 136,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_FPS_VAC",
+   "pref": "PREF_FPS_VEH_AUTO_CENTER",
+   "contexts": null,
+   "platform": null,
+   "ord": 8,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 138,
+   "headerValue": 134,
+   "screenMenuId": 136,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_HOOD_CAMERA",
+   "pref": "PREF_HOOD_CAMERA",
+   "contexts": null,
+   "platform": null,
+   "ord": 9,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 180,
+   "headerValue": 176,
+   "screenMenuId": 136,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_FPS_REL_CAM_DRIVEBY",
+   "pref": "PREF_FPS_RELATIVE_VEHICLE_CAMERA_DRIVEBY_AIMING",
+   "contexts": null,
+   "platform": null,
+   "ord": 10,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "confirmed",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 36,
+   "headerValue": 36,
+   "screenMenuId": 32,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_AUTOSAV",
+   "pref": "PREF_AUTOSAVE",
+   "contexts": "*ANY*,InSP",
+   "platform": null,
+   "ord": 0,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 39,
+   "headerValue": 39,
+   "screenMenuId": 110,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "MO_FACEBOOK",
+   "pref": "PREF_FACEBOOK_UPDATES",
+   "contexts": "*ALL*,FB_Ready",
+   "platform": null,
+   "ord": 0,
+   "conditional": true,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 18,
+   "headerValue": 18,
+   "screenMenuId": 93,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "FEED_PHONE",
+   "pref": "PREF_FEED_PHONE",
+   "contexts": null,
+   "platform": null,
+   "ord": 0,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 19,
+   "headerValue": 19,
+   "screenMenuId": 93,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "FEED_STATS",
+   "pref": "PREF_FEED_STATS",
+   "contexts": null,
+   "platform": null,
+   "ord": 1,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 20,
+   "headerValue": 20,
+   "screenMenuId": 93,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "FEED_CREW",
+   "pref": "PREF_FEED_CREW",
+   "contexts": null,
+   "platform": null,
+   "ord": 2,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 21,
+   "headerValue": 21,
+   "screenMenuId": 93,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "FEED_FRIENDS",
+   "pref": "PREF_FEED_FRIENDS",
+   "contexts": null,
+   "platform": null,
+   "ord": 3,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 22,
+   "headerValue": 22,
+   "screenMenuId": 93,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "FEED_SOCIAL",
+   "pref": "PREF_FEED_SOCIAL",
+   "contexts": null,
+   "platform": null,
+   "ord": 4,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 23,
+   "headerValue": 23,
+   "screenMenuId": 93,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "FEED_STORE",
+   "pref": "PREF_FEED_STORE",
+   "contexts": null,
+   "platform": null,
+   "ord": 5,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 24,
+   "headerValue": 24,
+   "screenMenuId": 93,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "FEED_TOOLTIP",
+   "pref": "PREF_FEED_TOOLTIP",
+   "contexts": null,
+   "platform": null,
+   "ord": 6,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 25,
+   "headerValue": 25,
+   "screenMenuId": 93,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_FEED_DELAY",
+   "gxt": "FEED_DELAY",
+   "pref": "PREF_FEED_DELAY",
+   "contexts": null,
+   "platform": null,
+   "ord": 7,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 157,
+   "headerValue": 153,
+   "screenMenuId": 132,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "SIXAXIS_HELI",
+   "pref": "PREF_SIXAXIS_HELI",
+   "contexts": null,
+   "platform": null,
+   "ord": 0,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 158,
+   "headerValue": 154,
+   "screenMenuId": 132,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "SIXAXIS_BIKE",
+   "pref": "PREF_SIXAXIS_BIKE",
+   "contexts": null,
+   "platform": null,
+   "ord": 1,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 159,
+   "headerValue": 155,
+   "screenMenuId": 132,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "SIXAXIS_BOAT",
+   "pref": "PREF_SIXAXIS_BOAT",
+   "contexts": null,
+   "platform": null,
+   "ord": 2,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  },
+  {
+   "menuId": 51,
+   "uniqueId": 160,
+   "headerValue": 156,
+   "screenMenuId": 132,
+   "kind": "pref",
+   "optionType": "MENU_OPTION_DISPLAY_ON_OFF",
+   "gxt": "SIXAXIS_LOAD",
+   "pref": "PREF_SIXAXIS_RELOAD",
+   "contexts": null,
+   "platform": null,
+   "ord": 3,
+   "conditional": false,
+   "basis": "prefValue",
+   "status": "assumed",
+   "keyConfidence": "derived",
+   "label": null
+  }
+ ],
+ "screenItems": [
+  {
+   "menuId": -1418582884,
+   "hashName": "UR_QUICKSCAN",
+   "screenMenuId": 22,
+   "kind": "hashedTrigger",
+   "gxt": "MO_UR_QUICKSCAN",
+   "label": "Quick Scan for Music"
+  },
+  {
+   "menuId": -1418582884,
+   "hashName": "UR_QUICKSCAN",
+   "screenMenuId": 22,
+   "kind": "hashedTrigger",
+   "gxt": "MO_UR_QUICKSCAN",
+   "label": "Quick Scan for Music"
+  },
+  {
+   "menuId": -1265285960,
+   "hashName": "UR_COMPLETESCAN",
+   "screenMenuId": 22,
+   "kind": "hashedTrigger",
+   "gxt": "MO_UR_COMPLETESCAN",
+   "label": "Complete Scan for Music"
+  },
+  {
+   "menuId": -1265285960,
+   "hashName": "UR_COMPLETESCAN",
+   "screenMenuId": 22,
+   "kind": "hashedTrigger",
+   "gxt": "MO_UR_COMPLETESCAN",
+   "label": "Complete Scan for Music"
+  },
+  {
+   "menuId": -925456543,
+   "hashName": "RESTORE_DEFAULTS_AUDIO",
+   "screenMenuId": 22,
+   "kind": "hashedTrigger",
+   "gxt": null,
+   "label": "Restore Defaults Audio"
+  },
+  {
+   "menuId": -906251687,
+   "hashName": "PREF_SAFEZONE_SIZE",
+   "screenMenuId": 23,
+   "kind": "hashedTrigger",
+   "gxt": "MO_SAFEZONE",
+   "label": "Safezone Size"
+  },
+  {
+   "menuId": 1538178187,
+   "hashName": "RESTORE_DEFAULTS_DISPLAY",
+   "screenMenuId": 23,
+   "kind": "hashedTrigger",
+   "gxt": null,
+   "label": "Restore Defaults Display"
+  },
+  {
+   "menuId": -966454834,
+   "hashName": "RESTORE_DEFAULTS_GRAPHICS",
+   "screenMenuId": 137,
+   "kind": "hashedTrigger",
+   "gxt": null,
+   "label": "Restore Defaults Graphics"
+  },
+  {
+   "menuId": 861865160,
+   "hashName": "RESTORE_DEFAULTS_ADVANCED_GFX",
+   "screenMenuId": 138,
+   "kind": "hashedTrigger",
+   "gxt": null,
+   "label": "Restore Defaults Advanced Gfx"
+  },
+  {
+   "menuId": -113535369,
+   "hashName": "RESTORE_DEFAULTS_VOICE_CHAT",
+   "screenMenuId": 139,
+   "kind": "hashedTrigger",
+   "gxt": null,
+   "label": "Restore Defaults Voice Chat"
+  },
+  {
+   "menuId": -106292410,
+   "hashName": "PREF_PCGAMEPAD",
+   "screenMenuId": 24,
+   "kind": "hashedTrigger",
+   "gxt": "MO_GAMEPAD",
+   "label": "Gamepad Type"
+  },
+  {
+   "menuId": 91005776,
+   "hashName": "RESTORE_DEFAULTS_CONTROLS",
+   "screenMenuId": 24,
+   "kind": "hashedTrigger",
+   "gxt": null,
+   "label": "Restore Defaults Controls"
+  },
+  {
+   "menuId": 1625312161,
+   "hashName": "RESTORE_DEFAULTS_MISC_CONTROLS",
+   "screenMenuId": 140,
+   "kind": "hashedTrigger",
+   "gxt": null,
+   "label": "Restore Defaults Misc Controls"
+  },
+  {
+   "menuId": 1208601815,
+   "hashName": "RESTORE_DEFAULTS_FIRST_PERSON",
+   "screenMenuId": 151,
+   "kind": "hashedTrigger",
+   "gxt": null,
+   "label": "Restore Defaults First Person"
+  },
+  {
+   "menuId": -1461338927,
+   "hashName": "RESTORE_DEFAULTS_CAMERA",
+   "screenMenuId": 136,
+   "kind": "hashedTrigger",
+   "gxt": null,
+   "label": "Restore Defaults Camera"
+  },
+  {
+   "menuId": -1155176764,
+   "hashName": "LINK_FACEBOOK",
+   "screenMenuId": 110,
+   "kind": "hashedTrigger",
+   "gxt": "FB_LINK",
+   "label": "Facebook"
+  },
+  {
+   "menuId": -1155176764,
+   "hashName": "LINK_FACEBOOK",
+   "screenMenuId": 110,
+   "kind": "hashedTrigger",
+   "gxt": "FB_LINK",
+   "label": "Facebook"
+  }
+ ],
+ "optionValues": {
+  "MENU_OPTION_DISPLAY_ON_OFF": [
+   "MO_OFF",
+   "MO_ON"
+  ],
+  "MENU_OPTION_DISPLAY_INVERT_LOOK": [
+   "MO_OFF",
+   "MO_ON"
+  ],
+  "MENU_OPTION_DISPLAY_TARGET_CONFIG": [
+   "MO_TAR1",
+   "MO_TAR2",
+   "MO_TAR3",
+   "MO_TAR4"
+  ],
+  "MENU_OPTION_CONTROLS_HOLD_SPRINT": [
+   "MO_TAP_SPRINT",
+   "MO_HOLD_SPRINT"
+  ],
+  "MENU_OPTION_DISPLAY_MEASUREMENT": [
+   "MS_IMPERIAL",
+   "MS_METRIC"
+  ],
+  "MENU_OPTION_CONTROLS_CONTEXT": [
+   "MO_CTRL_OFTPS",
+   "MO_CTRL_IVTPS",
+   "MO_CTRL_IATPS",
+   "MO_CTRL_OFFPS",
+   "MO_CTRL_IVFPS",
+   "MO_CTRL_IAFPS",
+   "MO_LCREATOR"
+  ],
+  "MENU_OPTION_DISPLAY_CONTROL_CONFIG": [
+   "MO_CCONF_1",
+   "MO_CCONF_2",
+   "MO_CCONF_3",
+   "MO_CCONF_4",
+   "MO_CCONF_5",
+   "MO_CCONF_6",
+   "MO_CCONF_7",
+   "MO_CCONF_8",
+   "MO_CCONF_9",
+   "MO_CCONF_10",
+   "MO_CCONF_11",
+   "MO_CCONF_12"
+  ],
+  "MENU_OPTION_DISPLAY_CONTROL_DRIVEBY": [
+   "MO_ADB_OFF",
+   "MO_ADB_ON"
+  ],
+  "MENU_OPTION_FPS_DEFAULT_AIM_TYPE": [
+   "MO_FPS_DEFAULT_AIM_NORMAL",
+   "MO_FPS_DEFAULT_AIM_IRON"
+  ],
+  "MENU_OPTION_MOUSE_TYPE": [
+   "MO_MT_RAW",
+   "MO_MT_DI",
+   "MO_MT_WIN"
+  ],
+  "MENU_OPTION_CONTROLLER_SENSITIVITY": [
+   "MO_CS_LOW",
+   "MO_CS_MED",
+   "MO_CS_HIGH"
+  ],
+  "MENU_OPTION_GAME_FLOW": [
+   "MO_LOAD_SP",
+   "MO_LOAD_MP"
+  ],
+  "MENU_OPTION_GFX_QUALITY": [
+   "MO_GFX_NORM",
+   "MO_CS_HIGH",
+   "MO_GFX_VHIGH",
+   "MO_GFX_ULTRA"
+  ],
+  "MENU_OPTION_GFX_SHADERQ": [
+   "MO_GFX_NORM",
+   "MO_CS_HIGH",
+   "MO_GFX_VHIGH"
+  ],
+  "MENU_OPTION_MEMORY_GRAPH": [
+   "MO_OFF"
+  ],
+  "MENU_OPTION_VOICE_FEEDBACK": [
+   "MO_OFF"
+  ],
+  "MENU_OPTION_GFX_SHADOWS": [
+   "MO_OFF",
+   "MO_GFX_NORM",
+   "MO_CS_HIGH",
+   "MO_GFX_VHIGH"
+  ],
+  "MENU_OPTION_GFX_REFLECTION": [
+   "MO_GFX_NORM",
+   "MO_CS_HIGH",
+   "MO_GFX_VHIGH",
+   "MO_GFX_ULTRA"
+  ],
+  "MENU_OPTION_GFX_NIGHTLIGHTS": [
+   "MO_GFX_NORM",
+   "MO_CS_HIGH",
+   "MO_GFX_VHIGH"
+  ],
+  "MENU_OPTION_ROLL_YAW_PITCH": [
+   "MO_ROLLPITCH",
+   "MO_YAWPITCH"
+  ],
+  "MENU_OPTION_CAM_VEH_OFF": [
+   "PM_PANE_CAM",
+   "MO_VEHICLE",
+   "MO_OFF"
+  ],
+  "MENU_OPTION_GFX_SOFTNESS": [
+   "GFX_SHARP",
+   "GFX_SOFT",
+   "GFX_SOFTER",
+   "GFX_SOFTEST"
+  ],
+  "MENU_OPTION_VID_VSYNC": [
+   "MO_OFF",
+   "MO_ON",
+   "MO_VID_VSHALF"
+  ],
+  "MENU_OPTION_VID_ASPECT": [
+   "VID_ASP_AUTO",
+   "VID_ASP_32",
+   "VID_ASP_43",
+   "VID_ASP_53",
+   "VID_ASP_54",
+   "VID_ASP_169",
+   "VID_ASP_1610",
+   "VID_ASP_179",
+   "VID_ASP_219"
+  ],
+  "MENU_OPTION_GFX_MSAA": [
+   "MO_OFF",
+   "MO_GFX_X2",
+   "MO_GFX_X4",
+   "MO_GFX_X8"
+  ],
+  "MENU_OPTION_GFX_SCALING": [
+   "MO_GFX_1o1",
+   "MO_GFX_1o2",
+   "MO_GFX_2o3",
+   "MO_GFX_3o4",
+   "MO_GFX_5o6",
+   "MO_GFX_5o4",
+   "MO_GFX_3o2",
+   "MO_GFX_7o4",
+   "MO_GFX_2o1",
+   "MO_GFX_5o2"
+  ],
+  "MENU_OPTION_GFX_ANISOT": [
+   "MO_OFF",
+   "MO_GFX_X2",
+   "MO_GFX_X4",
+   "MO_GFX_X8",
+   "MO_GFX_X16"
+  ],
+  "MENU_OPTION_GFX_AMBIENTOCC": [
+   "MO_OFF",
+   "MO_GFX_NORM",
+   "MO_CS_HIGH"
+  ],
+  "MENU_OPTION_GFX_DXVERSION": [
+   "MO_GFX_DX10",
+   "MO_GFX_DX101",
+   "MO_GFX_DX11"
+  ],
+  "MENU_OPTION_REPLAY_MODE": [
+   "MO_REPLAY_MANUAL",
+   "MO_REPLAY_CONT"
+  ],
+  "MENU_OPTION_REPLAY_MEM_LIMIT": [
+   "MO_REPLAY_MEM_250MB",
+   "MO_REPLAY_MEM_500MB",
+   "MO_REPLAY_MEM_750MB",
+   "MO_REPLAY_MEM_1GB",
+   "MO_REPLAY_MEM_1_5GB",
+   "MO_REPLAY_MEM_2GB",
+   "MO_REPLAY_MEM_5GB",
+   "MO_REPLAY_MEM_10GB",
+   "MO_REPLAY_MEM_15GB",
+   "MO_REPLAY_MEM_25GB",
+   "MO_REPLAY_MEM_50GB"
+  ],
+  "MENU_OPTION_REPLAY_AUTO_RESUME_RECORDING": [
+   "MO_OFF",
+   "MO_ON"
+  ],
+  "MENU_OPTION_REPLAY_AUTO_SAVE_RECORDING": [
+   "MO_OFF",
+   "MO_ON"
+  ],
+  "MENU_OPTION_VIDEO_UPLOAD_PRIVACY": [
+   "MO_PRIVACY_PUBLIC",
+   "MO_PRIVACY_UNLISTED",
+   "MO_PRIVACY_PRIVATE"
+  ],
+  "MENU_OPTION_SCREEN_TYPE": [
+   "VID_FULLSCREEN",
+   "VID_SCR_WIN",
+   "VID_SCR_BORDERLESS"
+  ],
+  "MENU_OPTION_DISPLAY_GPS_SPEECH": [
+   "MO_OFF",
+   "MO_GPS1",
+   "MO_ON"
+  ],
+  "MENU_OPTION_DISPLAY_VOICE_TYPE": [
+   "MO_VC_TALK",
+   "MO_VC_PUSH"
+  ],
+  "MENU_OPTION_DISPLAY_SWHEADSET": [
+   "MO_SWHEADSET"
+  ],
+  "MENU_OPTION_CAMERA_HEIGHT": [
+   "MO_LOW",
+   "MO_HIGH"
+  ],
+  "MENU_OPTION_CAMERA_ZOOM": [
+   "MO_ZOOM_NEAR",
+   "MO_ZOOM_MED",
+   "MO_ZOOM_FAR",
+   "MO_ZOOM_FIRST"
+  ],
+  "MENU_OPTION_CAMERA_ZOOM_NO_FP": [
+   "MO_ZOOM_NEAR",
+   "MO_ZOOM_MED",
+   "MO_ZOOM_FAR"
+  ],
+  "MENU_OPTION_DISPLAY_VOICE_OUTPUT": [
+   "MO_VFRV",
+   "MO_VRRV"
+  ],
+  "MENU_OPTION_DISPLAY_UR_PLAYMODE": [
+   "MO_URRADIO",
+   "MO_URSEQ",
+   "MO_URRAND"
+  ],
+  "MENU_OPTION_DISPLAY_MINIMAP_MODE": [
+   "MO_OFF",
+   "MO_ON",
+   "MO_BLI"
+  ],
+  "MENU_OPTION_DISPLAY_RETICLE_MODE": [
+   "MO_RETICULE_OF",
+   "MO_RETICULE_ON"
+  ],
+  "MENU_OPTION_DISPLAY_LANGUAGE": [
+   "LANG_E",
+   "LANG_F",
+   "LANG_G",
+   "LANG_I",
+   "LANG_S",
+   "LANG_PT",
+   "LANG_PL",
+   "LANG_R",
+   "LANG_K",
+   "LANG_CH",
+   "LANG_J",
+   "LANG_MEX",
+   "LANG_CHS"
+  ],
+  "MENU_OPTION_FEED_DELAY": [
+   "FEED_NO_DELAY",
+   "FEED_DELAY_1MIN",
+   "FEED_DELAY_2MIN",
+   "FEED_DELAY_3MIN",
+   "FEED_DELAY_4MIN",
+   "FEED_DELAY_5MIN",
+   "FEED_DELAY_10MIN",
+   "FEED_DELAY_15MIN",
+   "FEED_DELAY_30MIN",
+   "FEED_DELAY_1HOUR"
+  ],
+  "MENU_OPTION_DISPLAY_SPEAKER_OUTPUT": [
+   "MO_TVOUTP",
+   "MO_SPEAKERS",
+   "MO_SHEAD"
+  ],
+  "MENU_OPTION_SLIDER": [
+   "STE_SEPAR"
+  ]
+ },
+ "profilePrefs": {
+  "203": {
+   "name": "Subtitles"
+  },
+  "204": {
+   "name": "Radar"
+  },
+  "205": {
+   "name": "HUD"
+  },
+  "206": {
+   "name": "Language"
+  },
+  "207": {
+   "name": "GPS route"
+  },
+  "213": {
+   "name": "Brightness"
+  },
+  "220": {
+   "name": "Vehicle Camera Height",
+   "pref": "PREF_CAMERA_HEIGHT",
+   "note": "medium conf: committed on close alongside uid 17 traversal (2026-07-18/20); confirm in-game"
+  },
+  "221": {
+   "name": "Expanded radar"
+  },
+  "222": {
+   "name": "Player overhead display"
+  },
+  "226": {
+   "name": "Screen kill effects"
+  },
+  "227": {
+   "name": "Measurement system"
+  },
+  "300": {
+   "name": "Sound effects volume",
+   "optionType": "MENU_OPTION_SLIDER",
+   "pref": "PREF_SFX_VOLUME"
+  },
+  "301": {
+   "name": "Music volume in vehicles",
+   "optionType": "MENU_OPTION_SLIDER"
+  },
+  "305": {
+   "name": "Audio output",
+   "optionType": "MENU_OPTION_DISPLAY_SPEAKER_OUTPUT",
+   "pref": "PREF_SPEAKER_OUTPUT"
+  },
+  "306": {
+   "name": "Music volume",
+   "optionType": "MENU_OPTION_SLIDER",
+   "pref": "PREF_MUSIC_VOLUME"
+  },
+  "308": {
+   "name": "Dialogue boost",
+   "optionType": "MENU_OPTION_SLIDER",
+   "pref": "PREF_DIAG_BOOST"
+  },
+  "316": {
+   "name": "Self radio mode"
+  },
+  "317": {
+   "name": "Auto scan for music"
+  },
+  "318": {
+   "name": "Mute audio on focus loss"
+  }
+ },
+ "phoneHome": {
+  "cellphone_ifruit": [
+   {
+    "slot": 0,
+    "gxt": "CELL_5",
+    "label": "Email",
+    "script": "appemail",
+    "overrides": [
+     {
+      "gxt": "CELL_25",
+      "script": "appcontacts",
+      "note": "mission-context override (flag _f58)"
+     }
+    ]
+   },
+   {
+    "slot": 1,
+    "gxt": "CELL_1",
+    "label": "Texts",
+    "script": "apptextmessage"
+   },
+   {
+    "slot": 2,
+    "gxt": "CELL_23",
+    "label": "Checklist",
+    "script": "appchecklist"
+   },
+   {
+    "slot": 3,
+    "gxt": "CELL_16",
+    "label": "Settings",
+    "script": "appsettings"
+   },
+   {
+    "slot": 4,
+    "gxt": "CELL_0",
+    "label": "Contacts",
+    "script": "appcontacts"
+   },
+   {
+    "slot": 5,
+    "gxt": "CELL_32",
+    "label": "Quick Save",
+    "script": null,
+    "note": "script unconfirmed; decomp listed appsettings for both 3 and 5"
+   },
+   {
+    "slot": 6,
+    "gxt": "CELL_7",
+    "label": "Snapmatic",
+    "script": "appcamera"
+   },
+   {
+    "slot": 7,
+    "gxt": "CELL_2",
+    "label": "Internet",
+    "script": "appinternet"
+   },
+   {
+    "slot": 8,
+    "gxt": "CELL_28",
+    "label": "Trackify",
+    "script": "apptrackify",
+    "note": "mission-only slot (flag _f59)"
+   }
+  ],
+  "cellphone_badger": [
+   {
+    "slot": 0,
+    "gxt": "CELL_5",
+    "label": "Email",
+    "script": "appemail",
+    "overrides": [
+     {
+      "gxt": "CELL_25",
+      "script": "appcontacts",
+      "note": "mission-context override (flag _f58)"
+     }
+    ]
+   },
+   {
+    "slot": 1,
+    "gxt": "CELL_1",
+    "label": "Texts",
+    "script": "apptextmessage"
+   },
+   {
+    "slot": 2,
+    "gxt": "CELL_23",
+    "label": "Checklist",
+    "script": "appchecklist"
+   },
+   {
+    "slot": 3,
+    "gxt": "CELL_16",
+    "label": "Settings",
+    "script": "appsettings"
+   },
+   {
+    "slot": 4,
+    "gxt": "CELL_0",
+    "label": "Contacts",
+    "script": "appcontacts"
+   },
+   {
+    "slot": 5,
+    "gxt": "CELL_32",
+    "label": "Quick Save",
+    "script": null,
+    "note": "script unconfirmed; decomp listed appsettings for both 3 and 5"
+   },
+   {
+    "slot": 6,
+    "gxt": "CELL_7",
+    "label": "Snapmatic",
+    "script": "appcamera"
+   },
+   {
+    "slot": 7,
+    "gxt": "CELL_2",
+    "label": "Internet",
+    "script": "appinternet"
+   },
+   {
+    "slot": 8,
+    "gxt": "CELL_28",
+    "label": "Trackify",
+    "script": "apptrackify",
+    "note": "mission-only slot (flag _f59)"
+   }
+  ],
+  "cellphone_facade": [
+   {
+    "slot": 0,
+    "gxt": "CELL_5",
+    "label": "Email",
+    "script": "appemail",
+    "overrides": [
+     {
+      "gxt": "CELL_25",
+      "script": "appcontacts",
+      "note": "mission-context override (flag _f58)"
+     }
+    ]
+   },
+   {
+    "slot": 1,
+    "gxt": "CELL_1",
+    "label": "Texts",
+    "script": "apptextmessage"
+   },
+   {
+    "slot": 2,
+    "gxt": "CELL_23",
+    "label": "Checklist",
+    "script": "appchecklist"
+   },
+   {
+    "slot": 3,
+    "gxt": "CELL_16",
+    "label": "Settings",
+    "script": "appsettings"
+   },
+   {
+    "slot": 4,
+    "gxt": "CELL_0",
+    "label": "Contacts",
+    "script": "appcontacts"
+   },
+   {
+    "slot": 5,
+    "gxt": "CELL_32",
+    "label": "Quick Save",
+    "script": null,
+    "note": "script unconfirmed; decomp listed appsettings for both 3 and 5"
+   },
+   {
+    "slot": 6,
+    "gxt": "CELL_7",
+    "label": "Snapmatic",
+    "script": "appcamera"
+   },
+   {
+    "slot": 7,
+    "gxt": "CELL_2",
+    "label": "Internet",
+    "script": "appinternet"
+   },
+   {
+    "slot": 8,
+    "gxt": "CELL_28",
+    "label": "Trackify",
+    "script": "apptrackify",
+    "note": "mission-only slot (flag _f59)"
+   }
+  ]
+ },
+ "phoneApps": {
+  "appcontacts": "Contacts",
+  "appcamera": "Camera",
+  "appsettings": "Phone Settings",
+  "appemail": "Email",
+  "appchecklist": "Checklist",
+  "apptext": "Messages",
+  "appsms": "Messages",
+  "apptextmessage": "Messages",
+  "appinternet": "Internet",
+  "appmedia": "Media",
+  "apporganiser": "Organizer",
+  "apptrackify": "Trackify",
+  "appsidetask": "Side Task",
+  "appzit": "Zit"
+ },
+ "phoneAppRows": {},
+ "phoneGlobals": {},
+ "settingsXmlMap": {
+  "PREF_GFX_DXVERSION": {
+   "section": "graphics",
+   "key": "DX_Version",
+   "mode": "index"
+  },
+  "PREF_VID_SCREEN_TYPE": {
+   "section": "video",
+   "key": "Windowed",
+   "mode": "index"
+  },
+  "PREF_VID_RESOLUTION": {
+   "section": "video",
+   "key": "ScreenWidth",
+   "mode": "res"
+  },
+  "PREF_VID_ASPECT": {
+   "section": "video",
+   "key": "AspectRatio",
+   "mode": "index"
+  },
+  "PREF_VID_REFRESH": {
+   "section": "video",
+   "key": "RefreshRate",
+   "mode": "number",
+   "unit": "hertz"
+  },
+  "PREF_VID_MONITOR": {
+   "section": "video",
+   "key": "OutputIndex",
+   "mode": "number",
+   "add": 1
+  },
+  "PREF_VID_VSYNC": {
+   "section": "video",
+   "key": "VSync",
+   "mode": "index"
+  },
+  "PREF_VID_PAUSE_ON_FOCUS_LOSS": {
+   "section": "video",
+   "key": "PauseOnFocusLoss",
+   "mode": "index"
+  },
+  "PREF_VID_STEREO": {
+   "section": "video",
+   "key": "Stereo",
+   "mode": "index"
+  },
+  "PREF_GFX_FXAA": {
+   "section": "graphics",
+   "key": "FXAA_Enabled",
+   "mode": "bool"
+  },
+  "PREF_GFX_TXAA": {
+   "section": "graphics",
+   "key": "TXAA_Enabled",
+   "mode": "bool"
+  },
+  "PREF_GFX_MSAA": {
+   "section": "graphics",
+   "key": "MSAA",
+   "mode": "lookup",
+   "lookup": {
+    "0": 0,
+    "2": 1,
+    "4": 2,
+    "8": 3
+   }
+  },
+  "PREF_GFX_REFLECTION_MSAA": {
+   "section": "graphics",
+   "key": "ReflectionMSAA",
+   "mode": "lookup",
+   "lookup": {
+    "0": 0,
+    "2": 1,
+    "4": 2,
+    "8": 3
+   }
+  },
+  "PREF_GFX_ANISOTROPIC_FILTERING": {
+   "section": "graphics",
+   "key": "AnisotropicFiltering",
+   "mode": "lookup",
+   "lookup": {
+    "0": 0,
+    "2": 1,
+    "4": 2,
+    "8": 3,
+    "16": 4
+   }
+  },
+  "PREF_GFX_TEXTURE_QUALITY": {
+   "section": "graphics",
+   "key": "TextureQuality",
+   "mode": "index"
+  },
+  "PREF_GFX_SHADER_QUALITY": {
+   "section": "graphics",
+   "key": "ShaderQuality",
+   "mode": "index"
+  },
+  "PREF_GFX_SHADOW_QUALITY": {
+   "section": "graphics",
+   "key": "ShadowQuality",
+   "mode": "index"
+  },
+  "PREF_GFX_REFLECTION_QUALITY": {
+   "section": "graphics",
+   "key": "ReflectionQuality",
+   "mode": "index"
+  },
+  "PREF_GFX_WATER_QUALITY": {
+   "section": "graphics",
+   "key": "WaterQuality",
+   "mode": "index"
+  },
+  "PREF_GFX_PARTICLES_QUALITY": {
+   "section": "graphics",
+   "key": "ParticleQuality",
+   "mode": "index"
+  },
+  "PREF_GFX_GRASS_QUALITY": {
+   "section": "graphics",
+   "key": "GrassQuality",
+   "mode": "index"
+  },
+  "PREF_GFX_AMBIENT_OCCLUSION": {
+   "section": "graphics",
+   "key": "SSAO",
+   "mode": "index"
+  },
+  "PREF_GFX_TESSELLATION": {
+   "section": "graphics",
+   "key": "Tessellation",
+   "mode": "index"
+  },
+  "PREF_GFX_POST_FX": {
+   "section": "graphics",
+   "key": "PostFX",
+   "mode": "index"
+  },
+  "PREF_GFX_DOF": {
+   "section": "graphics",
+   "key": "DoF",
+   "mode": "bool"
+  },
+  "PREF_GFX_CITY_DENSITY": {
+   "section": "graphics",
+   "key": "CityDensity",
+   "mode": "pct"
+  },
+  "PREF_GFX_POP_VARIETY": {
+   "section": "graphics",
+   "key": "PedVarietyMultiplier",
+   "mode": "pct"
+  },
+  "PREF_GFX_DIST_SCALE": {
+   "section": "graphics",
+   "key": "LodScale",
+   "mode": "pct"
+  },
+  "PREF_GFX_MB_STRENGTH": {
+   "section": "graphics",
+   "key": "MotionBlurStrength",
+   "mode": "pct"
+  },
+  "PREF_ADV_GFX_LONG_SHADOWS": {
+   "section": "graphics",
+   "key": "Shadow_LongShadows",
+   "mode": "bool"
+  },
+  "PREF_ADV_GFX_ULTRA_SHADOWS": {
+   "section": "graphics",
+   "key": "UltraShadows_Enabled",
+   "mode": "bool"
+  },
+  "PREF_ADV_GFX_HD_FLIGHT": {
+   "section": "graphics",
+   "key": "HdStreamingInFlight",
+   "mode": "bool"
+  },
+  "PREF_ADV_GFX_MAX_LOD": {
+   "section": "graphics",
+   "key": "MaxLodScale",
+   "mode": "pct"
+  },
+  "PREF_ADV_GFX_SHADOWS_DIST_MULT": {
+   "section": "graphics",
+   "key": "Shadow_Distance",
+   "mode": "pct"
+  }
+ }
+}

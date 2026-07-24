@@ -1,0 +1,1103 @@
+{
+  "comment": "Hand-maintained overrides merged LAST by build-menulabels.py. Survives regeneration. Row status: assumed (generator default) | verified (runtime-confirmed) | refuted. Add rows here to pin uid->label bindings as menulog evidence accumulates.",
+  "rows": [
+    {
+      "menuId": 51,
+      "uniqueId": 8,
+      "status": "verified",
+      "evidence": "menulog 2026-07-18: audio pane traversal; pref enum PREF_SFX_VOLUME=8",
+      "pref": "PREF_SFX_VOLUME",
+      "screenMenuId": 22,
+      "ord": 0,
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 9,
+      "status": "verified",
+      "evidence": "menulog 2026-07-18: audio pane traversal; pref enum PREF_MUSIC_VOLUME=9",
+      "pref": "PREF_MUSIC_VOLUME",
+      "screenMenuId": 22,
+      "ord": 1,
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 11,
+      "status": "verified",
+      "evidence": "menulog 2026-07-18-213220: Speaker Output change committed profile id 305 (Audio output 0->2)",
+      "pref": "PREF_SPEAKER_OUTPUT",
+      "screenMenuId": 22,
+      "ord": 6,
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 43,
+      "status": "verified",
+      "evidence": "pref enum PREF_DIAG_BOOST=43, audio pane traversal",
+      "pref": "PREF_DIAG_BOOST",
+      "screenMenuId": 22,
+      "ord": 2,
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 13,
+      "pref": "PREF_RADIO_STATION",
+      "screenMenuId": 22,
+      "ord": 3,
+      "evidence": "align-panes.py settled s(h), pane 22, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 173,
+      "pref": "PREF_UR_PLAYMODE",
+      "screenMenuId": 22,
+      "ord": 4,
+      "evidence": "align-panes.py settled s(h), pane 22, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 174,
+      "pref": "PREF_UR_AUTOSCAN",
+      "screenMenuId": 22,
+      "ord": 5,
+      "evidence": "align-panes.py settled s(h), pane 22, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 45,
+      "pref": "PREF_SS_FRONT",
+      "screenMenuId": 22,
+      "ord": 7,
+      "evidence": "align-panes.py settled s(h), pane 22, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 46,
+      "pref": "PREF_SS_REAR",
+      "screenMenuId": 22,
+      "ord": 8,
+      "evidence": "align-panes.py settled s(h), pane 22, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 175,
+      "pref": "PREF_AUDIO_MUTE_ON_FOCUS_LOSS",
+      "screenMenuId": 22,
+      "ord": 9,
+      "evidence": "align-panes.py settled s(h), pane 22, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 48,
+      "pref": "PREF_CONTROLS_CONTEXT",
+      "screenMenuId": 24,
+      "ord": 0,
+      "evidence": "align-panes.py settled s(h), pane 24, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 4,
+      "pref": "PREF_TARGET_CONFIG",
+      "screenMenuId": 24,
+      "ord": 1,
+      "evidence": "align-panes.py settled s(h), pane 24, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 3,
+      "pref": "PREF_VIBRATION",
+      "screenMenuId": 24,
+      "ord": 2,
+      "evidence": "align-panes.py settled s(h), pane 24, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 5,
+      "pref": "PREF_INVERT_LOOK",
+      "screenMenuId": 24,
+      "ord": 3,
+      "evidence": "align-panes.py settled s(h), pane 24, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 0,
+      "pref": "PREF_CONTROL_CONFIG",
+      "screenMenuId": 24,
+      "ord": 4,
+      "evidence": "align-panes.py settled s(h), pane 24, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 1,
+      "pref": "PREF_CONTROL_CONFIG_FPS",
+      "screenMenuId": 24,
+      "ord": 5,
+      "evidence": "align-panes.py settled s(h), pane 24, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 6,
+      "pref": "PREF_CONTROLLER_SENSITIVITY",
+      "screenMenuId": 24,
+      "ord": 6,
+      "evidence": "align-panes.py settled s(h), pane 24, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 127,
+      "pref": "PREF_FPS_LOOK_SENSITIVITY",
+      "screenMenuId": 24,
+      "ord": 7,
+      "evidence": "align-panes.py settled s(h), pane 24, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 128,
+      "pref": "PREF_FPS_AIM_SENSITIVITY",
+      "screenMenuId": 24,
+      "ord": 8,
+      "evidence": "align-panes.py settled s(h), pane 24, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 140,
+      "pref": "PREF_LOOK_AROUND_SENSITIVITY",
+      "screenMenuId": 24,
+      "ord": 9,
+      "evidence": "align-panes.py settled s(h), pane 24, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 131,
+      "pref": "PREF_AIM_DEADZONE",
+      "screenMenuId": 24,
+      "ord": 10,
+      "evidence": "align-panes.py settled s(h), pane 24, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 129,
+      "pref": "PREF_FPS_AIM_DEADZONE",
+      "screenMenuId": 24,
+      "ord": 11,
+      "evidence": "align-panes.py settled s(h), pane 24, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 132,
+      "pref": "PREF_AIM_ACCELERATION",
+      "screenMenuId": 24,
+      "ord": 12,
+      "evidence": "align-panes.py settled s(h), pane 24, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 130,
+      "pref": "PREF_FPS_AIM_ACCELERATION",
+      "screenMenuId": 24,
+      "ord": 13,
+      "evidence": "align-panes.py settled s(h), pane 24, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 47,
+      "pref": "PREF_SNIPER_ZOOM",
+      "screenMenuId": 24,
+      "ord": 14,
+      "evidence": "align-panes.py settled s(h), pane 24, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 170,
+      "pref": "PREF_ALTERNATE_HANDBRAKE",
+      "screenMenuId": 24,
+      "ord": 15,
+      "evidence": "align-panes.py settled s(h), pane 24, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 171,
+      "pref": "PREF_ALTERNATE_DRIVEBY",
+      "screenMenuId": 24,
+      "ord": 16,
+      "evidence": "align-panes.py settled s(h), pane 24, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 96,
+      "pref": "PREF_GFX_VID_OVERRIDE",
+      "screenMenuId": 137,
+      "ord": 0,
+      "evidence": "align-panes.py settled s(h), pane 137, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 67,
+      "pref": "PREF_GFX_DXVERSION",
+      "screenMenuId": 137,
+      "ord": 1,
+      "evidence": "align-panes.py settled s(h), pane 137, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 56,
+      "pref": "PREF_VID_SCREEN_TYPE",
+      "screenMenuId": 137,
+      "ord": 2,
+      "evidence": "align-panes.py settled s(h), pane 137, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 57,
+      "pref": "PREF_VID_RESOLUTION",
+      "screenMenuId": 137,
+      "ord": 3,
+      "evidence": "align-panes.py settled s(h), pane 137, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 61,
+      "pref": "PREF_VID_ASPECT",
+      "screenMenuId": 137,
+      "ord": 4,
+      "evidence": "align-panes.py settled s(h), pane 137, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 58,
+      "pref": "PREF_VID_REFRESH",
+      "screenMenuId": 137,
+      "ord": 5,
+      "evidence": "align-panes.py settled s(h), pane 137, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 60,
+      "pref": "PREF_VID_MONITOR",
+      "screenMenuId": 137,
+      "ord": 6,
+      "evidence": "align-panes.py settled s(h), pane 137, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 79,
+      "pref": "PREF_GFX_FXAA",
+      "screenMenuId": 137,
+      "ord": 7,
+      "evidence": "align-panes.py settled s(h), pane 137, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 80,
+      "pref": "PREF_GFX_MSAA",
+      "screenMenuId": 137,
+      "ord": 8,
+      "evidence": "align-panes.py settled s(h), pane 137, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 82,
+      "pref": "PREF_GFX_TXAA",
+      "screenMenuId": 137,
+      "ord": 9,
+      "evidence": "align-panes.py settled s(h), pane 137, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 62,
+      "pref": "PREF_VID_VSYNC",
+      "screenMenuId": 137,
+      "ord": 10,
+      "evidence": "align-panes.py settled s(h), pane 137, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 66,
+      "pref": "PREF_VID_PAUSE_ON_FOCUS_LOSS",
+      "screenMenuId": 137,
+      "ord": 11,
+      "evidence": "align-panes.py settled s(h), pane 137, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 77,
+      "pref": "PREF_GFX_CITY_DENSITY",
+      "screenMenuId": 137,
+      "ord": 12,
+      "evidence": "align-panes.py settled s(h), pane 137, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 78,
+      "pref": "PREF_GFX_POP_VARIETY",
+      "screenMenuId": 137,
+      "ord": 13,
+      "evidence": "align-panes.py settled s(h), pane 137, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 89,
+      "pref": "PREF_GFX_DIST_SCALE",
+      "screenMenuId": 137,
+      "ord": 14,
+      "evidence": "align-panes.py settled s(h), pane 137, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 68,
+      "pref": "PREF_GFX_TEXTURE_QUALITY",
+      "screenMenuId": 137,
+      "ord": 15,
+      "evidence": "align-panes.py settled s(h), pane 137, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 69,
+      "pref": "PREF_GFX_SHADER_QUALITY",
+      "screenMenuId": 137,
+      "ord": 16,
+      "evidence": "align-panes.py settled s(h), pane 137, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 70,
+      "pref": "PREF_GFX_SHADOW_QUALITY",
+      "screenMenuId": 137,
+      "ord": 17,
+      "evidence": "align-panes.py settled s(h), pane 137, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 71,
+      "pref": "PREF_GFX_REFLECTION_QUALITY",
+      "screenMenuId": 137,
+      "ord": 18,
+      "evidence": "align-panes.py settled s(h), pane 137, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 72,
+      "pref": "PREF_GFX_REFLECTION_MSAA",
+      "screenMenuId": 137,
+      "ord": 19,
+      "evidence": "align-panes.py settled s(h), pane 137, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 73,
+      "pref": "PREF_GFX_WATER_QUALITY",
+      "screenMenuId": 137,
+      "ord": 20,
+      "evidence": "align-panes.py settled s(h), pane 137, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 74,
+      "pref": "PREF_GFX_PARTICLES_QUALITY",
+      "screenMenuId": 137,
+      "ord": 21,
+      "evidence": "align-panes.py settled s(h), pane 137, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 75,
+      "pref": "PREF_GFX_GRASS_QUALITY",
+      "screenMenuId": 137,
+      "ord": 22,
+      "evidence": "align-panes.py settled s(h), pane 137, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 76,
+      "pref": "PREF_GFX_SHADOW_SOFTNESS",
+      "screenMenuId": 137,
+      "ord": 23,
+      "evidence": "align-panes.py settled s(h), pane 137, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 86,
+      "pref": "PREF_GFX_POST_FX",
+      "screenMenuId": 137,
+      "ord": 24,
+      "evidence": "align-panes.py settled s(h), pane 137, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 88,
+      "pref": "PREF_GFX_MB_STRENGTH",
+      "screenMenuId": 137,
+      "ord": 25,
+      "evidence": "align-panes.py settled s(h), pane 137, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 83,
+      "pref": "PREF_GFX_ANISOTROPIC_FILTERING",
+      "screenMenuId": 137,
+      "ord": 26,
+      "evidence": "align-panes.py settled s(h), pane 137, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 84,
+      "pref": "PREF_GFX_AMBIENT_OCCLUSION",
+      "screenMenuId": 137,
+      "ord": 27,
+      "evidence": "align-panes.py settled s(h), pane 137, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 85,
+      "pref": "PREF_GFX_TESSELLATION",
+      "screenMenuId": 137,
+      "ord": 28,
+      "evidence": "align-panes.py settled s(h), pane 137, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 91,
+      "pref": "PREF_ADV_GFX_ULTRA_SHADOWS",
+      "screenMenuId": 138,
+      "evidence": "pane-138 rooting: chain[0]=91 is row 1 (activation focus emits no selection event); cycle predecessor 90 is row 0. Cross-checked against XML(138) ADV_GFX order. menulog-2026-07-20-134947.log",
+      "status": "verified",
+      "keyConfidence": "confirmed",
+      "ord": 1
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 92,
+      "pref": "PREF_ADV_GFX_HD_FLIGHT",
+      "screenMenuId": 138,
+      "evidence": "pane-138 rooting: chain[0]=91 is row 1 (activation focus emits no selection event); cycle predecessor 90 is row 0. Cross-checked against XML(138) ADV_GFX order. menulog-2026-07-20-134947.log",
+      "status": "verified",
+      "keyConfidence": "confirmed",
+      "ord": 2
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 93,
+      "pref": "PREF_ADV_GFX_MAX_LOD",
+      "screenMenuId": 138,
+      "evidence": "pane-138 rooting: chain[0]=91 is row 1 (activation focus emits no selection event); cycle predecessor 90 is row 0. Cross-checked against XML(138) ADV_GFX order. menulog-2026-07-20-134947.log",
+      "status": "verified",
+      "keyConfidence": "confirmed",
+      "ord": 3
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 94,
+      "pref": "PREF_ADV_GFX_SHADOWS_DIST_MULT",
+      "screenMenuId": 138,
+      "evidence": "pane-138 rooting: chain[0]=91 is row 1 (activation focus emits no selection event); cycle predecessor 90 is row 0. Cross-checked against XML(138) ADV_GFX order. menulog-2026-07-20-134947.log",
+      "status": "verified",
+      "keyConfidence": "confirmed",
+      "ord": 4
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 81,
+      "pref": "PREF_GFX_SCALING",
+      "screenMenuId": 138,
+      "evidence": "pane-138 rooting: chain[0]=91 is row 1 (activation focus emits no selection event); cycle predecessor 90 is row 0. Cross-checked against XML(138) ADV_GFX order. menulog-2026-07-20-134947.log",
+      "status": "verified",
+      "keyConfidence": "confirmed",
+      "ord": 5
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 90,
+      "pref": "PREF_ADV_GFX_LONG_SHADOWS",
+      "screenMenuId": 138,
+      "evidence": "pane-138 rooting: chain[0]=91 is row 1 (activation focus emits no selection event); cycle predecessor 90 is row 0. Cross-checked against XML(138) ADV_GFX order. menulog-2026-07-20-134947.log",
+      "status": "verified",
+      "keyConfidence": "confirmed",
+      "ord": 0
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 112,
+      "pref": "PREF_MOUSE_TYPE",
+      "screenMenuId": 140,
+      "ord": 0,
+      "evidence": "align-panes.py settled s(h), pane 140, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 116,
+      "pref": "PREF_MOUSE_ON_FOOT_SCALE",
+      "screenMenuId": 140,
+      "ord": 1,
+      "evidence": "align-panes.py settled s(h), pane 140, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 121,
+      "pref": "PREF_MOUSE_WEIGHT_SCALE",
+      "screenMenuId": 140,
+      "ord": 2,
+      "evidence": "align-panes.py settled s(h), pane 140, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 122,
+      "pref": "PREF_MOUSE_ACCELERATION",
+      "screenMenuId": 140,
+      "ord": 3,
+      "evidence": "align-panes.py settled s(h), pane 140, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 141,
+      "pref": "PREF_INVERT_MOUSE",
+      "screenMenuId": 140,
+      "ord": 4,
+      "evidence": "align-panes.py settled s(h), pane 140, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 123,
+      "pref": "PREF_KBM_TOGGLE_AIM",
+      "screenMenuId": 140,
+      "ord": 5,
+      "evidence": "align-panes.py settled s(h), pane 140, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 179,
+      "pref": "PREF_FPS_DEFAULT_AIM_TYPE",
+      "screenMenuId": 140,
+      "ord": 6,
+      "evidence": "align-panes.py settled s(h), pane 140, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 113,
+      "pref": "PREF_MOUSE_DRIVE",
+      "screenMenuId": 140,
+      "ord": 7,
+      "evidence": "align-panes.py settled s(h), pane 140, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 114,
+      "pref": "PREF_MOUSE_FLY",
+      "screenMenuId": 140,
+      "ord": 8,
+      "evidence": "align-panes.py settled s(h), pane 140, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 115,
+      "pref": "PREF_MOUSE_SUB",
+      "screenMenuId": 140,
+      "ord": 9,
+      "evidence": "align-panes.py settled s(h), pane 140, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 117,
+      "pref": "PREF_MOUSE_DRIVING_SCALE",
+      "screenMenuId": 140,
+      "ord": 10,
+      "evidence": "align-panes.py settled s(h), pane 140, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 118,
+      "pref": "PREF_MOUSE_PLANE_SCALE",
+      "screenMenuId": 140,
+      "ord": 11,
+      "evidence": "align-panes.py settled s(h), pane 140, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 119,
+      "pref": "PREF_MOUSE_HELI_SCALE",
+      "screenMenuId": 140,
+      "ord": 12,
+      "evidence": "align-panes.py settled s(h), pane 140, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 120,
+      "pref": "PREF_MOUSE_SUB_SCALE",
+      "screenMenuId": 140,
+      "ord": 13,
+      "evidence": "align-panes.py settled s(h), pane 140, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 142,
+      "pref": "PREF_INVERT_MOUSE_FLYING",
+      "screenMenuId": 140,
+      "ord": 14,
+      "evidence": "align-panes.py settled s(h), pane 140, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 143,
+      "pref": "PREF_INVERT_MOUSE_SUB",
+      "screenMenuId": 140,
+      "ord": 15,
+      "evidence": "align-panes.py settled s(h), pane 140, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 144,
+      "pref": "PREF_SWAP_ROLL_YAW_MOUSE_FLYING",
+      "screenMenuId": 140,
+      "ord": 16,
+      "evidence": "align-panes.py settled s(h), pane 140, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 145,
+      "pref": "PREF_MOUSE_AUTOCENTER_BIKE",
+      "screenMenuId": 140,
+      "ord": 17,
+      "evidence": "align-panes.py settled s(h), pane 140, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 146,
+      "pref": "PREF_MOUSE_AUTOCENTER_CAR",
+      "screenMenuId": 140,
+      "ord": 18,
+      "evidence": "align-panes.py settled s(h), pane 140, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    },
+    {
+      "menuId": 51,
+      "uniqueId": 147,
+      "pref": "PREF_MOUSE_AUTOCENTER_PLANE",
+      "screenMenuId": 140,
+      "ord": 19,
+      "evidence": "align-panes.py settled s(h), pane 140, menulog-2026-07-20-134947.log, menulog-2026-07-20-222901.log",
+      "status": "verified",
+      "keyConfidence": "confirmed"
+    }
+  ],
+  "profilePrefs": {
+    "203": {
+      "name": "Subtitles"
+    },
+    "204": {
+      "name": "Radar"
+    },
+    "205": {
+      "name": "HUD"
+    },
+    "206": {
+      "name": "Language"
+    },
+    "207": {
+      "name": "GPS route"
+    },
+    "213": {
+      "name": "Brightness"
+    },
+    "220": {
+      "name": "Vehicle Camera Height",
+      "pref": "PREF_CAMERA_HEIGHT",
+      "note": "medium conf: committed on close alongside uid 17 traversal (2026-07-18/20); confirm in-game"
+    },
+    "221": {
+      "name": "Expanded radar"
+    },
+    "222": {
+      "name": "Player overhead display"
+    },
+    "226": {
+      "name": "Screen kill effects"
+    },
+    "227": {
+      "name": "Measurement system"
+    },
+    "300": {
+      "name": "Sound effects volume",
+      "optionType": "MENU_OPTION_SLIDER",
+      "pref": "PREF_SFX_VOLUME"
+    },
+    "301": {
+      "name": "Music volume in vehicles",
+      "optionType": "MENU_OPTION_SLIDER"
+    },
+    "305": {
+      "name": "Audio output",
+      "optionType": "MENU_OPTION_DISPLAY_SPEAKER_OUTPUT",
+      "pref": "PREF_SPEAKER_OUTPUT"
+    },
+    "306": {
+      "name": "Music volume",
+      "optionType": "MENU_OPTION_SLIDER",
+      "pref": "PREF_MUSIC_VOLUME"
+    },
+    "308": {
+      "name": "Dialogue boost",
+      "optionType": "MENU_OPTION_SLIDER",
+      "pref": "PREF_DIAG_BOOST"
+    },
+    "316": {
+      "name": "Self radio mode"
+    },
+    "317": {
+      "name": "Auto scan for music"
+    },
+    "318": {
+      "name": "Mute audio on focus loss"
+    }
+  },
+  "optionValues": {
+    "_comment": "Value orders pinned from data/calibration. SPEAKER_OUTPUT is the game's commented fallback order (MO_TVOUTP/MO_SPEAKERS/MO_SHEAD); confirm indices in-game.",
+    "MENU_OPTION_DISPLAY_SPEAKER_OUTPUT": [
+      "MO_TVOUTP",
+      "MO_SPEAKERS",
+      "MO_SHEAD"
+    ]
+  },
+  "settingsXmlMap": {
+    "_comment": "PREF_* -> settings.xml. See build-menulabels.py v4 notes. Modes: index|lookup|bool|pct|number|res.",
+    "PREF_GFX_DXVERSION": {
+      "section": "graphics",
+      "key": "DX_Version",
+      "mode": "index"
+    },
+    "PREF_VID_SCREEN_TYPE": {
+      "section": "video",
+      "key": "Windowed",
+      "mode": "index"
+    },
+    "PREF_VID_RESOLUTION": {
+      "section": "video",
+      "key": "ScreenWidth",
+      "mode": "res"
+    },
+    "PREF_VID_ASPECT": {
+      "section": "video",
+      "key": "AspectRatio",
+      "mode": "index"
+    },
+    "PREF_VID_REFRESH": {
+      "section": "video",
+      "key": "RefreshRate",
+      "mode": "number",
+      "unit": "hertz"
+    },
+    "PREF_VID_MONITOR": {
+      "section": "video",
+      "key": "OutputIndex",
+      "mode": "number",
+      "add": 1
+    },
+    "PREF_VID_VSYNC": {
+      "section": "video",
+      "key": "VSync",
+      "mode": "index"
+    },
+    "PREF_VID_PAUSE_ON_FOCUS_LOSS": {
+      "section": "video",
+      "key": "PauseOnFocusLoss",
+      "mode": "index"
+    },
+    "PREF_VID_STEREO": {
+      "section": "video",
+      "key": "Stereo",
+      "mode": "index"
+    },
+    "PREF_GFX_FXAA": {
+      "section": "graphics",
+      "key": "FXAA_Enabled",
+      "mode": "bool"
+    },
+    "PREF_GFX_TXAA": {
+      "section": "graphics",
+      "key": "TXAA_Enabled",
+      "mode": "bool"
+    },
+    "PREF_GFX_MSAA": {
+      "section": "graphics",
+      "key": "MSAA",
+      "mode": "lookup",
+      "lookup": {
+        "0": 0,
+        "2": 1,
+        "4": 2,
+        "8": 3
+      }
+    },
+    "PREF_GFX_REFLECTION_MSAA": {
+      "section": "graphics",
+      "key": "ReflectionMSAA",
+      "mode": "lookup",
+      "lookup": {
+        "0": 0,
+        "2": 1,
+        "4": 2,
+        "8": 3
+      }
+    },
+    "PREF_GFX_ANISOTROPIC_FILTERING": {
+      "section": "graphics",
+      "key": "AnisotropicFiltering",
+      "mode": "lookup",
+      "lookup": {
+        "0": 0,
+        "2": 1,
+        "4": 2,
+        "8": 3,
+        "16": 4
+      }
+    },
+    "PREF_GFX_TEXTURE_QUALITY": {
+      "section": "graphics",
+      "key": "TextureQuality",
+      "mode": "index"
+    },
+    "PREF_GFX_SHADER_QUALITY": {
+      "section": "graphics",
+      "key": "ShaderQuality",
+      "mode": "index"
+    },
+    "PREF_GFX_SHADOW_QUALITY": {
+      "section": "graphics",
+      "key": "ShadowQuality",
+      "mode": "index"
+    },
+    "PREF_GFX_REFLECTION_QUALITY": {
+      "section": "graphics",
+      "key": "ReflectionQuality",
+      "mode": "index"
+    },
+    "PREF_GFX_WATER_QUALITY": {
+      "section": "graphics",
+      "key": "WaterQuality",
+      "mode": "index"
+    },
+    "PREF_GFX_PARTICLES_QUALITY": {
+      "section": "graphics",
+      "key": "ParticleQuality",
+      "mode": "index"
+    },
+    "PREF_GFX_GRASS_QUALITY": {
+      "section": "graphics",
+      "key": "GrassQuality",
+      "mode": "index"
+    },
+    "PREF_GFX_AMBIENT_OCCLUSION": {
+      "section": "graphics",
+      "key": "SSAO",
+      "mode": "index"
+    },
+    "PREF_GFX_TESSELLATION": {
+      "section": "graphics",
+      "key": "Tessellation",
+      "mode": "index"
+    },
+    "PREF_GFX_POST_FX": {
+      "section": "graphics",
+      "key": "PostFX",
+      "mode": "index"
+    },
+    "PREF_GFX_DOF": {
+      "section": "graphics",
+      "key": "DoF",
+      "mode": "bool"
+    },
+    "PREF_GFX_CITY_DENSITY": {
+      "section": "graphics",
+      "key": "CityDensity",
+      "mode": "pct"
+    },
+    "PREF_GFX_POP_VARIETY": {
+      "section": "graphics",
+      "key": "PedVarietyMultiplier",
+      "mode": "pct"
+    },
+    "PREF_GFX_DIST_SCALE": {
+      "section": "graphics",
+      "key": "LodScale",
+      "mode": "pct"
+    },
+    "PREF_GFX_MB_STRENGTH": {
+      "section": "graphics",
+      "key": "MotionBlurStrength",
+      "mode": "pct"
+    },
+    "PREF_ADV_GFX_LONG_SHADOWS": {
+      "section": "graphics",
+      "key": "Shadow_LongShadows",
+      "mode": "bool"
+    },
+    "PREF_ADV_GFX_ULTRA_SHADOWS": {
+      "section": "graphics",
+      "key": "UltraShadows_Enabled",
+      "mode": "bool"
+    },
+    "PREF_ADV_GFX_HD_FLIGHT": {
+      "section": "graphics",
+      "key": "HdStreamingInFlight",
+      "mode": "bool"
+    },
+    "PREF_ADV_GFX_MAX_LOD": {
+      "section": "graphics",
+      "key": "MaxLodScale",
+      "mode": "pct"
+    },
+    "PREF_ADV_GFX_SHADOWS_DIST_MULT": {
+      "section": "graphics",
+      "key": "Shadow_Distance",
+      "mode": "pct"
+    }
+  },
+  "phoneAppRows": {
+    "_comment": "phone app script -> ordered in-app row labels. Populated from the gxt-dump + reader-unmapped-phone harvest; EMPTY means every in-app row still speaks 'row N' (honest fallback)."
+  },
+  "phoneGlobals": {
+    "_comment": "Pinned char-sheet/row-map bases for PhoneGlobals.cs, from a phone-globals log line. Absent => runtime signature scan."
+  }
+}

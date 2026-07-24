@@ -57,6 +57,10 @@ driveassist-*.log
 triage/
 tools/log-index.json
 
+# Tooling scratch: cached game files + generated suggestion dumps
+tools/_cache/
+tools/_align_suggestions.json
+
 # Map-data build inputs and archives (large / regenerable via CodeWalker)
 navmesh_exports/
 *.7z

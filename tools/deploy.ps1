@@ -106,6 +106,7 @@ if ($IncludeData) {
         "scripts\gta11y-map.json"          = "gta11y-map.json"
         "scripts\gta11y-nodes.json.gz"     = "gta11y-nodes.json.gz"
         "scripts\gta11y-junctions.json.gz" = "gta11y-junctions.json.gz"
+        "scripts\gta11y-menulabels.json"   = "gta11y-menulabels.json"
         "vehicleaihandlinginfo.meta"       = "vehicleaihandlinginfo.meta"
     }
     foreach ($rel in $dataMap.Keys) {
