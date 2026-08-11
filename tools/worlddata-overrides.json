@@ -1,0 +1,31 @@
+{
+  "_README": [
+    "Hand overrides for build-worlddata.py. Merged LAST, so edits here survive every",
+    "regeneration. Never hand-edit GTA/scripts/gta11y-worlddata.json — it is generated.",
+    "",
+    "Same provenance model as menulabels-overrides.json: every row carries a status and",
+    "the evidence that justifies it.",
+    "  status: 'verified' — confirmed in-game or from a second source. Wins outright.",
+    "          'assumed'  — a considered guess. Ships, but is flagged as such.",
+    "          'refuted'  — the harvested row is wrong; this REMOVES it.",
+    "  evidence: free text naming what proved it (a session date, a script + line, a",
+    "            second dump). Rows without evidence are hard to re-audit later.",
+    "",
+    "Shapes, per section (collectibles | areas | places | interactions):",
+    "  {\"match\": {<field>: <value>, ...}, \"set\": {<field>: <value>, ...},",
+    "   \"status\": ..., \"evidence\": ...}          — edit harvested rows in place",
+    "  {\"append\": {<full row>}, \"status\": ..., \"evidence\": ...}   — add a new row",
+    "  {\"id\": \"<id>\", \"status\": \"refuted\", \"evidence\": ...}      — drop a row",
+    "",
+    "The most likely thing you will want to pin here: names for the four restricted-area",
+    "groups the harvester leaves unnamed (area_1, area_6, area_7, area_8). Until then the",
+    "runtime speaks GET_NAME_OF_ZONE for them, which is honest but vague. Confirm what",
+    "each one actually is in-game before naming it — a wrong name on a hazard warning is",
+    "worse than no name."
+  ],
+
+  "collectibles": [],
+  "areas": [],
+  "places": [],
+  "interactions": []
+}

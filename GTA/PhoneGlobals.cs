@@ -40,8 +40,16 @@ namespace GrandTheftAccessibility
 
         // Known bases (iFruitJailbreak ini): 1.72 / 1.73. Tried first, then the
         // pinned overrides, then the signature scan.
+        //
+        // v1.5: the row-map order is REVERSED. appcontacts.c line 9298 in the
+        // decompiled corpus reads `Global_8817 = Global_21655[iLocal_95];` — the
+        // selection index goes through 21655, not 21616. v1.4 tried 21616 first
+        // and LooksLikeRowMap was too weak to reject it, so the reader locked onto
+        // the wrong array: the 08-01 dump shows rows 0 and 2 both mapping to slot
+        // 177 and rows 3 and 4 both to 179, and the 08-03 walk duly spoke the same
+        // contact twice in a row on a monotone descent.
         private static readonly int[] CharSheetCandidates = { 2339, 2349 };
-        private static readonly int[] RowMapCandidates = { 21616, 21655 };
+        private static readonly int[] RowMapCandidates = { 21655, 21616 };
         // Scan windows. GTA allocates script globals in blocks of 0x40000 entries,
         // so everything below ~262000 lives in block 0 and is always mapped —
         // which is why these sweeps neither throw (an exception per probe would
@@ -71,13 +79,17 @@ namespace GrandTheftAccessibility
         private static Action<string> scanLog = null;
         private static int candidatesLogged = 0;
 
-        // Store-sweep (Texts / Email) state — log-only, never spoken.
-        private static string sweepScript = null;
-        private static int sweepBase = 0;
-        private static int sweepHits = 0;
-        private const int SweepLo = 1000, SweepHi = 40000;
+        // Row-map trust guard (v1.5). A correct map never returns the same contact
+        // for two ADJACENT rows; a mis-located one does it constantly. One hit is
+        // logged and tolerated (two contacts really can share a name), the second
+        // demotes the whole channel to "row N" — an honest index beats a confident
+        // wrong name.
+        private static int lastRow = int.MinValue;
+        private static string lastName = null;
+        private static int adjacentDupes = 0;
+        private static bool rowMapDistrusted = false;
 
-        public static bool Ok { get { return ok; } }
+        public static bool Ok { get { return ok && !rowMapDistrusted; } }
 
         /// <summary>Locate + validate the char sheet and row map. Idempotent;
         /// starts a resumable scan when nothing is pinned. Safe reads only.</summary>
@@ -220,21 +232,91 @@ namespace GrandTheftAccessibility
             }
         }
 
-        public static bool TryContactName(int row, out string name)
+        /// <summary>Spoken name for a contacts-list row, or false to fall back to
+        /// "row N". The char sheet stores a TEXT_LABEL — a GXT KEY, not display
+        /// text (appcontacts.c reads it as `Global_2349[i].f_3` and hands it to the
+        /// scaleform, which localizes on the way in). v1.4 returned the key and the
+        /// reader said "CELL_FRANKLIN_N" out loud 59 times across three sessions.
+        /// </summary>
+        public static bool TryContactName(int row, out string name, Action<string> log)
         {
             name = null;
-            if (!ok || errors >= 10 || row < 0) return false;
+            if (!Ok || errors >= 10 || row < 0) return false;
             try
             {
                 if (!RangeAllocated(rowMapBase, 1, row + 1)) return false;
                 int slot = GlobalVariable.Get(rowMapBase).GetArrayItem(row, 1).Read<int>();
                 if (slot < 0 || slot >= ExpectedCount) return false;
-                string s = SlotName(charSheetBase, stride, slot);
-                if (!IsPrintableName(s)) return false;
-                name = s;
+                string raw = SlotName(charSheetBase, stride, slot);
+                if (!IsPrintableName(raw)) return false;
+
+                string spoken;
+                if (LooksLikeLabelKey(raw))
+                {
+                    // A key that does not resolve is never spoken: it is an id, and
+                    // an id tells a blind user strictly less than "row 3" does.
+                    spoken = MenuLabelDb.ResolveGxt(raw);
+                    if (spoken == null)
+                    {
+                        if (log != null) log("EVENT phone-name-unresolved: row=" + row
+                            + " slot=" + slot + " key=" + raw);
+                        return false;
+                    }
+                }
+                else
+                {
+                    // Some build could store the literal. Accept it only when it
+                    // actually reads as words rather than as an identifier.
+                    spoken = raw;
+                }
+
+                if (!TrustRow(row, spoken, slot, log)) return false;
+                name = spoken;
                 return true;
             }
             catch { errors++; return false; }
+        }
+
+        /// <summary>Adjacent-duplicate detector for the row map. Returns false once
+        /// the channel has been demoted.</summary>
+        private static bool TrustRow(int row, string spoken, int slot, Action<string> log)
+        {
+            if (lastName != null && Math.Abs(row - lastRow) == 1
+                && string.Equals(spoken, lastName, StringComparison.Ordinal))
+            {
+                adjacentDupes++;
+                if (log != null) log("EVENT phone-rowmap-suspect: row=" + row
+                    + " prevRow=" + lastRow + " slot=" + slot
+                    + " name=\"" + spoken + "\" n=" + adjacentDupes
+                    + " rowMapBase=" + rowMapBase);
+                if (adjacentDupes >= 2)
+                {
+                    rowMapDistrusted = true;
+                    if (log != null) log("EVENT phone-rowmap-distrusted: rowMapBase=" + rowMapBase
+                        + " -- falling back to row N");
+                    return false;
+                }
+            }
+            lastRow = row;
+            lastName = spoken;
+            return true;
+        }
+
+        /// <summary>GXT-key shape: upper-case letters, digits and underscores only,
+        /// and at least one underscore. Distinguishes "CELL_FRANKLIN_N" (an id to
+        /// localize) from "Franklin" (already display text).</summary>
+        private static bool LooksLikeLabelKey(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return false;
+            bool underscore = false;
+            foreach (char c in s)
+            {
+                if (c == '_') { underscore = true; continue; }
+                if (c >= 'A' && c <= 'Z') continue;
+                if (c >= '0' && c <= '9') continue;
+                return false;
+            }
+            return underscore;
         }
 
         /// <summary>Signature: a run of DISTINCT printable names at this stride.
@@ -260,21 +342,30 @@ namespace GrandTheftAccessibility
             catch { return false; }
         }
 
-        // First four map entries must be in-range slot indices whose names are
-        // printable in the already-located char sheet.
+        /// <summary>The first eight map entries must be in-range slot indices whose
+        /// names are printable in the already-located char sheet, AND mostly
+        /// DISTINCT.
+        ///
+        /// v1.4 checked four entries for range and printability only, which any
+        /// array of small ints passes — that is how it accepted 21616, whose first
+        /// entries are 177,176,177,179,179,178: a contacts list cannot show the
+        /// same person twice in a row. Distinctness is the same signature that
+        /// already makes LooksLikeCharSheet reliable.</summary>
         private static bool LooksLikeRowMap(int b)
         {
             try
             {
                 if (charSheetBase < 0) return false;
-                if (!RangeAllocated(b, 1, 4)) return false;
-                for (int r = 0; r < 4; r++)
+                if (!RangeAllocated(b, 1, SigSlots)) return false;
+                var seen = new HashSet<int>();
+                for (int r = 0; r < SigSlots; r++)
                 {
                     int slot = GlobalVariable.Get(b).GetArrayItem(r, 1).Read<int>();
                     if (slot < 0 || slot >= ExpectedCount) return false;
                     if (!IsPrintableName(SlotName(charSheetBase, stride, slot))) return false;
+                    seen.Add(slot);
                 }
-                return true;
+                return seen.Count >= 6;
             }
             catch { return false; }
         }
@@ -327,57 +418,22 @@ namespace GrandTheftAccessibility
             return "\"" + sb + "\"";
         }
 
-        // ---- Texts / Email store discovery (log-only) -------------------------
-        // We have no runtime evidence for the apptextmessage / appemail stores, so
-        // this iteration collects it instead of guessing. Nothing found here is
-        // ever spoken; the next session's log is the input that pins the offsets,
-        // which then land in phoneGlobals as data.
+        // ---- Texts / Email store discovery: RETIRED in v1.5 -------------------
+        // v1.4 armed a bounded 1000..40000 signature sweep whenever Texts or Email
+        // opened, on the theory that each app owned a private name store. It ran in
+        // four sessions and returned the SAME five candidates every time, of which
+        // 2349 is the char sheet we already had and the rest never resolved into
+        // anything speakable. The premise was wrong: apptextmessage.c and
+        // appemail.c read senders straight out of `Global_2349[i].f_3` (the char
+        // sheet) and push their list rows through the shared row-label array that
+        // PhoneRowText now reads. So the sweep was paying ~39k probes per app open
+        // to rediscover a base that is pinned as data.
 
-        /// <summary>Arm a bounded store sweep for a dynamic-text app.</summary>
-        public static void ArmStoreSweep(string script)
-        {
-            if (sweepScript != null) return;   // one app at a time
-            sweepScript = script;
-            sweepBase = SweepLo;
-            sweepHits = 0;
-        }
-
-        /// <summary>Advance the store sweep by one frame's budget. No-op unless
-        /// armed. Never throws, never speaks.</summary>
-        public static void StoreSweepTick(Action<string> log)
+        /// <summary>Per-frame pump while the phone is open. Only advances the
+        /// resumable detection scan; never speaks, never throws.</summary>
+        public static void Tick(Action<string> log)
         {
             DetectTick(log);
-            if (sweepScript == null) return;
-            try
-            {
-                int budget = ProbesPerTick;
-                while (budget-- > 0)
-                {
-                    if (sweepBase > SweepHi || sweepHits >= 24)
-                    {
-                        if (log != null)
-                            log("EVENT phone-store-sweep: script=" + sweepScript
-                                + " done hits=" + sweepHits + " lastBase=" + sweepBase);
-                        sweepScript = null;
-                        return;
-                    }
-                    foreach (int s in StrideCandidates)
-                    {
-                        if (!LooksLikeCharSheet(sweepBase, s)) continue;
-                        sweepHits++;
-                        if (log != null)
-                            log("EVENT phone-store-candidate: script=" + sweepScript
-                                + " base=" + sweepBase + " stride=" + s
-                                + " sample=" + SampleNames(sweepBase, s, 4));
-                        break;
-                    }
-                    sweepBase++;
-                }
-            }
-            catch
-            {
-                sweepScript = null;
-            }
         }
 
         // Log-only diagnostic dump. One call per contacts-app open — never per
@@ -391,14 +447,24 @@ namespace GrandTheftAccessibility
                 try { ver = Function.Call<string>(Hash.GET_ONLINE_VERSION); } catch { }
                 log("EVENT phone-globals: onlineVer=" + ver + " ok=" + ok
                     + " csBase=" + charSheetBase + " rowMapBase=" + rowMapBase
-                    + " stride=" + stride + " scanning=" + scanning);
+                    + " stride=" + stride + " scanning=" + scanning
+                    + " distrusted=" + (rowMapDistrusted ? 1 : 0));
                 if (ok)
                 {
+                    // v1.5: dump the LOCALIZED name beside the raw key. The raw
+                    // column is what pins offsets offline; the localized column is
+                    // what the user actually hears, so a key that fails to resolve
+                    // is visible on the same line instead of being inferred.
                     for (int slot = 0; slot < 24; slot++)
                     {
-                        string nm = "<err>";
-                        try { nm = Sanitize(SlotName(charSheetBase, stride, slot)); } catch { }
-                        log("  slot " + slot + " f3=\"" + nm + "\"");
+                        string nm = "<err>", loc = "<err>";
+                        try
+                        {
+                            nm = Sanitize(SlotName(charSheetBase, stride, slot));
+                            loc = MenuLabelDb.ResolveGxt(nm) ?? "<unresolved>";
+                        }
+                        catch { }
+                        log("  slot " + slot + " f3=\"" + nm + "\" text=\"" + loc + "\"");
                     }
                     for (int r = 0; r < 20; r++)
                     {
@@ -412,17 +478,6 @@ namespace GrandTheftAccessibility
                 }
                 else
                 {
-                    // v1.3 reported only "count==222 bases", which came back empty
-                    // and told us nothing actionable. Report the count sweep (still
-                    // useful if the sentinel exists elsewhere) AND note that the
-                    // resumable data-signature scan is what actually decides.
-                    var hits = new StringBuilder();
-                    for (int b = 1000; b <= 12000; b++)
-                    {
-                        try { if (GlobalVariable.Get(b).Read<int>() == ExpectedCount) hits.Append(b).Append(' '); }
-                        catch { }
-                    }
-                    log("  count==222 bases: " + hits.ToString().Trim());
                     log("  signature scan in flight; phone-globals-candidate lines follow if any hit");
                 }
             }

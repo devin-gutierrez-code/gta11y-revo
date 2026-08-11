@@ -47,6 +47,16 @@ namespace GrandTheftAccessibility
         private static long lastHealthCheckTicks = 0;
         private static bool reloadAttempted = false;
 
+        /// <summary>
+        /// Wall-clock (<c>DateTime.Now.Ticks</c>) stamp of the last line actually emitted
+        /// to the reader. A cheap "is the channel busy?" test for low-priority subsystems
+        /// that must not talk over navigation or collision cues: an Ambient request is
+        /// still arbitrated per tick, but a subsystem whose whole point is periodic
+        /// chatter (the Civil Unrest sitrep) should skip its slot entirely rather than
+        /// queue behind something the player is still listening to. 0 until first speech.
+        /// </summary>
+        public static long LastEmittedWallTicks { get; private set; }
+
         public static void Request(string text, SpeechPriority priority)
         {
             if (string.IsNullOrEmpty(text)) return;
@@ -95,6 +105,7 @@ namespace GrandTheftAccessibility
                         bool interrupt = !firstSpoken && pr != (int)SpeechPriority.Ambient;
                         SpeakSafe(pending[i].Text, interrupt);
                         try { LogSink?.Invoke(pending[i].Text, pending[i].Priority); } catch { }
+                        LastEmittedWallTicks = DateTime.Now.Ticks;
                         firstSpoken = true;
                     }
                 }

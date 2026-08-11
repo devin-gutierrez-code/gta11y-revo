@@ -449,10 +449,15 @@ def main():
         conf_hist[r.get("keyConfidence")] = conf_hist.get(r.get("keyConfidence"), 0) + 1
     print(f"key confidence: {conf_hist}")
 
-    # v4 data channels that are pure hand-maintained overrides (no XML source):
+    # v4/v5 data channels that are pure hand-maintained overrides (no XML source):
     #   settingsXmlMap - PREF_* -> settings.xml section/key + value decoding mode
     #   phoneAppRows   - phone app script -> ordered in-app row labels
-    #   phoneGlobals   - pinned char-sheet / row-map bases for PhoneGlobals.cs
+    #   phoneGlobals   - pinned script-global offsets for PhoneGlobals/PhoneRowText
+    #   paneRowCount   - v5: observed visible row count per settings pane, for the
+    #                    reader's "2 of 17" cue. Written by align-panes.py --write
+    #                    from real traversals; outranks the reader's own count of
+    #                    unconditional rows, because a row that pausemenu.xml marks
+    #                    conditional may simply not be on screen on this build.
     # Each is optional; the reader fails closed when a table is absent.
     settings_xml_map = {k: v for k, v in overrides.get("settingsXmlMap", {}).items()
                         if not k.startswith("_")}
@@ -460,11 +465,14 @@ def main():
                       if not k.startswith("_")}
     phone_globals = {k: v for k, v in overrides.get("phoneGlobals", {}).items()
                      if not k.startswith("_")}
-    print(f"v4 tables: settingsXmlMap={len(settings_xml_map)} prefs, "
-          f"phoneAppRows={len(phone_app_rows)} apps, phoneGlobals={len(phone_globals)} keys")
+    pane_row_count = {k: v for k, v in overrides.get("paneRowCount", {}).items()
+                      if not k.startswith("_")}
+    print(f"v5 tables: settingsXmlMap={len(settings_xml_map)} prefs, "
+          f"phoneAppRows={len(phone_app_rows)} apps, phoneGlobals={len(phone_globals)} keys, "
+          f"paneRowCount={len(pane_row_count)} panes")
 
     out = {
-        "version": 4,
+        "version": 5,
         "generated": {
             "by": "build-menulabels.py",
             "sources": {n: src_meta(n) for n in SOURCES},
@@ -484,6 +492,7 @@ def main():
         "phoneApps": PHONE_APPS,
         "phoneAppRows": phone_app_rows,
         "phoneGlobals": phone_globals,
+        "paneRowCount": pane_row_count,
         "settingsXmlMap": settings_xml_map,
     }
     with open(OUT, "w", encoding="utf-8") as fh:

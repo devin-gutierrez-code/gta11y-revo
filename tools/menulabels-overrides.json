@@ -1098,6 +1098,17 @@
     "_comment": "phone app script -> ordered in-app row labels. Populated from the gxt-dump + reader-unmapped-phone harvest; EMPTY means every in-app row still speaks 'row N' (honest fallback)."
   },
   "phoneGlobals": {
-    "_comment": "Pinned char-sheet/row-map bases for PhoneGlobals.cs, from a phone-globals log line. Absent => runtime signature scan."
+    "_comment": "Pinned script-global offsets for PhoneGlobals.cs and PhoneRowText.cs. charSheetBase/stride confirmed two ways: the 2026-08-01 phone-globals dump located them at runtime, and appcontacts.c / apptextmessage.c / appemail.c all read the same structure as Global_2349[i /*29*/].f_3. rowMapBase is 21655 per appcontacts.c:9298 (`Global_8817 = Global_21655[iLocal_95];`) — v1.4 auto-detected 21616 and it was the WRONG ARRAY: rows 0 and 2 both mapped to slot 177, so the reader spoke the same contact twice on a monotone walk. The rowLabel* block is PhoneRowText's shared row-label array, Global_10324[char /*2811*/][page /*281*/].f_7[row /*4*/], from appsettings.c:610; rowLabelPage is deliberately ABSENT so the runtime probe picks it per app and logs what it found — pin it only once a session's phone-page-probe lines agree.",
+    "charSheetBase": 2349,
+    "rowMapBase": 21655,
+    "stride": 29,
+    "rowLabelBase": 10324,
+    "rowLabelCharStride": 2811,
+    "rowLabelPageStride": 281,
+    "rowLabelField": 7,
+    "rowLabelItemStride": 4
+  },
+  "paneRowCount": {
+    "_comment": "Visible row count per settings pane, for the \"2 of 17\" position cue. Written by tools/align-panes.py --write from observed pane-chain traversals; an entry here OUTRANKS the unconditional-row count MenuLabelDb derives from the table, because a conditional row that is hidden on this build still exists in pausemenu.xml. Keys are pane menu ids as strings."
   }
 }

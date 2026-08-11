@@ -71,3 +71,12 @@ __pycache__/
 
 # Runtime settings copies (real file lives in Documents\Rockstar Games\GTA V\ModSettings)
 gta11ySettings.json
+
+# Packaged testing releases (built by hand, not tracked)
+dist/
+
+# Reference material for a DIFFERENT game (Sleeping Dogs: Definitive Edition Lua
+# modding API, mirrored from sneakyevil.gitbook.io 2026-07-24). 15.9 MB / 108 files,
+# nothing in this repo references it, and it would roughly double the git history.
+# Kept on disk as a worked example of an accessible script-API surface; just not tracked.
+sleeping-dogs-de-script-api/

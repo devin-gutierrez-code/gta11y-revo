@@ -1,5 +1,5 @@
 {
- "version": 4,
+ "version": 5,
  "generated": {
   "by": "build-menulabels.py",
   "sources": {
@@ -4707,7 +4707,17 @@
   "appzit": "Zit"
  },
  "phoneAppRows": {},
- "phoneGlobals": {},
+ "phoneGlobals": {
+  "charSheetBase": 2349,
+  "rowMapBase": 21655,
+  "stride": 29,
+  "rowLabelBase": 10324,
+  "rowLabelCharStride": 2811,
+  "rowLabelPageStride": 281,
+  "rowLabelField": 7,
+  "rowLabelItemStride": 4
+ },
+ "paneRowCount": {},
  "settingsXmlMap": {
   "PREF_GFX_DXVERSION": {
    "section": "graphics",

@@ -134,6 +134,14 @@ namespace GTA
         private static Dictionary<string, int> phoneGlobals = new Dictionary<string, int>();
         private static Dictionary<string, string> gxtCache = new Dictionary<string, string>();
         private static HashSet<string> gxtFailed = new HashSet<string>();
+        // v5: how many rows each settings pane actually SHOWS. Observed counts come
+        // from align-panes.py, which rebuilds each pane's row cycle from the
+        // pane-chain traversals a real session logged; the derived fallback counts
+        // unconditional rows in the table. The two differ wherever a row is hidden
+        // by context or platform, which is exactly why the provenance is carried
+        // through to the log rather than quietly averaged away.
+        private static Dictionary<int, int> paneRowCountObserved = new Dictionary<int, int>();
+        private static Dictionary<int, int> paneRowCountDerived = new Dictionary<int, int>();
 
         private static int tabCount = 10;
         private static bool loaded = false;
@@ -179,6 +187,15 @@ namespace GTA
                         if (!r.uniqueId.HasValue) continue;
                         rows[RowKey(r.menuId, r.uniqueId.Value)] = r; // last-wins
                         if (r.status == "verified") overridesApplied++;
+                        // Derived pane size: unconditional rows only. A conditional
+                        // row may or may not be on screen, so counting it would
+                        // overstate the list for whoever is not seeing it.
+                        if (r.menuId == 51 && r.screenMenuId.HasValue && !r.conditional)
+                        {
+                            int n;
+                            paneRowCountDerived.TryGetValue(r.screenMenuId.Value, out n);
+                            paneRowCountDerived[r.screenMenuId.Value] = n + 1;
+                        }
                     }
                 if (root.screenItems != null)
                     foreach (var s in root.screenItems)
@@ -195,6 +212,13 @@ namespace GTA
                 if (root.settingsXmlMap != null) settingsXmlMap = root.settingsXmlMap;
                 if (root.phoneAppRows != null) phoneAppRows = root.phoneAppRows;
                 if (root.phoneGlobals != null) phoneGlobals = root.phoneGlobals;
+                if (root.paneRowCount != null)
+                    foreach (var kv in root.paneRowCount)
+                    {
+                        int pane;
+                        if (int.TryParse(kv.Key, out pane) && kv.Value > 0)
+                            paneRowCountObserved[pane] = kv.Value;
+                    }
                 loadStatus = "ok(v" + root.version + ")";
                 loaded = true;
             }
@@ -218,23 +242,38 @@ namespace GTA
             gxtFailed.Clear();
         }
 
+        /// <summary>Localize one GXT key, cached, with the project's single set of
+        /// rejection rules: empty, the literal "NULL", anything carrying a GTA
+        /// formatting token (~a~, ~1~ ...), and the degenerate case where the game
+        /// hands the key straight back because no such label exists. Returns null
+        /// on every one of those — callers fail closed rather than speak an id.
+        ///
+        /// v1.5: hoisted out of Resolve() so the phone's dynamic-text channel
+        /// (PhoneGlobals contact names, PhoneRowText in-app rows) shares it. Those
+        /// read TEXT_LABELs out of script globals, which are GXT KEYS — v1.4 spoke
+        /// them raw ("CELL_FRANKLIN_N" instead of "Franklin").</summary>
+        public static string ResolveGxt(string gxt)
+        {
+            if (string.IsNullOrEmpty(gxt)) return null;
+            string txt;
+            if (!gxtCache.TryGetValue(gxt, out txt))
+            {
+                try { txt = Game.GetLocalizedString(gxt); }
+                catch { txt = null; }
+                if (txt != null && (txt.Length == 0 || txt == "NULL"
+                                    || txt.IndexOf('~') >= 0
+                                    || string.Equals(txt, gxt, StringComparison.Ordinal)))
+                    txt = null;
+                gxtCache[gxt] = txt;
+                if (txt == null) gxtFailed.Add(gxt);
+            }
+            return txt;
+        }
+
         private static string Resolve(string gxt, string label)
         {
-            if (!string.IsNullOrEmpty(gxt))
-            {
-                string txt;
-                if (!gxtCache.TryGetValue(gxt, out txt))
-                {
-                    try { txt = Game.GetLocalizedString(gxt); }
-                    catch { txt = null; }
-                    // reject empties, the literal NULL, and strings carrying
-                    // GTA formatting tokens (~a~, ~1~ ...) — not speakable
-                    if (txt != null && (txt.Length == 0 || txt == "NULL" || txt.IndexOf('~') >= 0)) txt = null;
-                    gxtCache[gxt] = txt;
-                    if (txt == null) gxtFailed.Add(gxt);
-                }
-                if (txt != null) return txt;
-            }
+            string txt = ResolveGxt(gxt);
+            if (txt != null) return txt;
             if (!string.IsNullOrEmpty(label)) return label;
             return null;
         }
@@ -281,6 +320,14 @@ namespace GTA
             label = Resolve(s.gxt, s.label);
             screenMenuId = s.screenMenuId ?? 0;
             return label != null;
+        }
+
+        /// <summary>True when this menuId is a hashed trigger row (Restore
+        /// Defaults, Quick Scan...). Those occupy visible positions in a settings
+        /// list, so the pane-chain calibration has to count them.</summary>
+        public static bool IsHashedItem(int menuId)
+        {
+            return screenItems.ContainsKey(menuId);
         }
 
         public static bool TryGetRow(int menuId, int uniqueId, out RowEntry row)
@@ -413,6 +460,41 @@ namespace GTA
             return phoneGlobals.TryGetValue(name, out value);
         }
 
+        /// <summary>v5: how many rows a settings pane actually SHOWS, for the
+        /// "2 of 11" position cue. Observation only — there is deliberately no
+        /// fallback to the table.
+        ///
+        /// The table cannot answer this question. pausemenu.xml lists 17 pref rows
+        /// for Audio (pane 22) and this build displays eight of them: the
+        /// PREF_VOICE_* / PREF_CTRL_SPEAKER* block is console-only and simply is
+        /// not there. Counting the table would have announced "2 of 17" in a list
+        /// of eleven. The 2026-08-03 walk of that pane spoke exactly 11 distinct
+        /// rows — 8 pref rows plus the three hashed trigger rows (Quick Scan,
+        /// Complete Scan, Restore Defaults Audio) — which is the number a real
+        /// traversal yields and nothing else does.
+        ///
+        /// So: no observed count, no position. `derivedCount` is exposed purely so
+        /// the log can show how far off the table would have been.</summary>
+        public static bool TryPaneRowCount(int pane, out int count, out string src)
+        {
+            if (paneRowCountObserved.TryGetValue(pane, out count) && count > 0)
+            {
+                src = "observed";
+                return true;
+            }
+            src = null;
+            count = 0;
+            return false;
+        }
+
+        /// <summary>Table-derived row count for the same pane — NOT usable as a
+        /// spoken total (see TryPaneRowCount), logged for calibration only.</summary>
+        public static int DerivedPaneRowCount(int pane)
+        {
+            int n;
+            return paneRowCountDerived.TryGetValue(pane, out n) ? n : 0;
+        }
+
         public static bool TrySettingsXml(string pref, out SettingsXmlEntry entry)
         {
             entry = null;
@@ -440,6 +522,7 @@ namespace GTA
             public Dictionary<string, string> phoneApps = null;
             public Dictionary<string, List<PhoneAppRow>> phoneAppRows = null;
             public Dictionary<string, int> phoneGlobals = null;
+            public Dictionary<string, int> paneRowCount = null;
             public Dictionary<string, SettingsXmlEntry> settingsXmlMap = null;
         }
     }

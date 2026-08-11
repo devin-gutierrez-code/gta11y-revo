@@ -139,20 +139,45 @@ def load_pane_rows():
 
 
 def parse_chains(paths):
-    """pane -> list of observed uid sequences (one per pane-chain event)."""
+    """pane -> list of observed row sequences (one per pane-chain event).
+
+    Elements are ints for pref rows and "h<menuId>" strings for hashed trigger
+    rows (Restore Defaults, Quick Scan...). Reader v1.5 records both, because a
+    hashed row occupies a visible position: Audio shows 8 pref rows and 3 hashed
+    ones, so a pref-only chain reconstructs a track of 8 for a list of 11 and
+    every ordinal below the first hashed row is off by however many precede it.
+    Pre-v1.5 logs carry pref uids only and still parse — they just cannot produce
+    a row count, which is why the reader refuses to speak one without observed
+    data.
+    """
     chains = {}
-    rx = re.compile(r"EVENT pane-chain: pane=(-?\d+) chain=([\d,]+)")
+    full_order = True          # every log carries hashed rows in its chains
+    rx = re.compile(r"EVENT pane-chain: pane=(-?\d+) chain=([-\dh,]+)")
+    rx_ver = re.compile(r"EVENT menulog-version: reader(\d+)\.(\d+)")
     for p in paths:
         with open(p, encoding="utf-8", errors="replace") as fh:
             for line in fh:
+                mv = rx_ver.search(line)
+                if mv and (int(mv.group(1)), int(mv.group(2))) < (1, 5):
+                    full_order = False
                 m = rx.search(line)
                 if not m:
                     continue
                 pane = int(m.group(1))
-                uids = [int(x) for x in m.group(2).split(",") if x != ""]
-                if uids:
-                    chains.setdefault(pane, []).append(uids)
-    return chains
+                seq = []
+                for tok in m.group(2).split(","):
+                    if tok == "":
+                        continue
+                    if tok.startswith("h"):
+                        seq.append(tok)      # hashed row: position only, never bound
+                    else:
+                        try:
+                            seq.append(int(tok))
+                        except ValueError:
+                            pass
+                if seq:
+                    chains.setdefault(pane, []).append(seq)
+    return chains, full_order
 
 
 def first_appearance(sequences):
@@ -165,6 +190,13 @@ def first_appearance(sequences):
     return order
 
 
+def _node_key(n):
+    """Total order over the mixed int / "h<menuId>" node space, so a cycle with
+    no endpoints still has a deterministic start. Only picks a starting point —
+    it never implies anything about visible order."""
+    return (1, n) if isinstance(n, str) else (0, str(n))
+
+
 def reconstruct_track(sequences):
     """Rebuild the pane's row track from every observed adjacency.
 
@@ -175,7 +207,9 @@ def reconstruct_track(sequences):
 
     Returns (track, closed) or (None, False) when the adjacency is not a simple
     path/cycle — e.g. because the pane-chain omits hashed rows and so fabricates
-    an edge across them."""
+    an edge across them. Reader v1.5 records those rows as "h<menuId>" precisely
+    so that no longer happens, which is why nodes may be ints or strings and
+    every ordering below goes through _node_key."""
     adj = {}
     for seq in sequences:
         for a, b in zip(seq, seq[1:]):
@@ -189,7 +223,7 @@ def reconstruct_track(sequences):
     if len(ends) == 1 or len(ends) > 2:
         return None, False
     closed = not ends
-    start = ends[0] if ends else next(iter(sorted(adj)))
+    start = ends[0] if ends else next(iter(sorted(adj, key=_node_key)))
     track, prev, cur = [start], None, start
     while True:
         nxt = [x for x in adj[cur] if x != prev]
@@ -255,6 +289,8 @@ def resolve_settled(observed, val_to_name):
     where each binding is (uid, pref, header, offset)."""
     bindings, free = [], []
     for u in observed:
+        if isinstance(u, str):
+            continue                        # hashed row: holds a position, binds nothing
         hv = deshift_settled(u)
         if hv is None:
             free.append(u)                  # 97..111: the PREF_VOICE_* band
@@ -328,13 +364,23 @@ def main():
     print("reading:", ", ".join(os.path.basename(x) for x in logs))
 
     panes, prefs = load_pane_rows()
-    chains = parse_chains(logs)
+    chains, full_order = parse_chains(logs)
     if not chains:
         sys.exit("no EVENT pane-chain lines found — is this a v1.3 calibration log?")
+    if not full_order:
+        print("note: pre-v1.5 log — chains carry pref rows only, so the hashed "
+              "trigger rows are missing from the order. Row counts NOT claimed "
+              "(Audio would read 8 for a list of 11); ords still bind.")
 
     val_to_name = {v: k for k, v in prefs.items()}
     stamp = ", ".join(os.path.basename(x) for x in logs)
     offset_points, suggest_rows = {}, []
+    # v1.5: the reconstructed track length IS the pane's visible row count, which
+    # is what the reader needs for its "2 of 17" cue. Only claimed when the track
+    # rooted unambiguously (same gate as `ord`) AND the walk closed the cycle —
+    # an open path only proves the user visited that many rows, not that the list
+    # ends there, and a total that is too small is worse than no total at all.
+    pane_row_count = {}
     for pane in sorted(chains):
         rows = panes.get(pane) or []
         # The XML row order expressed in RUNTIME uids, so the rooting check can
@@ -346,6 +392,14 @@ def main():
         print(f"\npane {pane}: {len(observed)} visible rows, "
               f"{len(settled)} settled, {len(free)} in the free 97..107 band")
         print(f"    order: {note}")
+        if full_order and ord_ok and "closed cycle" in note and len(observed) > 1:
+            pane_row_count[str(pane)] = len(observed)
+            print(f"    row count: {len(observed)} (closed cycle — usable as a total)")
+        elif ord_ok:
+            why = ("pre-v1.5 chain omits hashed rows" if not full_order
+                   else "open path — the walk never closed the cycle")
+            print(f"    row count: NOT claimed — {why}; "
+                  f"{len(observed)} rows seen but the list may be longer")
 
         # The free band still needs the constrained search, and only against
         # this pane's own XML rows.
@@ -414,17 +468,25 @@ def main():
             print(f"  !! anchor s(>={SETTLED_HI_MIN})=4 violated")
 
     out = {"suggestedRows": suggest_rows,
-           "offsetByHeader": {str(k): v for k, v in sorted(offset_points.items())}}
+           "offsetByHeader": {str(k): v for k, v in sorted(offset_points.items())},
+           "paneRowCount": pane_row_count}
     with open(SUGGEST, "w", encoding="utf-8") as fh:
         json.dump(out, fh, indent=1)
-    print(f"\nwrote {len(suggest_rows)} suggested verified rows -> "
-          f"{os.path.normpath(SUGGEST)}")
+    print(f"\nwrote {len(suggest_rows)} suggested verified rows, "
+          f"{len(pane_row_count)} pane row counts -> {os.path.normpath(SUGGEST)}")
 
-    if write and suggest_rows:
+    if write and (suggest_rows or pane_row_count):
         with open(OVERRIDES, encoding="utf-8") as fh:
             ov = json.load(fh)
         by_uid = {r["uniqueId"]: r for r in ov.get("rows", [])}
         added = updated = 0
+        counts = 0
+        if pane_row_count:
+            dst = ov.setdefault("paneRowCount", {})
+            for k, v in pane_row_count.items():
+                if dst.get(k) != v:
+                    dst[k] = v
+                    counts += 1
         for r in suggest_rows:
             cur = by_uid.get(r["uniqueId"])
             if cur is None:
@@ -447,7 +509,8 @@ def main():
                     updated += 1
         with open(OVERRIDES, "w", encoding="utf-8") as fh:
             json.dump(ov, fh, indent=2)
-        print(f"--write: {added} new rows, {updated} field updates into "
+        print(f"--write: {added} new rows, {updated} field updates, "
+              f"{counts} pane row counts into "
               f"{os.path.basename(OVERRIDES)} (rerun build-menulabels.py)")
     elif suggest_rows:
         print("review _align_suggestions.json, then rerun with --write to merge")

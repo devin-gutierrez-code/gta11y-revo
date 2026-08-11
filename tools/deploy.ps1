@@ -23,7 +23,9 @@
   Debug, so a bare build-then-deploy now just works).
 
 .PARAMETER IncludeData
-  Also copy gta11y-map.json, gta11y-nodes.json.gz and vehicleaihandlinginfo.meta.
+  Also copy gta11y-map.json, gta11y-nodes.json.gz, gta11y-junctions.json.gz,
+  gta11y-menulabels.json, gta11y-worlddata.json, vehicleaihandlinginfo.meta and
+  hashes.txt.
 
 .EXAMPLE
   pwsh tools\deploy.ps1 -ScriptsDir "D:\Games\GTAV\scripts"
@@ -107,7 +109,26 @@ if ($IncludeData) {
         "scripts\gta11y-nodes.json.gz"     = "gta11y-nodes.json.gz"
         "scripts\gta11y-junctions.json.gz" = "gta11y-junctions.json.gz"
         "scripts\gta11y-menulabels.json"   = "gta11y-menulabels.json"
+        # iter-52: world data (collectibles, restricted areas, places, interactions,
+        # random-event registry). Regenerate with tools\build-worlddata.py.
+        "scripts\gta11y-worlddata.json"    = "gta11y-worlddata.json"
         "vehicleaihandlinginfo.meta"       = "vehicleaihandlinginfo.meta"
+        # iter-41: the object/vehicle name table. Was hand-placed in 2022 and
+        # never carried by any build or deploy, so a clean install lost vehicle
+        # and object naming with only a spoken warning to show for it.
+        "scripts\hashes.txt"               = "hashes.txt"
+        # iter-41: earcons, same story - hand-placed, never built, never deployed.
+        "scripts\tped.wav"                 = "tped.wav"
+        "scripts\tvehicle.wav"             = "tvehicle.wav"
+        "scripts\tprop.wav"                = "tprop.wav"
+        "scripts\pickup.wav"               = "pickup.wav"
+        "scripts\cover.wav"                = "cover.wav"
+        "scripts\interact.wav"             = "interact.wav"
+        "scripts\hit.wav"                  = "hit.wav"
+        "scripts\headshot.wav"             = "headshot.wav"
+        "scripts\kill.wav"                 = "kill.wav"
+        "scripts\door.wav"                 = "door.wav"
+        "scripts\ladder.wav"               = "ladder.wav"
     }
     foreach ($rel in $dataMap.Keys) {
         $src = Join-Path $outDir $rel
@@ -126,6 +147,27 @@ if ($IncludeData) {
             Write-Warning "  missing data in build output: $rel"
         }
     }
+    # iter-41: Tolk and its screen-reader clients are NATIVE and are P/Invoked by
+    # GTA/Tolk.cs. DllImport resolves from the executable's folder, so these go to
+    # the GTA V ROOT (the parent of scripts\), NOT into scripts\. Putting them in
+    # scripts\ appears to work only because a stale copy already sits in the root.
+    # Without Tolk.dll the mod has no speech at all.
+    $gameRoot = Split-Path -Parent $ScriptsDir
+    foreach ($n in @("Tolk.dll", "nvdaControllerClient64.dll", "SAAPI64.dll")) {
+        $src = Join-Path $outDir $n
+        if (Test-Path $src) {
+            try {
+                Copy-Item $src (Join-Path $gameRoot $n) -Force -ErrorAction Stop
+                Write-Host "  copied native $n -> game root"
+            } catch {
+                $lockedFiles += $n
+                Write-Warning "  LOCKED: $n - is GTA V running? Close the game and re-run."
+            }
+        } else {
+            Write-Warning "  missing native in build output: $n"
+        }
+    }
+
     Write-Host "NOTE: verify the mod loads data from this layout in-game; the user's"
     Write-Host "      ModSettings copy of vehicleaihandlinginfo.meta overrides this one."
 }
