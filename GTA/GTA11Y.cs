@@ -7286,31 +7286,80 @@ namespace GrandTheftAccessibility
                             }
                             catch { }
                         }
-                        // New target acquired - only update if game has a valid target
-                        else if (currentTarget != null && !currentTarget.IsDead && currentTarget != autolockTarget)
+                        // If the game has not selected anything, find the highest-priority
+                        // valid threat within the current weapon's effective range.
+                        else if (currentTarget == null && autolockTarget == null)
                         {
-                            autolockTarget = currentTarget;
-                            autolockPartIndex = 0;
-                            autolockActive = true;
+                            Entity bestTarget = null;
+                            float bestPriority = 0f;
+                            float scanRange = Math.Min(GetCurrentWeaponRange(), 150f);
 
-                            // Find the first visible part (default parts like engine/torso should always be visible)
-                            // This ensures we don't start locked onto an obscured part
-                            int maxParts = currentTarget.EntityType == EntityType.Ped
-                                ? PED_TARGET_PARTS.Length
-                                : VEHICLE_TARGET_PARTS.Length;
-                            for (int i = 0; i < maxParts; i++)
+                            foreach (Ped ped in World.GetNearbyPeds(Game.Player.Character.Position, scanRange))
                             {
-                                if (IsPartVisible(i))
+                                if (ped == Game.Player.Character || ped.IsDead) continue;
+                                string ignoredReason;
+                                if (!IsValidAutolockTarget(ped, out ignoredReason)) continue;
+                                float priority = GetTargetPriority(ped);
+                                if (priority > bestPriority)
                                 {
-                                    autolockPartIndex = i;
-                                    break;
+                                    bestPriority = priority;
+                                    bestTarget = ped;
                                 }
                             }
 
-                            if (currentTarget != lastAnnouncedTarget)
+                            foreach (Vehicle vehicle in World.GetNearbyVehicles(Game.Player.Character.Position, scanRange))
+                            {
+                                if (vehicle == Game.Player.Character.CurrentVehicle) continue;
+                                string ignoredReason;
+                                if (!IsValidAutolockTarget(vehicle, out ignoredReason)) continue;
+                                float priority = GetTargetPriority(vehicle);
+                                if (priority > bestPriority)
+                                {
+                                    bestPriority = priority;
+                                    bestTarget = vehicle;
+                                }
+                            }
+
+                            if (bestTarget != null && bestPriority > 200f)
+                            {
+                                autolockTarget = bestTarget;
+                                autolockPartIndex = FindFirstVisiblePart(bestTarget);
+                                autolockActive = true;
+                                lastAnnouncedTarget = bestTarget;
+                                AnnounceAutolockTarget(bestTarget);
+                                Speech.Critical("Priority threat detected.");
+                            }
+                        }
+                        // New target acquired: validate it and only switch away from an
+                        // existing lock for a materially higher-priority target.
+                        else if (currentTarget != null && !currentTarget.IsDead && currentTarget != autolockTarget)
+                        {
+                            string failReason;
+                            if (IsValidAutolockTarget(currentTarget, out failReason))
+                            {
+                                float currentPriority = autolockTarget != null
+                                    ? GetTargetPriority(autolockTarget) : 0f;
+                                float newPriority = GetTargetPriority(currentTarget);
+                                if (autolockTarget == null || newPriority > currentPriority + 50f)
+                                {
+                                    autolockTarget = currentTarget;
+                                    autolockPartIndex = FindFirstVisiblePart(currentTarget);
+                                    autolockActive = true;
+
+                                    if (currentTarget != lastAnnouncedTarget)
+                                    {
+                                        lastAnnouncedTarget = currentTarget;
+                                        AnnounceAutolockTarget(currentTarget);
+                                        if (failReason.Contains("cover"))
+                                            Speech.Info(failReason);
+                                    }
+                                }
+                            }
+                            else if (currentTarget != lastAnnouncedTarget
+                                && !string.IsNullOrEmpty(failReason))
                             {
                                 lastAnnouncedTarget = currentTarget;
-                                AnnounceAutolockTarget(currentTarget);
+                                Speech.Critical("Cannot lock: " + failReason);
                             }
                         }
 
@@ -7318,15 +7367,25 @@ namespace GrandTheftAccessibility
                         // This is critical for vehicles which lose soft-lock more easily than peds
                         if (autolockActive && autolockTarget != null && autolockTarget.Exists() && !autolockTarget.IsDead)
                         {
-                            // Disable right stick camera controls to prevent player from moving aim off target
-                            // Only disable look controls - do NOT disable aim (25) as it causes toggle issues
-                            Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 1, true);   // Look Left/Right
-                            Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 2, true);   // Look Up/Down
-                            Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 220, true); // Script Right Axis X
-                            Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 221, true); // Script Right Axis Y
+                            if (ShouldMaintainAutolockTarget())
+                            {
+                                // Disable right stick camera controls to prevent player from moving aim off target
+                                // Only disable look controls - do NOT disable aim (25) as it causes toggle issues
+                                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 1, true);   // Look Left/Right
+                                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 2, true);   // Look Up/Down
+                                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 220, true); // Script Right Axis X
+                                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 221, true); // Script Right Axis Y
 
-                            UpdateAutolockAim(false);
-                            HandlePartCycling();
+                                UpdateAutolockAim(false);
+                                HandlePartCycling();
+                            }
+                            else
+                            {
+                                autolockActive = false;
+                                autolockTarget = null;
+                                lastAnnouncedTarget = null;
+                                Speech.Critical("Target lost.");
+                            }
                         }
                         else if (autolockTarget != null && (!autolockTarget.Exists() || autolockTarget.IsDead))
                         {
@@ -13726,6 +13785,17 @@ namespace GrandTheftAccessibility
             return true;
         }
 
+        private int FindFirstVisiblePart(Entity target)
+        {
+            int maxParts = target.EntityType == EntityType.Ped
+                ? PED_TARGET_PARTS.Length : VEHICLE_TARGET_PARTS.Length;
+            for (int i = 0; i < maxParts; i++)
+            {
+                if (IsPartVisible(i)) return i;
+            }
+            return 0;
+        }
+
         /// <summary>
         /// Finds the next visible part index, skipping non-visible parts
         /// Returns -1 if no visible parts found
@@ -13845,6 +13915,254 @@ namespace GrandTheftAccessibility
                     : VEHICLE_TARGET_PARTS[autolockPartIndex].name;
                 Speech.Info(partName);
             }
+        }
+
+        // ============================================
+        // AIM AUTOLOCK VALIDATION AND PRIORITY
+        // ============================================
+
+        private bool IsMeleeWeapon(WeaponHash hash)
+        {
+            return hash == WeaponHash.Unarmed || hash == WeaponHash.Knife
+                || hash == WeaponHash.Nightstick || hash == WeaponHash.Hammer
+                || hash == WeaponHash.Bat || hash == WeaponHash.Crowbar
+                || hash == WeaponHash.GolfClub || hash == WeaponHash.Bottle
+                || hash == WeaponHash.Dagger || hash == WeaponHash.Hatchet
+                || hash == WeaponHash.KnuckleDuster || hash == WeaponHash.Machete
+                || hash == WeaponHash.Flashlight || hash == WeaponHash.SwitchBlade
+                || hash == WeaponHash.PoolCue || hash == WeaponHash.Wrench
+                || hash == WeaponHash.BattleAxe || hash == WeaponHash.StoneHatchet;
+        }
+
+        /// <summary>Returns the effective range of the equipped weapon in meters.</summary>
+        private float GetCurrentWeaponRange()
+        {
+            WeaponHash hash = Game.Player.Character.Weapons.Current.Hash;
+
+            if (hash == WeaponHash.SniperRifle || hash == WeaponHash.HeavySniper
+                || hash == WeaponHash.MarksmanRifle)
+                return 500f;
+            if (hash == WeaponHash.AdvancedRifle || hash == WeaponHash.BullpupRifle)
+                return 350f;
+            if (hash == WeaponHash.AssaultRifle || hash == WeaponHash.CarbineRifle
+                || hash == WeaponHash.SpecialCarbine || hash == WeaponHash.CompactRifle)
+                return 250f;
+            if (hash == WeaponHash.MG || hash == WeaponHash.CombatMG
+                || hash == WeaponHash.Gusenberg)
+                return 200f;
+            if (hash == WeaponHash.SMG || hash == WeaponHash.MicroSMG
+                || hash == WeaponHash.AssaultSMG || hash == WeaponHash.CombatPDW
+                || hash == WeaponHash.MiniSMG)
+                return 100f;
+            if (hash == WeaponHash.PumpShotgun || hash == WeaponHash.SawnOffShotgun
+                || hash == WeaponHash.BullpupShotgun || hash == WeaponHash.AssaultShotgun
+                || hash == WeaponHash.HeavyShotgun || hash == WeaponHash.Musket)
+                return 40f;
+            if (hash == WeaponHash.Pistol || hash == WeaponHash.CombatPistol
+                || hash == WeaponHash.Pistol50 || hash == WeaponHash.SNSPistol
+                || hash == WeaponHash.HeavyPistol || hash == WeaponHash.VintagePistol
+                || hash == WeaponHash.APPistol || hash == WeaponHash.MarksmanPistol)
+                return 80f;
+            if (hash == WeaponHash.RPG || hash == WeaponHash.GrenadeLauncher
+                || hash == WeaponHash.HomingLauncher || hash == WeaponHash.Firework)
+                return 150f;
+            if (hash == WeaponHash.Grenade || hash == WeaponHash.StickyBomb
+                || hash == WeaponHash.ProximityMine || hash == WeaponHash.Molotov
+                || hash == WeaponHash.BZGas || hash == WeaponHash.Flare
+                || hash == WeaponHash.Ball || hash == WeaponHash.Snowball)
+                return 30f;
+            return IsMeleeWeapon(hash) ? 3f : 100f;
+        }
+
+        private bool HasAmmoForWeapon(out string reason)
+        {
+            reason = "";
+            WeaponHash hash = Game.Player.Character.Weapons.Current.Hash;
+            if (IsMeleeWeapon(hash)) return true;
+
+            int totalAmmo = Function.Call<int>(Hash.GET_AMMO_IN_PED_WEAPON,
+                Game.Player.Character, (int)hash);
+            if (totalAmmo > 0) return true;
+
+            reason = "Out of ammo";
+            return false;
+        }
+
+        private bool CanWeaponPenetrate()
+        {
+            WeaponHash hash = Game.Player.Character.Weapons.Current.Hash;
+            return hash == WeaponHash.SniperRifle || hash == WeaponHash.HeavySniper
+                || hash == WeaponHash.Pistol50 || hash == WeaponHash.CombatMG
+                || hash == WeaponHash.MG;
+        }
+
+        /// <summary>Scores closer, hostile, occupied, and forward targets higher.</summary>
+        private float GetTargetPriority(Entity target)
+        {
+            if (target == null || !target.Exists() || target.IsDead) return 0f;
+
+            Ped player = Game.Player.Character;
+            float distance = GTA.Math.Vector3.Distance(player.Position, target.Position);
+            float priority = 100f + Math.Max(0f, 200f - distance);
+
+            if (target.EntityType == EntityType.Ped)
+            {
+                Ped ped = (Ped)target;
+                if (ped.IsInCombatAgainst(player)) priority += 150f;
+                if (ped.IsAiming) priority += 100f;
+                if (Function.Call<int>(Hash.GET_RELATIONSHIP_BETWEEN_PEDS, ped, player) == 5)
+                    priority += 75f;
+                int pedType = Function.Call<int>(Hash.GET_PED_TYPE, ped);
+                if ((pedType == 6 || pedType == 23) && Game.Player.Wanted.WantedLevel > 0)
+                    priority += 100f;
+            }
+            else if (target.EntityType == EntityType.Vehicle)
+            {
+                Vehicle vehicle = (Vehicle)target;
+                Ped driver = vehicle.Driver;
+                if (driver != null && driver.Exists() && driver.IsAlive)
+                {
+                    priority += 50f;
+                    if (driver.IsInCombatAgainst(player)) priority += 150f;
+                }
+            }
+
+            GTA.Math.Vector3 delta = target.Position - player.Position;
+            if (delta.Length() > 0.01f)
+            {
+                float forwardDot = GTA.Math.Vector3.Dot(player.ForwardVector,
+                    GTA.Math.Vector3.Normalize(delta));
+                if (forwardDot > 0.7f) priority += 50f;
+                else if (forwardDot < 0f) priority -= 50f;
+            }
+            return priority;
+        }
+
+        private bool IsTargetInCover(Entity target, out float suggestedAngleOffset)
+        {
+            suggestedAngleOffset = 0f;
+            if (target == null || !target.Exists() || target.EntityType != EntityType.Ped)
+                return false;
+
+            Ped ped = (Ped)target;
+            if (!Function.Call<bool>(Hash.IS_PED_IN_COVER, ped, false)) return false;
+
+            suggestedAngleOffset = (DateTime.Now.Ticks & 1) == 0 ? 45f : -45f;
+            return true;
+        }
+
+        private bool IsValidAutolockTarget(Entity target, out string reason)
+        {
+            reason = "";
+            if (target == null || !target.Exists() || target.IsDead)
+            {
+                reason = "Target does not exist or is dead";
+                return false;
+            }
+
+            Ped player = Game.Player.Character;
+            GTA.Math.Vector3 targetPos = target.Position;
+            if (!HasAmmoForWeapon(out reason)) return false;
+
+            float distance = GTA.Math.Vector3.Distance(player.Position, targetPos);
+            float weaponRange = GetCurrentWeaponRange();
+            if (distance > weaponRange)
+            {
+                reason = "Out of range: " + (int)distance + " meters; maximum "
+                    + (int)weaponRange + " meters";
+                return false;
+            }
+
+            GTA.Math.Vector3 weaponPos = Function.Call<GTA.Math.Vector3>(
+                Hash.GET_PED_BONE_COORDS, player, 31086, 0f, 0f, 0f);
+            GTA.Math.Vector3 checkPos = targetPos;
+            if (target == autolockTarget && autolockPartIndex >= 0)
+            {
+                GTA.Math.Vector3 partPos = GetTargetPartPosition();
+                if (partPos != GTA.Math.Vector3.Zero) checkPos = partPos;
+            }
+
+            RaycastResult lineOfSight = World.Raycast(weaponPos, checkPos,
+                IntersectFlags.Map | IntersectFlags.Objects
+                    | IntersectFlags.Vehicles | IntersectFlags.Peds,
+                player);
+            if (lineOfSight.DidHit && lineOfSight.HitEntity != target)
+            {
+                Entity blocker = lineOfSight.HitEntity;
+                if (blocker == null)
+                {
+                    reason = "Blocked by wall";
+                    return false;
+                }
+                if (blocker.EntityType == EntityType.Vehicle && CanWeaponPenetrate())
+                {
+                    // High-caliber weapons retain the lock through a vehicle.
+                }
+                else
+                {
+                    reason = blocker.EntityType == EntityType.Vehicle
+                        ? "Blocked by vehicle; high-caliber weapon required"
+                        : blocker.EntityType == EntityType.Ped
+                            ? "Blocked by person" : "Blocked by object";
+                    return false;
+                }
+            }
+
+            var screenPoint = GTA.UI.Screen.WorldToScreen(targetPos, false);
+            if (screenPoint.IsEmpty)
+            {
+                reason = "Target not visible";
+                return false;
+            }
+
+            GTA.Math.Vector3 delta = targetPos - player.Position;
+            if (delta.Length() < 0.01f
+                || GTA.Math.Vector3.Dot(player.ForwardVector,
+                    GTA.Math.Vector3.Normalize(delta)) < 0f)
+            {
+                reason = "Target outside the forward view";
+                return false;
+            }
+
+            float suggestedAngle;
+            if (IsTargetInCover(target, out suggestedAngle))
+            {
+                player.Heading += suggestedAngle;
+                reason = "Target in cover; moving " + (suggestedAngle > 0 ? "right" : "left");
+            }
+            return true;
+        }
+
+        private bool ShouldMaintainAutolockTarget()
+        {
+            if (autolockTarget == null || !autolockTarget.Exists() || autolockTarget.IsDead)
+                return false;
+
+            string ammoReason;
+            if (!HasAmmoForWeapon(out ammoReason))
+            {
+                Speech.Critical(ammoReason);
+                return false;
+            }
+
+            Ped player = Game.Player.Character;
+            float distance = GTA.Math.Vector3.Distance(player.Position, autolockTarget.Position);
+            if (distance > GetCurrentWeaponRange() + 50f) return false;
+
+            GTA.Math.Vector3 checkPos = GetTargetPartPosition();
+            if (checkPos == GTA.Math.Vector3.Zero) checkPos = autolockTarget.Position;
+            RaycastResult lineOfSight = World.Raycast(
+                Function.Call<GTA.Math.Vector3>(Hash.GET_PED_BONE_COORDS,
+                    player, 31086, 0f, 0f, 0f), checkPos,
+                IntersectFlags.Map | IntersectFlags.Objects
+                    | IntersectFlags.Vehicles | IntersectFlags.Peds,
+                player);
+            if (!lineOfSight.DidHit || lineOfSight.HitEntity == autolockTarget) return true;
+
+            Entity blocker = lineOfSight.HitEntity;
+            if (blocker == null) return false;
+            if (blocker.EntityType == EntityType.Vehicle) return CanWeaponPenetrate();
+            return blocker.EntityType == EntityType.Ped;
         }
 
         // ============================================
