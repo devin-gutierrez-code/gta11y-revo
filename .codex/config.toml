@@ -1,0 +1,3 @@
+[mcp_servers.gta11y]
+command = "python"
+args = ["tools/mcp/gta11y_mcp.py"]

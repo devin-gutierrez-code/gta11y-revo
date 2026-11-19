@@ -1,0 +1,120 @@
+{
+  "_readme": [
+    "Hand corrections for tools/build-modelnames.py. Merged LAST, so a fix here survives",
+    "regeneration. Never hand-edit GTA/scripts/gta11y-modelnames.tsv.gz — correct it here.",
+    "",
+    "Each entry in \"models\":",
+    "  model   the model name; its joaat is computed for you (omit if you give hash)",
+    "  hash    signed int32, use when the model name is unknown or was relabelled",
+    "  name    what the screen reader should say. This is heard, not read.",
+    "  kind    p = ped, o = object, d = door/gate, x = other. Omit to keep the derived one.",
+    "  gxt     ped rows only: a GXT key resolved live so the name localizes.",
+    "  status  refuted = drop the row entirely (a name that is wrong is worse than none).",
+    "  evidence  why. Same provenance model as tools/worlddata-overrides.json.",
+    "",
+    "Seeded from what the generator provably gets wrong. Everything else waits for a",
+    "session to show it matters — see gta11y-modelgaps-*.log at the game root, which",
+    "records every model the mod met and could not name."
+  ],
+
+  "models": [
+    {
+      "model": "player_zero",
+      "name": "Michael",
+      "kind": "p",
+      "status": "verified",
+      "evidence": "Protagonist. The derived name would be 'Player Zero', which is an internal id, not a person."
+    },
+    {
+      "model": "player_one",
+      "name": "Franklin",
+      "kind": "p",
+      "status": "verified",
+      "evidence": "Protagonist. Negative hash (-1692214353) — one of the rows the old ulong lookup could never reach."
+    },
+    {
+      "model": "player_two",
+      "name": "Trevor",
+      "kind": "p",
+      "status": "verified",
+      "evidence": "Protagonist. Negative hash (-1686040670)."
+    },
+    {
+      "model": "mp_m_freemode_01",
+      "name": "Online Character",
+      "kind": "p",
+      "status": "verified",
+      "evidence": "Freemode avatar; the derived name would be 'Freemode'."
+    },
+    {
+      "model": "mp_f_freemode_01",
+      "name": "Online Character",
+      "kind": "p",
+      "status": "verified",
+      "evidence": "Freemode avatar."
+    },
+    {
+      "model": "prop_vend_soda_01",
+      "name": "Soda Machine",
+      "kind": "o",
+      "status": "verified",
+      "evidence": "Derived name is 'Vend Soda' — the model id's word order, not English. This model is also the worked example in the iter-52 interaction-catalogue comment, so it is the one most likely to be checked by hand."
+    },
+    {
+      "model": "prop_vend_soda_02",
+      "name": "Soda Machine",
+      "kind": "o",
+      "status": "verified",
+      "evidence": "As prop_vend_soda_01."
+    },
+    {
+      "model": "prop_vend_coffe_01",
+      "name": "Coffee Machine",
+      "kind": "o",
+      "status": "verified",
+      "evidence": "Derived name is 'Vend Coffe' — the game's own spelling is wrong and would be read out as written."
+    },
+    {
+      "model": "prop_vend_snak_01",
+      "name": "Snack Machine",
+      "kind": "o",
+      "status": "verified",
+      "evidence": "Derived name is 'Vend Snak'."
+    },
+    {
+      "model": "prop_vend_water_01",
+      "name": "Water Machine",
+      "kind": "o",
+      "status": "verified",
+      "evidence": "Derived name is 'Vend Water'."
+    },
+    {
+      "model": "prop_atm_01",
+      "name": "Cash Machine",
+      "kind": "o",
+      "status": "verified",
+      "evidence": "'A T M' is spelled out letter by letter by most screen readers at speed."
+    },
+    {
+      "model": "prop_atm_02",
+      "name": "Cash Machine",
+      "kind": "o",
+      "status": "verified",
+      "evidence": "As prop_atm_01."
+    },
+    {
+      "model": "prop_atm_03",
+      "name": "Cash Machine",
+      "kind": "o",
+      "status": "verified",
+      "evidence": "As prop_atm_01."
+    },
+    {
+      "model": "prop_fleeca_atm",
+      "name": "Cash Machine",
+      "kind": "o",
+      "status": "verified",
+      "evidence": "As prop_atm_01."
+    }
+  ]
+}

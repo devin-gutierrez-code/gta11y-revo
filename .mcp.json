@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "gta11y": {
+      "command": "python",
+      "args": ["tools/mcp/gta11y_mcp.py"],
+      "env": {}
+    }
+  }
+}
