@@ -1091,17 +1091,98 @@ namespace GrandTheftAccessibility
                             // Instant snap to target position (use higher lerp factor)
                             UpdateAutolockAim(true); // Pass true for instant snap
                         }
-                        // New target acquired - only update if game has a valid target
+                        // PRIORITY TARGETING SYSTEM
+                        // Check if there's a higher priority target nearby (threats, closer enemies, etc.)
+                        else if (currentTarget == null && autolockTarget == null)
+                        {
+                            // No target selected - scan for best target within weapon range
+                            Entity bestTarget = null;
+                            float bestPriority = 0f;
+                            float scanRange = Math.Min(GetCurrentWeaponRange(), 150f);
+
+                            // Scan nearby peds
+                            Ped[] nearbyPeds = World.GetNearbyPeds(Game.Player.Character.Position, scanRange);
+                            foreach (Ped ped in nearbyPeds)
+                            {
+                                if (ped == Game.Player.Character || ped.IsDead) continue;
+
+                                string testReason;
+                                if (IsValidAutolockTarget(ped, out testReason))
+                                {
+                                    float priority = GetTargetPriority(ped);
+                                    if (priority > bestPriority)
+                                    {
+                                        bestPriority = priority;
+                                        bestTarget = ped;
+                                    }
+                                }
+                            }
+
+                            // Scan nearby vehicles
+                            Vehicle[] nearbyVehicles = World.GetNearbyVehicles(Game.Player.Character.Position, scanRange);
+                            foreach (Vehicle veh in nearbyVehicles)
+                            {
+                                if (veh == Game.Player.Character.CurrentVehicle) continue;
+
+                                string testReason;
+                                if (IsValidAutolockTarget(veh, out testReason))
+                                {
+                                    float priority = GetTargetPriority(veh);
+                                    if (priority > bestPriority)
+                                    {
+                                        bestPriority = priority;
+                                        bestTarget = veh;
+                                    }
+                                }
+                            }
+
+                            // Auto-lock to best target if found and priority is high enough
+                            if (bestTarget != null && bestPriority > 200f) // Threshold for auto-acquisition
+                            {
+                                autolockTarget = bestTarget;
+                                autolockPartIndex = 0;
+                                autolockActive = true;
+                                lastAnnouncedTarget = bestTarget;
+                                AnnounceAutolockTarget(bestTarget);
+                                Tolk.Speak("Priority threat detected!", true);
+                            }
+                        }
+                        // New target acquired - only update if game has a valid target AND it passes validation
                         else if (currentTarget != null && !currentTarget.IsDead && currentTarget != autolockTarget)
                         {
-                            autolockTarget = currentTarget;
-                            autolockPartIndex = 0;
-                            autolockActive = true;
-
-                            if (currentTarget != lastAnnouncedTarget)
+                            string failReason;
+                            if (IsValidAutolockTarget(currentTarget, out failReason))
                             {
-                                lastAnnouncedTarget = currentTarget;
-                                AnnounceAutolockTarget(currentTarget);
+                                // Check if new target is higher priority than current lock
+                                float currentPriority = autolockTarget != null ? GetTargetPriority(autolockTarget) : 0f;
+                                float newPriority = GetTargetPriority(currentTarget);
+
+                                // Switch to new target if significantly higher priority (50 point threshold)
+                                if (autolockTarget == null || newPriority > currentPriority + 50f)
+                                {
+                                    autolockTarget = currentTarget;
+                                    autolockPartIndex = 0;
+                                    autolockActive = true;
+
+                                    if (currentTarget != lastAnnouncedTarget)
+                                    {
+                                        lastAnnouncedTarget = currentTarget;
+                                        AnnounceAutolockTarget(currentTarget);
+
+                                        // If in cover, announce flanking suggestion
+                                        if (failReason.Contains("cover"))
+                                            Tolk.Speak(failReason, false); // Append to announcement
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                // Target failed validation - announce why
+                                if (currentTarget != lastAnnouncedTarget && !string.IsNullOrEmpty(failReason))
+                                {
+                                    Tolk.Speak("Can't lock: " + failReason, true);
+                                    lastAnnouncedTarget = currentTarget;
+                                }
                             }
                         }
 
@@ -1109,15 +1190,26 @@ namespace GrandTheftAccessibility
                         // This is critical for vehicles which lose soft-lock more easily than peds
                         if (autolockActive && autolockTarget != null && autolockTarget.Exists() && !autolockTarget.IsDead)
                         {
-                            // Disable right stick camera controls to prevent player from moving aim off target
-                            // Only disable look controls - do NOT disable aim (25) as it causes toggle issues
-                            Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 1, true);   // Look Left/Right
-                            Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 2, true);   // Look Up/Down
-                            Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 220, true); // Script Right Axis X
-                            Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 221, true); // Script Right Axis Y
+                            // Validate target is still shootable (line-of-sight, range, etc.)
+                            if (ShouldMaintainAutolockTarget())
+                            {
+                                // Disable right stick camera controls to prevent player from moving aim off target
+                                // Only disable look controls - do NOT disable aim (25) as it causes toggle issues
+                                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 1, true);   // Look Left/Right
+                                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 2, true);   // Look Up/Down
+                                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 220, true); // Script Right Axis X
+                                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 221, true); // Script Right Axis Y
 
-                            UpdateAutolockAim(false);
-                            HandlePartCycling();
+                                UpdateAutolockAim(false);
+                                HandlePartCycling();
+                            }
+                            else
+                            {
+                                // Target no longer valid (lost LOS, out of range, etc.)
+                                Tolk.Speak("Target lost", true);
+                                autolockActive = false;
+                                autolockTarget = null;
+                            }
                         }
                         else if (autolockTarget != null && (!autolockTarget.Exists() || autolockTarget.IsDead))
                         {
@@ -4738,6 +4830,427 @@ namespace GrandTheftAccessibility
         }
 
         // ============================================
+        // AIM AUTOLOCK VALIDATION METHODS
+        // ============================================
+
+        /// <summary>
+        /// Gets the effective range for the current weapon in meters
+        /// </summary>
+        private float GetCurrentWeaponRange()
+        {
+            Weapon wep = Game.Player.Character.Weapons.Current;
+            WeaponHash hash = wep.Hash;
+
+            // Sniper Rifles - Very Long Range (500m)
+            if (hash == WeaponHash.SniperRifle || hash == WeaponHash.HeavySniper ||
+                hash == WeaponHash.MarksmanRifle)
+                return 500f;
+
+            // Marksman/DMR - Long Range (350m)
+            if (hash == WeaponHash.AdvancedRifle || hash == WeaponHash.BullpupRifle)
+                return 350f;
+
+            // Assault Rifles - Medium-Long Range (250m)
+            if (hash == WeaponHash.AssaultRifle || hash == WeaponHash.CarbineRifle ||
+                hash == WeaponHash.SpecialCarbine || hash == WeaponHash.BullpupRifle ||
+                hash == WeaponHash.CompactRifle)
+                return 250f;
+
+            // Machine Guns - Medium Range (200m)
+            if (hash == WeaponHash.MG || hash == WeaponHash.CombatMG || hash == WeaponHash.Gusenberg)
+                return 200f;
+
+            // SMGs - Short-Medium Range (100m)
+            if (hash == WeaponHash.SMG || hash == WeaponHash.MicroSMG ||
+                hash == WeaponHash.AssaultSMG || hash == WeaponHash.CombatPDW ||
+                hash == WeaponHash.MiniSMG)
+                return 100f;
+
+            // Shotguns - Short Range (40m)
+            if (hash == WeaponHash.PumpShotgun || hash == WeaponHash.SawnOffShotgun ||
+                hash == WeaponHash.BullpupShotgun || hash == WeaponHash.AssaultShotgun ||
+                hash == WeaponHash.HeavyShotgun || hash == WeaponHash.Musket)
+                return 40f;
+
+            // Pistols - Short-Medium Range (80m)
+            if (hash == WeaponHash.Pistol || hash == WeaponHash.CombatPistol ||
+                hash == WeaponHash.Pistol50 || hash == WeaponHash.SNSPistol ||
+                hash == WeaponHash.HeavyPistol || hash == WeaponHash.VintagePistol ||
+                hash == WeaponHash.APPistol || hash == WeaponHash.MarksmanPistol)
+                return 80f;
+
+            // Explosives/Launchers - Medium Range (150m)
+            if (hash == WeaponHash.RPG || hash == WeaponHash.GrenadeLauncher ||
+                hash == WeaponHash.HomingLauncher || hash == WeaponHash.Firework)
+                return 150f;
+
+            // Thrown Weapons - Very Short Range (30m)
+            if (hash == WeaponHash.Grenade || hash == WeaponHash.StickyBomb ||
+                hash == WeaponHash.ProximityMine || hash == WeaponHash.Molotov ||
+                hash == WeaponHash.BZGas || hash == WeaponHash.Flare ||
+                hash == WeaponHash.Ball || hash == WeaponHash.Snowball)
+                return 30f;
+
+            // Melee - Melee Range (3m)
+            if (hash == WeaponHash.Unarmed || hash == WeaponHash.Knife ||
+                hash == WeaponHash.Nightstick || hash == WeaponHash.Hammer ||
+                hash == WeaponHash.Bat || hash == WeaponHash.Crowbar ||
+                hash == WeaponHash.GolfClub || hash == WeaponHash.Bottle ||
+                hash == WeaponHash.Dagger || hash == WeaponHash.Hatchet ||
+                hash == WeaponHash.KnuckleDuster || hash == WeaponHash.Machete ||
+                hash == WeaponHash.Flashlight || hash == WeaponHash.SwitchBlade ||
+                hash == WeaponHash.PoolCue || hash == WeaponHash.Wrench ||
+                hash == WeaponHash.BattleAxe || hash == WeaponHash.StoneHatchet)
+                return 3f;
+
+            // Default for unknown weapons
+            return 100f;
+        }
+
+        /// <summary>
+        /// Checks if player has enough ammo to shoot
+        /// </summary>
+        private bool HasAmmoForWeapon(out string reason)
+        {
+            reason = "";
+            Weapon wep = Game.Player.Character.Weapons.Current;
+            WeaponHash hash = wep.Hash;
+
+            // Melee weapons always "have ammo"
+            if (hash == WeaponHash.Unarmed || hash == WeaponHash.Knife ||
+                hash == WeaponHash.Nightstick || hash == WeaponHash.Hammer ||
+                hash == WeaponHash.Bat || hash == WeaponHash.Crowbar ||
+                hash == WeaponHash.GolfClub || hash == WeaponHash.Bottle ||
+                hash == WeaponHash.Dagger || hash == WeaponHash.Hatchet ||
+                hash == WeaponHash.KnuckleDuster || hash == WeaponHash.Machete ||
+                hash == WeaponHash.Flashlight || hash == WeaponHash.SwitchBlade ||
+                hash == WeaponHash.PoolCue || hash == WeaponHash.Wrench ||
+                hash == WeaponHash.BattleAxe || hash == WeaponHash.StoneHatchet)
+                return true;
+
+            // Check total ammo
+            int totalAmmo = Function.Call<int>(Hash.GET_AMMO_IN_PED_WEAPON, Game.Player.Character, (int)hash);
+
+            if (totalAmmo <= 0)
+            {
+                reason = "Out of ammo";
+                return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Determines if a weapon can penetrate thin cover (vehicles, wooden fences)
+        /// Sniper rifles and high-caliber weapons can shoot through some materials
+        /// </summary>
+        private bool CanWeaponPenetrate()
+        {
+            Weapon wep = Game.Player.Character.Weapons.Current;
+            WeaponHash hash = wep.Hash;
+
+            // High-penetration weapons
+            if (hash == WeaponHash.SniperRifle || hash == WeaponHash.HeavySniper ||
+                hash == WeaponHash.Pistol50 || hash == WeaponHash.CombatMG ||
+                hash == WeaponHash.MG)
+                return true;
+
+            return false;
+        }
+
+        /// <summary>
+        /// Gets priority score for target selection
+        /// Higher score = higher priority (closer, more dangerous, etc.)
+        /// </summary>
+        private float GetTargetPriority(Entity target)
+        {
+            if (target == null || !target.Exists() || target.IsDead)
+                return 0f;
+
+            Ped player = Game.Player.Character;
+            float priority = 100f; // Base priority
+
+            // Distance factor (closer = higher priority)
+            float distance = World.GetDistance(player.Position, target.Position);
+            float distancePriority = Math.Max(0f, 200f - distance); // 200m max, 0m = +200 priority
+            priority += distancePriority;
+
+            // Threat factor for peds
+            if (target.EntityType == EntityType.Ped)
+            {
+                Ped ped = (Ped)target;
+
+                // Is actively shooting at player
+                if (ped.IsInCombatAgainst(player))
+                    priority += 150f;
+
+                // Is aiming at player
+                if (ped.IsAiming)
+                    priority += 100f;
+
+                // Is in a gang/enemy faction
+                if (Function.Call<int>(Hash.GET_RELATIONSHIP_BETWEEN_PEDS, ped, player) == 5) // Hate relationship
+                    priority += 75f;
+
+                // Is a cop and player is wanted
+                int pedType = Function.Call<int>(Hash.GET_PED_TYPE, ped);
+                if ((pedType == 6 || pedType == 23) && Game.Player.WantedLevel > 0) // Cop or SWAT
+                    priority += 100f;
+            }
+            // Vehicle priority
+            else if (target.EntityType == EntityType.Vehicle)
+            {
+                Vehicle veh = (Vehicle)target;
+
+                // Has occupants (more dangerous)
+                if (veh.Driver != null && veh.Driver.IsAlive)
+                    priority += 50f;
+
+                // Is in combat with player
+                if (veh.Driver != null && veh.Driver.IsInCombatAgainst(player))
+                    priority += 150f;
+            }
+
+            // Front of player = higher priority than behind
+            GTA.Math.Vector3 toTarget = GTA.Math.Vector3.Normalize(target.Position - player.Position);
+            float dotForward = GTA.Math.Vector3.Dot(player.ForwardVector, toTarget);
+            if (dotForward > 0.7f) // In front
+                priority += 50f;
+            else if (dotForward < 0f) // Behind
+                priority -= 50f;
+
+            return priority;
+        }
+
+        /// <summary>
+        /// Detects if target is in cover and suggests angle adjustment
+        /// Returns true if target is in cover, and provides suggested angle via out param
+        /// </summary>
+        private bool IsTargetInCover(Entity target, out float suggestedAngleOffset)
+        {
+            suggestedAngleOffset = 0f;
+
+            if (target == null || !target.Exists())
+                return false;
+
+            // For peds, check native cover status
+            if (target.EntityType == EntityType.Ped)
+            {
+                Ped ped = (Ped)target;
+                bool inCover = Function.Call<bool>(Hash.IS_PED_IN_COVER, ped, false);
+
+                if (inCover)
+                {
+                    // Get cover position and suggest flanking angle
+                    GTA.Math.Vector3 playerPos = Game.Player.Character.Position;
+                    GTA.Math.Vector3 targetPos = target.Position;
+                    GTA.Math.Vector3 toTarget = targetPos - playerPos;
+
+                    // Suggest moving 45 degrees left or right to flank
+                    // Determine which side has more clearance
+                    float rightAngle = (float)Math.Atan2(toTarget.X, toTarget.Y) + (float)(Math.PI / 4); // +45°
+                    float leftAngle = (float)Math.Atan2(toTarget.X, toTarget.Y) - (float)(Math.PI / 4); // -45°
+
+                    // For now, alternate suggestion (could be smarter with raycasts)
+                    suggestedAngleOffset = (DateTime.Now.Ticks % 2 == 0) ? 45f : -45f;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Validates if a target is suitable for aim autolock
+        /// Checks: line-of-sight, distance, visibility, ammo, weapon range
+        /// </summary>
+        private bool IsValidAutolockTarget(Entity target, out string reason)
+        {
+            reason = "";
+            if (target == null || !target.Exists() || target.IsDead)
+            {
+                reason = "Target doesn't exist or is dead";
+                return false;
+            }
+
+            Ped player = Game.Player.Character;
+            GTA.Math.Vector3 playerPos = player.Position;
+            GTA.Math.Vector3 targetPos = target.Position;
+
+            // 1. Ammo check - must have ammo to lock
+            string ammoReason;
+            if (!HasAmmoForWeapon(out ammoReason))
+            {
+                reason = ammoReason;
+                return false;
+            }
+
+            // 2. Weapon range check - distance must be within weapon's effective range
+            float distance = World.GetDistance(playerPos, targetPos);
+            float weaponRange = GetCurrentWeaponRange();
+
+            if (distance > weaponRange)
+            {
+                reason = "Out of range: " + (int)distance + "m (max " + (int)weaponRange + "m)";
+                return false;
+            }
+
+            // 3. Line-of-sight check - raycast from player's weapon muzzle to target
+            // Use player's head position as approximation for weapon position
+            GTA.Math.Vector3 weaponPos = player.GetBoneCoord(Bone.SKEL_Head);
+
+            // For specific part targeting, check LOS to the actual part position
+            GTA.Math.Vector3 targetCheckPos = targetPos;
+            if (target == autolockTarget && autolockPartIndex >= 0)
+            {
+                GTA.Math.Vector3 partPos = GetTargetPartPosition();
+                if (partPos != GTA.Math.Vector3.Zero)
+                    targetCheckPos = partPos;
+            }
+
+            RaycastResult losCheck = World.Raycast(weaponPos, targetCheckPos,
+                IntersectFlags.Map | IntersectFlags.Objects | IntersectFlags.Vehicles | IntersectFlags.Peds,
+                player);
+
+            if (losCheck.DidHit && losCheck.HitEntity != target)
+            {
+                // Something is blocking line of sight
+                bool canPenetrate = CanWeaponPenetrate();
+
+                // Check what's blocking
+                if (losCheck.HitEntity != null)
+                {
+                    // High-caliber weapons can shoot through vehicles
+                    if (canPenetrate && losCheck.HitEntity.EntityType == EntityType.Vehicle)
+                    {
+                        // Allow lock - weapon can penetrate vehicle
+                    }
+                    else if (losCheck.HitEntity.EntityType == EntityType.Vehicle)
+                    {
+                        reason = "Blocked by vehicle (need high-caliber)";
+                        return false;
+                    }
+                    else if (losCheck.HitEntity.EntityType == EntityType.Ped)
+                    {
+                        reason = "Blocked by person";
+                        return false;
+                    }
+                    else
+                    {
+                        reason = "Blocked by object";
+                        return false;
+                    }
+                }
+                else
+                {
+                    // Blocked by map geometry (walls, buildings) - never penetrable
+                    reason = "Blocked by wall";
+                    return false;
+                }
+            }
+
+            // 4. Screen visibility check - target should be roughly on screen
+            // Get screen coordinates of target (returns false if not on screen)
+            float screenX = 0f, screenY = 0f;
+            if (!Function.Call<bool>(Hash.GET_SCREEN_COORD_FROM_WORLD_COORD,
+                targetPos.X, targetPos.Y, targetPos.Z, out screenX, out screenY))
+            {
+                reason = "Target not visible on screen";
+                return false;
+            }
+
+            // 5. View cone check - target should be within reasonable aim angle (~90 degrees front cone)
+            GTA.Math.Vector3 toTarget = GTA.Math.Vector3.Normalize(targetPos - playerPos);
+            GTA.Math.Vector3 playerForward = player.ForwardVector;
+            float dotProduct = GTA.Math.Vector3.Dot(playerForward, toTarget);
+
+            if (dotProduct < 0.0f) // 90 degree cone (cos(90°) = 0)
+            {
+                reason = "Target not in view cone";
+                return false;
+            }
+
+            // 6. Cover detection - auto-snap angle to suggest flanking position
+            float suggestedAngle;
+            if (IsTargetInCover(target, out suggestedAngle))
+            {
+                // Auto-adjust player heading to flanking angle
+                float currentHeading = player.Heading;
+                float targetAngle = currentHeading + suggestedAngle;
+
+                // Gradually rotate player to flanking position
+                player.Heading = targetAngle;
+
+                string direction = suggestedAngle > 0 ? "right" : "left";
+                reason = "In cover, moving " + direction; // Announce the auto-rotation
+                // Continue to return true - lock is valid, just adjusting angle
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Checks if the current autolock target should remain locked
+        /// More lenient than initial acquisition to prevent lock breaking during combat
+        /// </summary>
+        private bool ShouldMaintainAutolockTarget()
+        {
+            if (autolockTarget == null || !autolockTarget.Exists() || autolockTarget.IsDead)
+                return false;
+
+            // During active lock, be more lenient - only break on hard failures
+            Ped player = Game.Player.Character;
+            GTA.Math.Vector3 playerPos = player.Position;
+            GTA.Math.Vector3 targetPos = autolockTarget.Position;
+
+            // Ammo check - break lock if out of ammo
+            string ammoReason;
+            if (!HasAmmoForWeapon(out ammoReason))
+            {
+                Tolk.Speak(ammoReason, true);
+                return false;
+            }
+
+            // Distance check - use weapon range + 50m buffer during active lock
+            float distance = World.GetDistance(playerPos, targetPos);
+            float weaponRange = GetCurrentWeaponRange();
+            float maxDistance = weaponRange + 50f; // +50m buffer to prevent lock breaking too early
+
+            if (distance > maxDistance)
+                return false;
+
+            // Line-of-sight check for the specific part being targeted
+            GTA.Math.Vector3 weaponPos = player.GetBoneCoord(Bone.SKEL_Head);
+            GTA.Math.Vector3 targetCheckPos = GetTargetPartPosition();
+            if (targetCheckPos == GTA.Math.Vector3.Zero)
+                targetCheckPos = targetPos;
+
+            RaycastResult losCheck = World.Raycast(weaponPos, targetCheckPos,
+                IntersectFlags.Map | IntersectFlags.Objects | IntersectFlags.Vehicles | IntersectFlags.Peds,
+                player);
+
+            // Break lock if blocked by solid geometry (walls/buildings)
+            // Allow penetration for high-caliber weapons through vehicles
+            if (losCheck.DidHit && losCheck.HitEntity != autolockTarget)
+            {
+                // If blocked by map geometry, break lock immediately
+                if (losCheck.HitEntity == null) // null entity = hit map/world
+                    return false;
+
+                // If blocked by vehicle, check if weapon can penetrate
+                if (losCheck.HitEntity.EntityType == EntityType.Vehicle)
+                {
+                    if (!CanWeaponPenetrate())
+                        return false; // Can't shoot through, break lock
+                    // Otherwise, allow lock to continue - weapon can penetrate
+                }
+                // If blocked by ped, allow brief period before breaking (they might move)
+            }
+
+            return true;
+        }
+
+        // ============================================
         // SMART STEERING ASSISTS HELPER METHODS
         // ============================================
 
@@ -4791,7 +5304,8 @@ namespace GrandTheftAccessibility
             }
 
             // Raycast for world geometry
-            GTA.Math.Vector3 startPos = playerPos + new GTA.Math.Vector3(0, 0, 0.5f);
+            // Raise start position to 1.5m to avoid hitting road surface at high speeds
+            GTA.Math.Vector3 startPos = playerPos + new GTA.Math.Vector3(0, 0, 1.5f);
             float rayRange = Math.Min(detectionRange, vehicleSpeed * 2.5f);
 
             RaycastResult rayCenter = World.Raycast(startPos, startPos + (forwardVec * rayRange),
@@ -4799,13 +5313,19 @@ namespace GrandTheftAccessibility
             if (rayCenter.DidHit)
             {
                 float dist = World.GetDistance(startPos, rayCenter.HitPosition);
-                float ttc = dist / Math.Max(vehicleSpeed, 1f);
-                if (ttc < closestTTC)
+                // Ignore hits that are too close (likely road surface or minor bumps)
+                // At 25mph (~11m/s), ignore anything closer than 3m to avoid false positives
+                float minDistThreshold = Math.Max(3f, vehicleSpeed * 0.3f);
+                if (dist > minDistThreshold)
                 {
-                    closestTTC = ttc;
-                    closestType = "obstacle";
-                    closestDir = "ahead";
-                    avoidDirection = GetClearerSide(playerVeh, rayRange);
+                    float ttc = dist / Math.Max(vehicleSpeed, 1f);
+                    if (ttc < closestTTC)
+                    {
+                        closestTTC = ttc;
+                        closestType = "obstacle";
+                        closestDir = "ahead";
+                        avoidDirection = GetClearerSide(playerVeh, rayRange);
+                    }
                 }
             }
 
@@ -4818,10 +5338,43 @@ namespace GrandTheftAccessibility
             float steerThreshold = isFullMode ? STEER_THRESHOLD_FULL : STEER_THRESHOLD_ASSIST;
             float brakeThreshold = isFullMode ? BRAKE_THRESHOLD_FULL : BRAKE_THRESHOLD_ASSIST;
 
+            // In Full mode, also apply gentle road-following correction when no immediate threats
+            bool applyRoadFollowing = false;
+            int roadFollowDir = 0;
+            if (isFullMode && closestTTC > steerThreshold && vehicleSpeed > 5f)
+            {
+                // Get nearest road node and its heading
+                GTA.Math.Vector3 roadPos;
+                float roadHeading;
+                bool hasRoadNode = Function.Call<bool>(Hash.GET_CLOSEST_VEHICLE_NODE_WITH_HEADING,
+                    playerPos.X, playerPos.Y, playerPos.Z,
+                    out roadPos, out roadHeading, 1, 3.0f, 0);
+
+                if (hasRoadNode)
+                {
+                    float distToRoad = World.GetDistance(playerPos, roadPos);
+                    // If we're drifting off the road (more than 2.5m from center), gently correct
+                    if (distToRoad > 2.5f && distToRoad < 8f)
+                    {
+                        // Determine which side of the road we're on
+                        GTA.Math.Vector3 toRoad = GTA.Math.Vector3.Normalize(roadPos - playerPos);
+                        float dotRight = GTA.Math.Vector3.Dot(playerVeh.RightVector, toRoad);
+                        roadFollowDir = dotRight > 0 ? 1 : -1; // Steer toward road
+                        applyRoadFollowing = true;
+                    }
+                }
+            }
+
             if (closestTTC < steerThreshold || closestTTC < brakeThreshold)
             {
                 steeringAssistActive = true;
                 ApplySteeringAssist(playerVeh, closestTTC, avoidDirection, isFullMode, steerThreshold, brakeThreshold);
+            }
+            else if (applyRoadFollowing)
+            {
+                // Apply gentle road-following correction (weaker than collision avoidance)
+                steeringAssistActive = true;
+                ApplySteeringAssist(playerVeh, 6.0f, roadFollowDir, isFullMode, steerThreshold, brakeThreshold);
             }
             else if (steeringAssistActive)
             {
@@ -5001,13 +5554,26 @@ namespace GrandTheftAccessibility
                 Function.Call((Hash)0xE8A25867FBA3B05E, 0, 71, 0f);   // Cut throttle
 
                 // In Full mode, if collision is truly unavoidable, force stop
-                if (cachedIsFullMode && threatTimeToCollision < 0.3f && playerVeh != null)
+                // Reduced threshold from 0.3s to 0.15s to prevent false positives at high speeds
+                // Also verify we're actually off-road before forcing velocity to zero
+                if (cachedIsFullMode && threatTimeToCollision < 0.15f && playerVeh != null)
                 {
-                    playerVeh.Velocity = GTA.Math.Vector3.Zero;
-                    if (DateTime.Now.Ticks - lastAssistAnnounceTicks > 10000000)
+                    // Check if vehicle is on a valid road - if so, don't force stop (likely false positive)
+                    GTA.Math.Vector3 roadPos;
+                    float heading;
+                    bool isOnRoad = Function.Call<bool>(Hash.GET_CLOSEST_VEHICLE_NODE_WITH_HEADING,
+                        playerVeh.Position.X, playerVeh.Position.Y, playerVeh.Position.Z,
+                        out roadPos, out heading, 1, 3.0f, 0);
+
+                    // Only force stop if we're NOT on a valid road (true emergency)
+                    if (!isOnRoad || World.GetDistance(playerVeh.Position, roadPos) > 5f)
                     {
-                        Tolk.Speak("Emergency halt!", true);
-                        lastAssistAnnounceTicks = DateTime.Now.Ticks;
+                        playerVeh.Velocity = GTA.Math.Vector3.Zero;
+                        if (DateTime.Now.Ticks - lastAssistAnnounceTicks > 10000000)
+                        {
+                            Tolk.Speak("Emergency halt!", true);
+                            lastAssistAnnounceTicks = DateTime.Now.Ticks;
+                        }
                     }
                 }
             }
