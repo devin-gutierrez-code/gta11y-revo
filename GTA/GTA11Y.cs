@@ -13666,16 +13666,8 @@ namespace GrandTheftAccessibility
                 else if (autolockTarget.EntityType == EntityType.Vehicle)
                 {
                     Vehicle vehicle = (Vehicle)autolockTarget;
-                    string boneName = VEHICLE_TARGET_PARTS[autolockPartIndex].bone;
-                    int boneIndex = Function.Call<int>(Hash.GET_ENTITY_BONE_INDEX_BY_NAME, vehicle, boneName);
-
-                    if (boneIndex != -1)
-                    {
-                        GTA.Math.Vector3 bonePos = Function.Call<GTA.Math.Vector3>(
-                            Hash.GET_WORLD_POSITION_OF_ENTITY_BONE, vehicle, boneIndex);
-                        if (bonePos != GTA.Math.Vector3.Zero) return bonePos;
-                    }
-                    return vehicle.Position;
+                    GTA.Math.Vector3 bonePos = GetVehicleBonePosition(vehicle, autolockPartIndex);
+                    return bonePos != GTA.Math.Vector3.Zero ? bonePos : vehicle.Position;
                 }
             }
             catch { }
@@ -13707,16 +13699,7 @@ namespace GrandTheftAccessibility
                 else if (autolockTarget.EntityType == EntityType.Vehicle)
                 {
                     Vehicle vehicle = (Vehicle)autolockTarget;
-                    string boneName = VEHICLE_TARGET_PARTS[partIndex].bone;
-                    int boneIndex = Function.Call<int>(Hash.GET_ENTITY_BONE_INDEX_BY_NAME, vehicle, boneName);
-
-                    if (boneIndex != -1)
-                    {
-                        GTA.Math.Vector3 bonePos = Function.Call<GTA.Math.Vector3>(
-                            Hash.GET_WORLD_POSITION_OF_ENTITY_BONE, vehicle, boneIndex);
-                        if (bonePos != GTA.Math.Vector3.Zero) return bonePos;
-                    }
-                    return vehicle.Position;
+                    return GetVehicleBonePosition(vehicle, partIndex);
                 }
             }
             catch { }
@@ -13726,6 +13709,26 @@ namespace GrandTheftAccessibility
             // of the function and the catch fall-through.
             if (autolockTarget == null || !autolockTarget.Exists()) return GTA.Math.Vector3.Zero;
             return autolockTarget.Position;
+        }
+
+        /// <summary>
+        /// Returns a valid world-space vehicle bone position, or zero when the model
+        /// does not expose that target part or its transform resolves to the vehicle origin.
+        /// </summary>
+        private GTA.Math.Vector3 GetVehicleBonePosition(Vehicle vehicle, int partIndex)
+        {
+            if (vehicle == null || !vehicle.Exists()
+                || partIndex < 0 || partIndex >= VEHICLE_TARGET_PARTS.Length)
+                return GTA.Math.Vector3.Zero;
+
+            EntityBone bone = vehicle.Bones[VEHICLE_TARGET_PARTS[partIndex].bone];
+            if (!bone.IsValid) return GTA.Math.Vector3.Zero;
+
+            GTA.Math.Vector3 position = bone.Position;
+            if (position == GTA.Math.Vector3.Zero
+                || GTA.Math.Vector3.Distance(position, vehicle.Position) < 0.05f)
+                return GTA.Math.Vector3.Zero;
+            return position;
         }
 
         /// <summary>
@@ -13844,8 +13847,6 @@ namespace GrandTheftAccessibility
 
             bool changed = false;
             int direction = 0;
-            int originalIndex = autolockPartIndex;
-
             if (rightStickX < -0.5f && !autolockPartCycleLeft)
             {
                 autolockPartCycleLeft = true;
