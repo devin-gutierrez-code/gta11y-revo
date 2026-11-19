@@ -10,6 +10,231 @@ you can find it by arrowing through the list.
 
 ---
 
+## San Andreas Wildfires (unreleased, rides on iter71)
+
+- **New setting: "San Andreas Wildfires"**, second-last row of the Settings menu, ships
+  OFF. A chaos feature. When on, any burning car or person, or any fire you did not start
+  through the mod (molotov, explosion, fire ammo), within 150 m sets off a wildfire.
+  - It burns on everything except water and spreads square by square, faster with the
+    wind and uphill, but it also creeps sideways and slowly against the wind, so it grows
+    into a burning area rather than a line. Embers start spot fires 12 to about 40 m
+    downwind, but only while the fire has room to grow.
+  - Each patch burns for 35 to 70 seconds. Rain slows it and shortens each fire. Burnt
+    ground does not relight.
+  - When the fire is as big as the game allows, it keeps the part nearest you burning and
+    lets the far side go out, so it stays around you instead of running off downwind.
+    The first version did the opposite and the fire raced away within seconds.
+  - Fire brigades are called to the fire front nearest you, up to two at once, and a
+    line they put out stays out until embers jump it.
+  - **Fire crews now fight the fire.** Before this, trucks arrived, sat with sirens
+    blaring, nobody got out, and they stayed until you walked away. The game's own crews
+    ignore fires the mod starts. Now, when a truck stops within 60 m of the fire, the
+    mod takes it over:
+    - The siren sound stops. The lights keep flashing.
+    - The driver sprays the water cannon at fire within 30 m of the truck. Otherwise
+      the driver gets out too.
+    - The rest of the crew gets out with fire extinguishers, runs to the nearest
+      burning patch and sprays it. They are fireproof, and they do not run from the
+      flames.
+    - When there has been no fire within 80 m of the truck for 10 seconds, or after
+      5 minutes, the crew gets back in and drives off with traffic. After 30 seconds
+      the truck leaves without anyone who has not got back in. Once it has left, the
+      game removes it the normal way.
+    - No new brigade is called while two crews are already working.
+  - People and drivers near the flames run or drive away. Mission characters and your
+    bodyguards are left alone.
+  - Fire more than 350 m from you is removed, and turning the setting off removes all
+    of it and cancels the fire brigade calls.
+  - No spoken per-fire announcements. The one thing it says is "Wildfire could not
+    create any fire" if it is on and nothing will light.
+- **New setting: "Drive assist slows for wildfire on the road ahead"**, last row, ships
+  OFF. Drive assist brakes toward a crawl 10 m before fire on the road it is about to
+  drive, and says "Fire on the road, N meters" at most every 15 seconds. It slows you,
+  it does not stop you, so you can still crawl through.
+- Replaces the standalone `san_andreas_wildfires.cs`, which never loaded: it used
+  syntax ScriptHookVDotNet's script compiler rejects, and used the wrong native to
+  remove fires. The hold-Q toggle is gone; Q is the game's cover key.
+
+## iter71-bridge-harness-authority-convergence
+
+- **The three drive-assist fixes below ship ON**, which is a deliberate exception to the
+  usual one-switch-per-session rule. **Debug: turn iteration 71's three drive assist
+  changes off in one go** stands all three down together, so a drive with them off can be
+  compared against the same drive with them on without arrowing through three rows.
+- **Stop cruise control accelerating while the car is out of its lane or pointing across
+  the road** is now on. Cruise control could previously open the throttle while the mod
+  had already lost confidence in where the lane was — accelerating away from the road it
+  was trying to rejoin. It only ever withholds acceleration; it never takes braking away,
+  so it cannot leave a moving car unable to stop.
+- **When the assist cannot find any road to recover to, hold still and say so.** The
+  assist used to declare itself back in normal lane keeping the instant a recovery search
+  came up empty, even though it knew lane keeping was invalid — then immediately re-enter
+  recovery, over and over. It now holds, tells you, and escalates to the stuck-car rescue
+  instead of round-tripping in silence.
+- **Stop the stuck-car rescue repeating forever in the same place.** The rescue ladder
+  could teleport the car to the nearest road, clear its own escalation state, and start the
+  same twenty-second climb again at the new spot indefinitely. It now waits between
+  teleports, carries its escalation across them, counts attempts at one location, and after
+  three says out loud that it is handing the car back to you.
+- Drive-assist reporting fixed in four places where it was quietly lying. The reason
+  printed for a mode change belonged to a different mode change; a failed recovery search
+  reported the position and distance of a candidate it had *rejected* as though it had
+  found one; the cruise-control interlock read a steering-angle figure with no freshness
+  check; and damage reports carried no fire, fuel-tank, roll, pitch or airborne state.
+- Added an opt-in test-harness half to the diagnostic bridge (iter-65): read and write
+  settings, place the player and vehicle at a named location with a heading and a speed,
+  spawn and damage a vehicle, set time, weather and traffic density, and run a scripted
+  scenario. Every world write is recorded in the drive log. This is what makes a
+  drive-assist experiment repeatable without driving it by hand. It is off unless the
+  bridge is explicitly enabled **and** `allow_world_writes` is set; `dist` packages ship
+  both off.
+- Triage: auto-drive markers are no longer pooled into the drive-assist failure rate — on
+  one archived session 71% of the markers were the game's own task driving, not the assist.
+  Comparison tables gained a vehicle-class column, because a session mixing motorcycles and
+  cars was averaging two experiments into one number and the mod has no motorcycle-specific
+  code path anywhere. The "previous session" comparison now orders by when the session ran
+  rather than when the report was generated.
+
+## iter70-animal-melee-setting
+
+- Fixed **Animal direct melee** reporting that it was on without actually changing
+  combat. The switch is now registered in the canonical settings collection, persists
+  to `gta11ySettings.json`, defaults off, and controls both the direct-melee task and
+  the target-stickiness/tactical-bypass behavior added in iter 68.
+
+## iter69-intox-lifecycle
+
+- Removed the unsafe build-specific bridge into Rockstar's drunkenness script globals.
+  The existing setting now says once that the bridge is unavailable safely and uses
+  the mod's owned intoxication model instead; it never writes unidentified game memory.
+- Intoxication tasks, props, stashed weapons, movement, and ped flags now retain their
+  owning character and are torn down on that character. Turning the feature off, changing
+  protagonist, or reloading the script cannot leave a consume scene holding control.
+- A drink or smoke now commits its dose when the enter animation completes. Cancelling
+  before that gives no dose; cancelling the put-down or stand-up outro keeps the full dose.
+- Safehouse animation waits for its audio bank as well as its dictionary and props, so
+  cold-cache opening, pouring, and lighting sounds cannot fire before the bank is ready.
+- Synchronized scenes use engine phase for normal completion and the hard watchdog for
+  failure. The earlier timer no longer makes the hard-timeout path unreachable.
+- **Impaired driving when intoxicated** and **Blackout takes the wheel** now operate as
+  independent switches. Drive-assist suspension follows the effect that actually owns
+  the controls, and stage announcements no longer claim driving effects that are off.
+
+## iter68-animal-direct-melee
+
+- Added the **Animal direct melee** bodyguard switch, shipping off for controlled field
+  testing. When enabled, animal guards use Rockstar's dedicated model-native melee task,
+  retain a live target, and bypass firearm-oriented flank, sniper, cover, and suppression
+  task replacement. Damage remains entirely game-native; no simulated damage is used.
+
+## iter67-animal-guard-combat
+
+- Animal guards now keep their model-native unarmed attack instead of being equipped
+  with a firearm they cannot animate. Mountain lions receive explicit unarmed-versus-
+  armed combat permission and slot zero animals participate in automatic engagement.
+- Guard combat tasks reject another active bodyguard as a target.
+- Added `gta11y-bodyguards-<date-time>.log` in the GTA V folder. It records spawns,
+  target assignments, two-second state samples, stalled attacks, and guard-on-guard
+  combat so a silent AI failure leaves evidence.
+
+## iter66-chained-guard-groups
+
+- Raised the bodyguard limit from 7 to 21 by chaining three Rockstar ped groups. Guards
+  6 and 13 act as group anchors while the existing combat coordinator controls all guards.
+- Added cat, Chop, husky, poodle, pug, retriever, Rottweiler, shepherd, West Highland
+  terrier, mountain lion, cow, and deer to the selectable guard models.
+
+## iter65-mcp-diagnostic-bridge
+
+- Added an opt-in, loopback-only diagnostic bridge and dependency-free MCP/CLI clients
+  for live mod, player, vehicle, scanner, shapecast, and drive-assist state.
+- Added bounded game-control injection with achieved-state readback, live screenshot
+  requests, attributed drive-log markers, and a separate SAPI tester speech channel.
+- Test-bed deployment enables the bridge; public `dist` packages explicitly disable it.
+
+## iter64-acc-lateral-interlock
+
+- Added **Stop cruise control accelerating while the car is out of its lane or pointing
+  across the road**, shipped off. Cruise control could open the throttle while the mod had
+  already lost the lane; this withholds acceleration in that case and never touches
+  braking. (Promoted to on in iter-71.)
+- Every takeover and failure announcement now carries what state the car was actually in:
+  engine and body health, fuel tank, whether a wheel is broken and by how much its steering
+  is limited, and whether the car was in the air. A takeover message that could not say
+  whether the car was wrecked or merely stuck was the same message in both cases.
+- Airborne and road-departure episodes are tracked as episodes with a start, an end and a
+  duration, instead of being inferred from single frames.
+- Fixed a class of settings that were invisible to the mod's own experiment ledger.
+  **Precise ground detection** in particular could be toggled mid-session and the log
+  recorded nothing at all — no change event, no re-issued settings list, no boundary in the
+  report. A session was run specifically to test it and left no evidence that it had been.
+- Triage: each incident now reports what the car actually lost across it, measured
+  independently of the failure markers, so a marker count that misses damage is caught.
+
+## iter63-baseline-visibility-governor-bisect
+
+- The startup settings-drift line now **names** the settings that differ from the previous
+  session instead of counting them. A count cannot tell you that a drive-assist switch you
+  never chose was on from a saved settings file — which is exactly how one session ran a
+  configuration nobody had picked for it.
+- The eleven experimental drive-assist settings that **Debug: turn the eleven experimental
+  drive assist settings off in one go** controls are now visible to the reports. One
+  session flipped that switch nine times and every one of its seventeen segments rendered
+  an identical settings list, so the report told a player who had just driven ten balanced
+  minutes of a controlled experiment that no such experiment was present.
+- The once-per-session warning about settings that depend on a switched-off sampler now
+  re-arms on every configuration change. Firing once for the first of nine identical
+  configurations is not a warning.
+- Triage: added the comparison the switch exists for — failure rate with the eleven on
+  against the same vehicle with them off.
+
+## iter62-spatial-hostiles-aviation
+
+- **Positioned sound now has a front, a back and a height.** Every cue previously ended in
+  a single left-right pan number, so a target 30 degrees ahead-right and one 150 degrees
+  behind-right produced an identical sound, and nothing had elevation at all on a map of
+  staircases, overpasses and rooftops. Replaced with a proper 3D spatializer across all
+  twelve cue sites. **Head-relative listener** is on; turn it off to get the old panner back.
+  **Elevation cue** ships off.
+- **One hostile detector instead of two.** Players without bodyguards were getting a cruder
+  detector — direct combat only, no armed layer, no police tell, no all-clear — and neither
+  path said *where* anything was. **Hostile detection** now takes a level: 1 is exactly the
+  old behaviour and is the default, 2 adds relationships, police and an all-clear, 3 adds
+  armed proximity. Announcements name and place the nearest two using the same listener
+  frame the audio uses.
+- Aviation behaviour checked against Rockstar's own shipping scripts rather than assumed,
+  with a verification tool that fails the build on drift. **Plane landing gear**, **Plane
+  taxi assist** and **Helicopter landing mode** ship off.
+- A patrol order no longer empties your car. Only the butler was exempt from the wander
+  task, so triggering a patrol while driving made the rest of the detail climb out and
+  scatter. Any guard seated in your vehicle now stays seated, and the announcement says
+  which guards actually went.
+- Backlog fixes, all shipped off: **Flat-ground distances** (ground distance was computed
+  as a subtraction that under-reports on any slope), **Precise ground detection** (the curb
+  probe could not tell "no ground" from "ground at sea level", which is the entire Los
+  Santos shoreline), and a pathfinding telemetry switch that drives nothing.
+- Settings count 147 to 158.
+
+## iter61-lanetarget-bisect-driftguard
+
+- **`EVENT gate-drift` and a spoken startup note.** The mod now compares its settings
+  against the *previous session's* and says at startup when they differ. The session this
+  came from ran two drive-assist switches nobody had turned on that session, at more than
+  eight times the failure rate of the session before it, and nothing said so.
+- **Interaction Menu detection.** The Interaction Menu does not pause the game and does not
+  read as a pause menu, so the assist believed a player sitting in a menu was driving, and
+  kept firing take-over pulses at them. It is now detected and logged. **Pause drive assist
+  while the Interaction Menu is open, and say so** ships off — a false positive here would
+  stand the assist down mid-drive.
+- Mode changes now record which rule decided them, how long the previous mode was held, and
+  what a distance sentinel actually meant. Two opposite code paths wrote the same sentinel
+  value and the log could not tell them apart.
+- **Aim at the middle of a lane on multi-lane one-way roads** switched off for a controlled
+  session, to attribute a regression to it or clear it.
+- Triage: the two thrash rates (mode changes and road-model distrust, both per minute and
+  both independent of the marker count) now appear in the report headline against a
+  six-session median, along with which settings changed since the previous session.
+
 ## The short version
 
 The original mod was a single 1,497-line script that told you where you were, what was
@@ -38,9 +263,9 @@ By the numbers:
 | Lines in the main script | 1,497 | 34,147 |
 | Source files | 5 | 16 |
 | Top-level menus | 4 | 9 |
-| Settings | 21 | 98 |
+| Settings | 21 | 143 |
 | Keys used | 11 | 22 |
-| Shipped data files | 0 | 4 |
+| Shipped data files | 0 | 5 |
 
 ---
 
@@ -63,8 +288,29 @@ there. It works on foot and in a vehicle.
   chosen so they do not collide with each other or with the 262 Hz brake warning.
 - **A glide tracks closing speed.** A tone that slides up is getting closer; sliding
   down is moving away. It is capped at two semitones so it never becomes a siren.
-- **Stereo panning** places each obstacle left or right. Things behind you play centred
-  and an octave down.
+- **Sounds come from where the thing is** — not just left or right. Every cue is now
+  placed in three dimensions: the tone reaches your near ear slightly before your far
+  one, sounds behind you go duller rather than merely quieter (which is how your ears
+  tell front from back in real life), and distance takes the edge off the tone the way
+  air actually does. A pedestrian walking past you now crosses from front to back
+  audibly, instead of just sliding between the speakers.
+
+  The old cue could not do this. It was a single left-right slider, so something 30
+  degrees ahead of you on the right and something 150 degrees behind you on the right
+  sounded identical, and nothing had a height at all. Behind was handled by giving it
+  its own zone with a double tick an octave down — that still works and still sounds
+  the same, but it is no longer the only thing keeping the two apart.
+- **Height gets its own cue** if you turn it on. Anything more than 20 degrees above or
+  below you is followed by a short two-note chirp, rising for above and falling for
+  below. This is deliberately a *learned* signal rather than an attempt to fake the way
+  real ears sense height: the real cue lives around 8 kHz, and these tones are far below
+  that, so doing it "properly" would have been completely inaudible while looking
+  correct in the code.
+- **One meaning per channel, finally.** Three cues — the waypoint tracker, the mission
+  marker and the hostile beep — were still bending their pitch to encode direction or
+  distance, which contradicts the rule above that pitch tells you *what a thing is*.
+  Both meanings had been shipping at once. Those three now hold a fixed note and let
+  their position do the talking.
 - **Shape casting.** Instead of a single hair-thin ray per direction, the scanner
   sweeps a capsule, so it catches thin poles, kerbs, and half-open doors that a single
   ray slips straight past. On foot it uses a 0.35 m capsule at knee height, which is
@@ -83,16 +329,32 @@ there. It works on foot and in a vehicle.
   300 / 400 / 500 / 750 / 1000 m. The original offered four steps topping out at 100 m.
   **25 m by default.**
 - `On-Foot Detection Range` — 5 / **8** / 12 / 20 m.
+- `Sound Direction Reference` — Your body / **The camera on foot, the vehicle when
+  driving** (default) / The camera, always. This decides what "ahead" means for every
+  positioned sound. Camera-relative is the default because the camera is what your right
+  stick aims and what your movement stick is measured against, so it matches what you
+  are actually steering — and it lets you sweep the camera to scan a room by ear. If you
+  would rather the soundscape stay put when you look around, choose "Your body".
+- `Announce sounds above and below with a chirp` — **Off by default.**
 
 ### On-demand queries (NumPad Divide) — new
 
 Rather than listening to ambient beeps all the time, you can ask:
 
 - **Tap** — *Around Me*. Names the nearest obstacle in each zone in plain words
-  ("pedestrian", "wall", "low obstacle", or the vehicle's actual name).
+  ("pedestrian", "wall", "low obstacle", or the vehicle's actual name), then plays one
+  positioned ping per zone in turn — ahead, right, behind, left. Zones that are clear
+  stay silent, so what you hear is the shape of the space rather than a list of it.
 - **Double-tap** — *What's Ahead*. Fires an eight-direction fan of casts and reports
   what is in each. It is spread across two ticks so it does not stutter the frame rate.
+  It now also sweeps eight pings across that fan, left to right, each one placed where
+  its ray actually hit. **A doorway is a hole in the sweep** — you hear the gap as the
+  sweep passes it, at the moment it passes, without it having to be counted, ranked and
+  named first. The spoken version only ever reported the best two openings.
 - **Hold** — *Where Am I*. Street, zone, and orientation.
+
+`Scan Audio Sweep` controls this: Off (speech only) / **Speech, then sound** (default) /
+Sound only, no speech.
 
 ---
 
@@ -118,8 +380,16 @@ Settings:
   bends before you reach them.
 - Adaptive cruise: follows the car in front, and releases both brake and throttle when
   you come to a stop behind one instead of grinding against it.
-- Lane centring against a road polyline (`Lane Centering`, experimental, off by
-  default).
+- Lane centring against a road polyline (`Lane Centering`, experimental). On a two-way
+  road this aims half a lane to your side of the centre line, which is right. On a
+  **one-way or divided road with two or more lanes** it used to aim at nothing at all —
+  and the road node in that case sits exactly on the painted line *between* the lanes, so
+  the assist was steering you along the lane divider by design. In a recent test session
+  that was 27% of the driving, and it is the reason the car sometimes tracked close to a
+  lane edge. `Aim at the middle of a lane on multi-lane one-way roads` (off by default)
+  fixes it, and also stops the guidance being pushed off the road surface on bends — the
+  check that prevented that only ever ran for the point under the car, not for the points
+  further ahead that the steering actually aims at.
 - Junction slow-down and spoken junction announcements (`Junction Slow-Down and
   Announcements`).
 - Wrong-way detection (`Wrong-Way Driving Alerts`).
@@ -179,6 +449,32 @@ You have control."*
 left/right motor selector, so the side is encoded as a pattern instead: a single short
 pulse means left, a double pulse means right, and a long low buzz means road edge.
 
+### The warning tones, and what they mean
+
+Drive assist makes three sounds that are not speech. They were never written down
+anywhere, which meant the only way to learn them was to guess. All three can now be
+silenced together with `Drive assist warning beeps` (on by default) — **speech is not
+affected by that switch**, and neither are the obstacle-scanner beeps, which have their
+own settings.
+
+| sound | what it means | how to read it |
+|---|---|---|
+| a clean tone that rises in pitch | **steer around something ahead** | the higher the pitch, the less time you have. It also repeats faster as it gets more urgent. |
+| a buzzing tone, always the same pitch | **brake now** | faster and louder means sooner. It starts about 1.8 seconds before impact and saturates at 0.2. |
+| a low growl | **the road ahead is blocked and the assist is holding the car** | you are pressing the throttle and it is not going to move until the way clears. |
+
+The rising tone had a bug that made it useless: it was supposed to sound at most once
+every two seconds, but the timer it checked was never reset, so it restarted every single
+frame — around forty times a second. The 80-millisecond tone never finished playing, so
+the pitch, which is the entire message, could not be heard as pitch. It sounded like a
+stutter and was reasonably mistaken for a debug artifact. It now paces itself properly,
+from about one beep a second when a hazard is distant down to four a second when it is
+imminent.
+
+The same bug was silencing nothing but repeating a phrase: *"Handbrake turn left"* shared
+that broken timer and was spoken 55 times in a single 20-minute session. It now has its
+own four-second limit.
+
 ### The actuation fix
 
 Worth calling out on its own, because it explains why drive assist behaved so poorly
@@ -188,6 +484,43 @@ the car. Roughly two dozen rounds of tuning were built on top of a control chann
 was never connected. This is fixed (`Real braking and steering`, on by default), and
 most of the drive-assist switches that came after it exist to manage the consequences of
 the commands suddenly becoming real.
+
+### When the assist is not actually driving
+
+Three things could go wrong silently, which for a mod you listen to rather than look at
+is the worst way for anything to fail.
+
+**The car being driven by the game, not by the assist.** To free a wedged car the assist
+could hand the wheel to the game's own driving code. While that was happening the assist
+had no steering and no brakes — and did not know it, so it went on talking as though it
+were driving. In one recorded case the game reversed a car from a standstill to 37 mph
+into a row of concrete pillars, and in another it reversed a car down a river bank into
+the water. That hand-off is now short, is refused unless the space behind the car is
+actually clear, is re-checked continuously, and is cancelled the moment the reason for it
+goes away.
+
+**Losing the steering without saying so.** If the assist is asking for steering and the
+wheels are not moving, it now says *"Drive assist has lost steering. Take the wheel."*
+This has no switch. A feature that fails quietly is indistinguishable from one that was
+never installed.
+
+**Being told you have control when you do not.** When the assist gives up on a stuck car
+it hands back to you. If the game is still driving the car at that moment it now says
+*"The car may still be moving on its own. Brake now."* instead of *"You have control."*
+
+**Water.** The assist would only watch for water ahead above about 18 mph, so a car
+rolling slowly toward a shoreline was never checked — and one ended a session sitting in
+a river. It now watches at walking pace, brakes and warns at any speed, and abandons a
+reverse that is heading into water. There is no switch for this one either. It is
+deliberately cautious about what counts: on a slow approach it wants water at wheel level
+and off the road network, so bridges, piers and waterfront roads stay quiet.
+
+Three further switches, all **on** by default and all individually revertible:
+*"Stop something in front of the car from cancelling a reverse when the way behind is
+clear"*, *"Keep trying longer before giving up on a stuck car, so it can move itself
+clear"*, and *"When the assist hands back a stuck car, say what is in front of it,
+including low things like kerbs and fences"* — the last because the assist could
+previously report thirteen metres of clear road while the car was nose-in to a fence.
 
 ### The revertible-switch system
 
@@ -200,7 +533,7 @@ from it"*.
 They are there so a bad change can be switched off in-game without waiting for a new
 build. Switches that have been proven in road testing default **On**; anything still
 under evaluation ships **Off** and is enabled one at a time, so a session's result is
-attributable to exactly one change. 39 of the 136 settings currently default on.
+attributable to exactly one change. 42 of the 139 settings currently default on.
 
 A handful of switches say outright that they *"change nothing you can feel"*. Those only
 record measurements, and they are how anything else here earns the right to be turned on.
@@ -224,15 +557,60 @@ metres per second, which produced unusable numbers when spoken).
 
 **36 menu items:** 32 driving-style flags plus four actions — *Land*, *Park at Nearest
 Safe Spot*, *Hitch to Nearest Trailer*, and *Refresh Driving Task*. The flags are the
-game's own driving-style bits, named in plain English where their meaning is known
-("Stop at traffic lights", "Avoid highways when possible", "Change lanes around
-obstructions") and honestly labelled "Unknown (bit N)" where it is not.
+game's own driving-style bits, named in plain English where their meaning is known and
+honestly labelled "Unknown (bit N)" where it is not.
+
+**Six of those names were wrong, and one flag could not be set at all.** The list had
+been maintained by hand against community documentation. Checked against the game
+library the mod is actually built on, "Take shortest path" turned out to be *use shortcut
+links*, "Ignore roads" turned out to be *prefer navmesh routes*, and four flags labelled
+"Unknown" have real names — including *avoid restricted areas* and *plane taxi mode*.
+Worse, the last flag, *stop at the destination*, was unreachable: the code that packs the
+switches into a number stopped one short, on the mistaken belief that setting the top bit
+would break the game's own function. It takes a bit pattern, not a number, so it never
+would have.
+
+The list is now generated from the game library rather than typed, and there is a check
+that fails if the two ever drift apart again. Seven flags remain "Unknown (bit N)"
+because the library does not name them either — that is honest, and better than a
+plausible guess a player would then act on.
+
+- `Use Rockstar's taxi driving style for auto-drive` — **Off by default.** Rockstar's own
+  taxi missions use a slightly richer style than the mod's default: it cruises instead of
+  beelining when the route fails, it will use dirt roads and car parks so "drive me
+  there" can actually arrive, and it never joins a road facing the wrong way.
 
 The final approach is a hybrid: cruise on the road graph, then navmesh, then park.
 
 ---
 
 ## 4. Request Plane Flight — new
+
+### Landing gear, and taxiing to the runway
+
+Two additions checked against Rockstar's own flight-school script rather than against
+community documentation:
+
+- `Autopilot raises and lowers the landing gear` — **Off by default.** The mod had never
+  touched the landing gear at all. It read the gear's position once, for a status
+  readout, and never moved it. So the autopilot could rotate with the gear down and flare
+  with the gear up — and when the resulting crash failed the landing, the "try again"
+  watchdog would score it against the runway and spend one of its three attempts on a
+  problem no number of retries could fix. Gear now comes up once established in the
+  climb and goes down before the approach begins, and if the gear is damaged the mod
+  **says so out loud**, because that is not something you can otherwise find out.
+- `Autopilot taxis to the runway before takeoff` — **Off by default.** The aeroplane
+  spawns at a point that is not always the end of the runway: at Los Santos airport it is
+  about 560 m from the runway threshold, and at Sandy Shores it sits on the *far* end of
+  the strip. Taking off from there means departing from the wrong end, or from the apron
+  beside it. With this on, the plane drives to the threshold first and then rotates. If
+  it cannot get there within a minute it takes off anyway and tells you — a taxi that
+  cannot finish must never strand the flight.
+- `Use Rockstar's helicopter landing mode` — **Off by default.** The mod's helicopter
+  landing used a mode number taken from a community list. It appears in none of
+  Rockstar's own scripts; their helicopter-taxi script lands passengers with a different
+  one. That is not proof the old one is wrong, so it gets a switch and a test flight
+  rather than a silent swap.
 
 Its own menu. Pick a fixed route between two runways, or:
 
@@ -249,6 +627,14 @@ destination.
 ---
 
 ## 5. Bodyguards and the Butler — new
+
+**Guards stay with the car.** When you stood still for 30 seconds, the guards went on
+patrol — and the rule that kept the butler in the driver's seat applied only to the
+butler. Everyone else got pulled out of the vehicle and sent wandering on foot, so you
+would drive away and find you had left the detail behind. Now any guard sitting in your
+vehicle stays in it, and any guard on foot with a free seat waiting is left alone rather
+than sent off. Seats are counted, so one empty seat does not excuse the whole detail. The
+announcement says which happened instead of claiming everyone is patrolling.
 
 A 36-item menu covering an AI companion system.
 
@@ -525,6 +911,28 @@ its directions untrustworthy, that is why.
 
 ## 11. Combat and awareness
 
+### Hostile detection — rewritten
+
+There were two hostile detectors, and the good one was unreachable unless you were using
+bodyguards. If you had never opened the bodyguard menu, what you actually got was a flat
+sweep for people already shooting at you — no check for someone drawing a weapon nearby,
+no promotion when a bystander started aiming, no mention of police, and no all-clear when
+it was over.
+
+There is now one detector, and it runs for everyone:
+
+- `Hostile Detection` — Off / **People already fighting you** (default) / Add hostile
+  groups and police / Add armed people nearby. The default is exactly what the mod did
+  before, so nothing changes unless you ask it to.
+- **It says where they are.** "Two hostiles. Armed man, ahead left, 30 meters. Police
+  officer, behind, 50 meters." Previously every threat announcement was the word "two
+  hostiles detected" and nothing else — no direction, no distance, no idea what you were
+  facing. The nearest two are named using the same model-name table the scanner uses,
+  and the rest are counted.
+- The direction words use the same reference as the positioned audio, so what you are
+  told and what you hear agree with each other.
+
+
 New since the original:
 
 - **Enemy detection** — scans 100 m every two seconds, announces the count, and plays
@@ -563,6 +971,115 @@ All new:
   50%, 25%, and 10%, plus fuel-tank leak and critical warnings.
 - **Stamina and sprint warnings.**
 - **Wanted level details** — periodic cop count and helicopter presence.
+
+### The nearby scans — NumPad 4, 5, 6 and 8 (rewritten in iteration 58)
+
+These four keys are original. They ask "what vehicles / doors and gates / people /
+objects are near me", and read a list nearest-first.
+
+**What was wrong with them.** Names came from `hashes.txt`, a lookup table placed by hand
+in December 2022 and never updated since. Three separate faults compounded:
+
+1. The table was consulted with a number that had been widened from 32 bits to 64 bits
+   the wrong way, so any model whose id was negative — about half of them — could never
+   be found.
+2. The table had never contained a single ordinary pedestrian model. Not one. Only story
+   and cutscene characters.
+3. And critically, "is this in the table" was used to decide whether an entity got
+   announced **at all** — not merely whether it could be named.
+
+Together those meant NumPad 6 on a busy pavement produced the words "Nearest Characters:"
+and then nothing. A street full of people and an empty one sounded identical, with no
+indication anything had gone wrong. That is the worst failure mode this mod has, because
+it is indistinguishable from the feature working correctly on a quiet street.
+
+**What happens now.** Nothing is ever dropped for want of a name. Each kind of thing is
+named by the best source available, in order:
+
+- **Vehicles** are named by the game itself, so every DLC vehicle works — including ones
+  released after any given build of this mod — and the name arrives in whatever language
+  you play in. No bundled table is involved at all. Same for weapon names, which had
+  their own version of this bug and had never once resolved.
+- **People** are described as a person first and a label second: *"older man, south
+  central"*, *"woman, on the promenade"*, *"young barman"*, *"Police Officer"*,
+  *"Seagull"*. Where the game has a real name it is used and localized; where it does
+  not, the person's approximate age and sex come from the model itself, and the
+  neighbourhood or wardrobe note the game *does* carry trails behind as context.
+- **Objects, doors and gates** come from a bundled table that is now *generated* rather
+  than hand-placed, and can be regenerated in one command whenever a DLC lands. The old
+  file is folded into it, so nothing it knew was lost — the new table has 65,247 entries
+  against the old 53,859.
+- **Anything still unknown** is described rather than skipped: "unknown object, about 2
+  metres across", or "door or gate" for something you can walk through. It is also
+  written to a log file, so it can be given a real name in the next regeneration.
+
+**Whether something is a door** is now asked of the game's door system instead of being
+guessed from whether the word "door" appeared in the model's internal name — so a gate
+that was added to the game after 2022 is no longer invisible to the door scan.
+
+### Iteration 60: the fix above spent weeks not installed
+
+Iteration 58 rewrote all of this and then never reached the game. The deploy script
+copied the mod's data files only when asked to with a flag, so every ordinary rebuild
+left the new name table uninstalled. The mod started, found no table, and fell back to
+"man" / "woman" / "unknown object" for everything — which is exactly what a working mod
+on a quiet street sounds like.
+
+It had said so, in two places nobody was looking: a line in its own diagnostic log
+reading `table: fileNotFound, 0 rows`, and a spoken startup warning whose words were
+"some navigation features unavailable" — true of nothing that had actually broken.
+
+Three changes so that cannot recur:
+
+- **Data files are now synced by content on every deploy**, not on request, and the
+  deploy prints what is actually *installed* rather than what it meant to install. If a
+  file is missing it says so twice and tells you not to start a session.
+- **A missing name table gets its own sentence**: *"the model name table did not load,
+  so people and objects will not be named in the nearby scans."*
+- **Names are checked for whether they can be said out loud.** The old table shipped a
+  row for every model it had, and the mod preferred any of them over its own description
+  — so once installed it would have read out "Ch3 07 Decals50" and "Isldj" in place of
+  "unknown object" and "man". Those are worse. Each row now records whether its name is
+  defensible aloud; the 87% that are not are described instead, and are listed in a
+  generated review file to be given real names over time.
+
+Also fixed: an unnamed object with detailed scans on used to state its size twice, with
+two different numbers, because the two measurements used different axes.
+
+**When a DLC lands**, `--check` now asks upstream whether the source data has moved and
+names the game build it corresponds to, so a stale table is something you find out
+rather than something you assume.
+
+One more fix, unrelated to naming: a result at your own height used to inherit the
+previous result's *"2.1 meters above"*. Heights are now correct per result.
+
+### Detailed scans — new, off by default
+
+Setting: **"Say what nearby people and vehicles are doing, not just where they are."**
+
+- **People** — *"5.2 meters north, Marine, walking east, armed with a Carbine Rifle."*
+  Covers fighting, brawling, shooting, fleeing, taking aim, on fire, on the ground,
+  swimming, diving, falling, climbing, on a ladder, in cover, lying down, crouching,
+  sprinting / running / walking with the direction they are travelling, and driving or
+  riding in a named vehicle. Firearms are called out; fists are not, or every scan would
+  read as a threat.
+- **Vehicles** — *"5.2 meters north, Tornado, 15 miles per hour east, with 2 occupants."*
+  Plus sirens.
+- **Doors and gates** — open, closed, or locked. If the door is not one the game's door
+  system owns, its state genuinely cannot be read, and it says **"state unknown"** rather
+  than reporting a confident "closed" that might be wrong.
+- **Objects** — rough size, and whether the object is attached to something.
+
+It ships off because it makes every line about three times longer.
+
+### Nearby Scan Length — new, defaults to the nearest 10
+
+A second setting, and the one place in iteration 58 where a default changes behaviour on
+purpose. Repairing the naming turned these scans from near-silent into full
+enumerations, and the detection radius goes up to 1000 metres — uncapped, a scan in a
+city could speak for minutes with no way to stop it. It reads the nearest 10 by default
+and then says how many it left out (*"...and 23 more."*). Options are 3, 5, 10, 25, or
+everything in range; "everything in range" is exactly the old behaviour if you want it.
 
 ---
 
@@ -606,12 +1123,41 @@ longer means losing the session.
   fresh installs got some settings off that upgrades got on.
 - **Missing-asset warnings.** If `hashes.txt` or the earcon `.wav` files are absent, the
   mod says so out loud instead of degrading in silence.
+- **Settings changes are announced at the next drive.** Experimental drive-assist
+  switches persist, so one flipped mid-session quietly stays flipped for every session
+  afterwards — and a change to how the car is driven is the last thing that should be
+  invisible. On starting a drive, the mod compares the switches against the ones you
+  last drove with and says how many moved, naming them in the diagnostic log. A drive
+  that behaves differently now tells you what changed.
+
+### Iteration 61: drive assist stopped being able to get unstuck
+
+Drive assist was measurably worse on 17 August than it had been two days earlier: it
+changed its mind about what it was doing 22 times a minute, against half a time a minute
+in the good session. The failure was not crashing — it braked correctly for a stopped car
+on the freeway — it was that once stopped against that car it spent ninety seconds
+alternating between throttle and brake every frame, wheels spinning, and never got clear.
+
+The cause is being narrowed by turning one experimental switch off at a time, starting
+with lane targeting. Three of them had been turned on together, two of them part-way
+through a session, which left nothing attributable to anything.
+
+Two things changed so this is quicker to see next time:
+
+- **The drive-assist log now records *why* it changed its mind**, not just that it did.
+  "I recovered and I am back on the road" and "I looked for somewhere to recover to,
+  found nowhere, and gave up" used to be written identically.
+- **The mod now notices the Interaction Menu.** It could not before — the menu does not
+  pause the game and does not register as the pause menu — so it kept steering, and kept
+  telling you to take over, while your stick was driving a menu. This is currently
+  detection only, off by default: getting it wrong would take drive assist away in normal
+  driving, so it has to prove itself over a session before it is allowed to act.
 
 ---
 
 ## 15. Shipped data
 
-The mod now ships four generated data files into the `scripts` folder. None of these
+The mod now ships five generated data files into the `scripts` folder. None of these
 existed before.
 
 | File | What it is |
@@ -620,9 +1166,14 @@ existed before.
 | `gta11y-nodes.json.gz` | The vehicle path-node graph, 67,000+ nodes |
 | `gta11y-junctions.json.gz` | Signalised junction templates — per-entrance turn rules and stop positions |
 | `gta11y-menulabels.json` | Pause menu and phone label tables |
+| `gta11y-modelnames.tsv.gz` | 65,247 model names — people, objects, doors and gates. New in iteration 58; replaces `hashes.txt`. Each row records whether its name is worth saying aloud (iteration 60) |
 
 Plus `vehicleaihandlinginfo.meta`, the game's own AI handling table, so drive assist can
 look up the right cornering speed for the class of vehicle you are in.
+
+`hashes.txt` is **no longer shipped**. It was placed by hand in December 2022 and never
+updated; it is now an input to the generator that produces `gta11y-modelnames.tsv.gz`, so
+nothing it knew is lost. See section 12 for why that mattered more than it sounds.
 
 ---
 
@@ -655,17 +1206,18 @@ Everything the original bound still does the same thing. New bindings:
 
 ## 17. Settings reference
 
-136 settings, up from 21. All 21 originals are still there except `vehicleSpeed`, which
-was removed as redundant. 97 are new.
+146 settings, up from 21. All 21 originals are still there except `vehicleSpeed`, which
+was removed as redundant.
 
-36 default to **On**. The remainder default to **Off**, which is deliberate: anything
+49 default to **On**. The remainder default to **Off**, which is deliberate: anything
 that changes how the car behaves ships off and gets switched on one at a time, so that
 when something goes wrong it is clear what caused it.
 
 **Default On:** heading, zone and time announcements; altitude indicator; target pitch
 indicator; speed announcements; navigation assist; shape casting; turn-by-turn
-navigation; pause menu reader; intoxication visuals and audio; civil unrest safety
-watchdog; auto-resume creep; and 22 proven drive-assist behaviours.
+navigation; pause menu reader; drive assist warning beeps; intoxication visuals and
+audio; civil unrest safety watchdog; auto-resume creep; and 22 proven drive-assist
+behaviours.
 
 **Notable defaults Off:** steering assist (you opt in to drive assist), haptic feedback,
 adaptive cruise, lane centring, civil unrest weapon handouts, intoxication effects, all
@@ -719,9 +1271,27 @@ Not user-facing, but it is a large part of what changed.
 - **`tools/triage-log.py`** — drive-assist debug logs run to 80 MB. This streams one and
   emits a digest, per-incident traces, and a trend index, so analysis never touches the
   raw log.
+- **`tools/verify-vehicle-tasks.py`** — checks how the mod drives and flies against how
+  Rockstar does. It reads the game library the mod is built on for the real names of the
+  32 driving-style flags, parses 21 of Rockstar's own shipping scripts for how the
+  vehicle, plane and helicopter task functions are actually called, and writes
+  `docs/vehicle-task-conventions.md`. `--verify` fails if the mod's flag table has drifted
+  from the library, if a flag cannot be set, or if a newly named flag has no spoken
+  wording yet. It found six wrong flag names, one unreachable flag, and a landing-gear
+  function the mod had never called.
 - **`tools/deploy.ps1`** — explicit deploy, with warnings if the game has files locked.
 - **Debug logging** for drive assist (F1 marks a failure moment) and for the menu
   reader, both off by default and both switchable from the Settings menu.
+- **Failure screenshots** — when a failure fires, the mod saves the frame next to the
+  log so a developer can see what the car was actually touching. Two things about these
+  are worth knowing if you are sending logs in:
+  - They capture **only the game window**, not your whole screen. Before iter-55 they
+    captured the entire desktop, so if you have older ones lying around, they contain
+    whatever else was on screen at the time.
+  - If the mod cannot find the game window, or the window is small, **it now says so out
+    loud** when logging starts, and repeats nothing after that. The same applies when the
+    session's image limit is reached — you hear it once rather than playing on believing
+    the session is still being recorded.
 
 ---
 
@@ -742,8 +1312,29 @@ Not user-facing, but it is a large part of what changed.
 
 This fork is under active development and is not a finished product.
 
-- Drive assist has been through 47 numbered iterations of tuning against recorded road
+- Drive assist has been through 57 numbered iterations of tuning against recorded road
   tests. It is much better than it was, but it is an assist, not a chauffeur.
+- **New in iteration 58: the nearby scans (NumPad 4, 5, 6, 8) name things properly for
+  the first time.** Read section 12 — the old behaviour silently dropped anything it
+  could not name, and it could not name any ordinary pedestrian at all. This one is ON,
+  because it is a repair rather than a new behaviour, and the thing it repairs is a
+  feature that was failing in a way you could not hear. Two new settings ride with it:
+  detailed scans (off) and scan length (nearest 10).
+- **New in iteration 56, off by default: "when the car is in the air, do not treat it as
+  rolling backwards."** When the car brakes, the mod checks whether you are rolling
+  backwards, because the brake button is also the reverse button — so on a car rolling
+  back it presses the accelerator instead. That check compares which way the car is
+  pointing against which way it is moving, and while the car is *airborne* those two
+  come apart. A road test found the mod holding the accelerator at full for over two
+  seconds, mid-air at 46 mph, while its own brake demand was at maximum. Turning this
+  on makes the mod ignore the reverse check whenever no wheel is on the ground. It
+  ships off so it can be tested on its own.
+- **Failure screenshots now retry.** They used to be tested once when the mod started
+  and disabled for the rest of the session if that one test failed — and mod startup,
+  when the game is often still on a loading or fade screen, is the worst possible moment
+  to test. The mod also used to tell you the cause was exclusive fullscreen, which it
+  had not measured and which was wrong. It now retries every 30 seconds, says so at a
+  priority you will actually hear, and tells you when capture starts working.
 - Several features are **implemented but not yet verified in-game**, including the
   Civil Unrest weapon-handout paths and parts of the intoxication work. They ship off
   by default for that reason.

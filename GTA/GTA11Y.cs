@@ -19,7 +19,7 @@ namespace GrandTheftAccessibility
 {
     enum GuardCombatState { Idle, Engaging, Flanking, Suppressing, Repositioning, Protecting }
 
-    class GTA11Y : Script
+    partial class GTA11Y : Script
     {
         private string currentWeapon;
         private string street;
@@ -29,7 +29,6 @@ namespace GrandTheftAccessibility
         private float z;
         private float p;
         private bool timeAnnounced;
-        private Dictionary<string, string> hashes = new Dictionary<string, string>();
         private bool[] keyState = new bool[22]; // 20 = NumPad Divide (nav query key), 21 = Escape (menulog spike2 unpaused-frontend hijack)
         private Random random = new Random();
         private List<Location> locations = new List<Location>();
@@ -85,6 +84,20 @@ namespace GrandTheftAccessibility
         // iter-52: failure-frame capture. Started/stopped with driveLogger, because a
         // screenshot with no log line to join it to is an orphan.
         private SnapshotWriter snapshotWriter;
+        // iter-53 S1: one start attempt per (log session x setting-on edge). Cleared when
+        // the log starts or stops and whenever snapshotImage reads 0, so a user who fixes
+        // the cause and re-toggles gets another try instead of a dead writer.
+        private bool snapshotStartAttempted;
+        private bool snapshotUnavailableLogged;
+        // iter-55: both writers blit the same region, so the degraded-capture warning is
+        // latched once per session rather than spoken twice when drive and menu logging
+        // come up together — which is the normal case; on 08-12 both started at F0.
+        private bool captureDegradedSpoken;
+        // iter-53 D6: ModClock stamp of the previous damage scan, for the death line's
+        // dtMs. ModClock, not wall — it is compared against geNow.
+        private long damageScanLastTicks;
+        // iter-53 D8: 1 Hz limiter for EVENT hb-band-skip.
+        private long hbBandSkipLastTicks;
 
         /// <summary>settings.xml value as a space-free log token, or "?" when absent.
         /// Used to record the display mode next to the capture self-test, so a "black"
@@ -102,6 +115,20 @@ namespace GrandTheftAccessibility
         private float lastLoggedHeading = 0f;
         private float lastLoggedZ = 0f;
         private DriveMode driveLogLastMode = DriveMode.LaneKeeping;
+        // iter-61: WHY the mode arbitration landed where it did. 08-17 logged 82
+        // mode-changes in 3.7 driving min (iter-57: 10 in 20.8), and 40 of them read
+        // "RecoveringToRoad -> LaneKeeping laneKeepOk=False recoveryDist=999.0" —
+        // indistinguishable, from the log alone, from a recovery that SUCCEEDED.
+        // Set at every branch that decides the mode; emitted on the transition.
+        private string driveModeWhy = "init";
+        // iter-61: which path last wrote recoveryTargetDistance. 999 is a sentinel with
+        // two opposite meanings (target discarded on a clean resume vs. no node found at
+        // all) and the log could not tell them apart.
+        private string recoveryDistWhy = "init";
+        // iter-61: when the CURRENTLY-LOGGED mode was entered, for heldMs on the next
+        // transition. Deliberately separate from lastModeChangeTicks, which the
+        // hysteresis gate stamps before the log line is written.
+        private long driveLogLastModeTicks = 0;
         private const float DRIVE_LOG_BIG_Z_THRESHOLD = 1.5f;
         private float lastLoggedSpeed = 0f;   // iter-27 L1: for decelMs2 in the FRAME brake line
         // iter-35 clock-line: fps is uncapped (can exceed the engine's 188 cap),
@@ -121,6 +148,29 @@ namespace GrandTheftAccessibility
         private bool menuLogWasEnabled = false;
         private long menuLogFrameCount = 0;
         private DateTime mlLastHeartbeat = DateTime.MinValue;
+
+        // iter-54 D: menu/phone failure snapshots.
+        //
+        // The drive-assist case for screenshots was "the log cannot show what the car was
+        // touching". The menu case is stronger and cheaper. Stronger, because resolving
+        // an unmapped row today means guessing from a raw hash — the frame just shows the
+        // words on screen. Cheaper, because the pause menu is STATIC: the offending row
+        // is still displayed when the event fires, so there is nothing to time and no
+        // preroll ring is needed at all. That is the whole reason this has no equivalent
+        // of TickSnapshotPreroll: it would be a per-frame GDI blit bought for nothing.
+        //
+        // Reading these frames is a developer capability, not the player's. For a blind
+        // user that makes it MORE valuable, not less: it is the only way anyone in this
+        // loop can see the label that failed to map.
+        private SnapshotWriter menuSnapshotWriter;
+        private bool menuSnapshotStartAttempted = false;
+        private bool menuSnapshotUnavailableLogged = false;
+        private int mlSnapSeq = 0;
+        // Dedup keys already photographed this session. Arrowing over one unmapped row
+        // thirty times is thirty identical frames of the same answer, and it is exactly
+        // what a person does when a row says nothing useful — so the key, not a timer,
+        // is what rate-limits this.
+        private readonly HashSet<string> mlSnapSeen = new HashSet<string>();
 
         // pause-menu probe: last-seen values for change detection
         private bool mlPauseActive = false;
@@ -236,7 +286,13 @@ namespace GrandTheftAccessibility
         // phoneAppRows from. Log-only, menuDebugLog-gated, once per session.
         private int mrGxtDumpNext = -1;   // -1 = not armed, >=0 = next CELL_ index
         private bool mrGxtDumpDone = false;
-        private const int MR_GXT_DUMP_MAX = 400;
+        // iter-53 P3: 400 -> 900. The harvest was meant to populate phoneAppRows and was
+        // structurally incapable of it: the phone's in-app row labels are CELL_800 to
+        // CELL_84x, entirely above the old ceiling, so four sessions of dumping never
+        // saw a single one of the keys the table needed. 900 covers the observed block
+        // with headroom; the scan is one-shot, log-only and menuDebugLog-gated, so the
+        // extra 500 lookups cost one frame's work once per session.
+        private const int MR_GXT_DUMP_MAX = 900;
 
         // ---- v1.2 fields ----
         // OS-key input capture: the control-state natives return FALSE for the
@@ -421,6 +477,13 @@ namespace GrandTheftAccessibility
         // iter-29 B: reverse-straight-out recovery when boxed off-road.
         private long lastReverseOutLogTicks = 0;
         // iter-29 C1: lat/skew freshness stamp (the lookback ring froze during wedges).
+        // iter-53 D9: **ModClock, not wall.** Every stamp and every reader was
+        // DateTime.Now, which is internally consistent but not pause-proof — so an
+        // alt-tab was reported as stale perception, and marker #81 of 08-11-182121 read
+        // `OTHER!stale5016648ms` for an 84-minute pause. It is also compared via
+        // Math.Max against scanAgeMs (:38288), which has always been ModClock, and
+        // mixing two clocks on one comparison is the trap CLAUDE.md calls out by name.
+        // If you add a reader, use ModClock.Ticks.
         private long lastLaneLateralErrorTicks = 0;
         // iter-29 C6: wedge-duration stopwatch independent of stuckLayer (recentWedgeMs was dead).
         private long lowSpeedAnyStartTicks = 0;
@@ -579,6 +642,14 @@ namespace GrandTheftAccessibility
         // across scans — covers walls and entities alike with zero extra queries),
         // and a moving-vehicle flag (parked cars get the half-length low tick).
         private readonly float[] navZoneBearing = { 0f, 0f, 0f, 0f };
+        // iter-62: the WORLD POINT each zone's cue describes. The bearing above is a
+        // dot-with-right scalar, which cannot tell ahead-right from behind-right and knows
+        // nothing about height — see GTA/Core/Spatializer3D.cs. Every call site of
+        // UpdateNavZoneState already had this point; it was simply being thrown away.
+        private readonly GTA.Math.Vector3[] navZonePos = {
+            GTA.Math.Vector3.Zero, GTA.Math.Vector3.Zero,
+            GTA.Math.Vector3.Zero, GTA.Math.Vector3.Zero };
+        private readonly bool[] navZoneHasPos = { false, false, false, false };
         private readonly float[] navZoneClosing = { 0f, 0f, 0f, 0f };
         private readonly bool[] navZoneMovingVehicle = { false, false, false, false };
         private readonly float[] navZonePrevDist = { -1f, -1f, -1f, -1f };
@@ -627,6 +698,12 @@ namespace GrandTheftAccessibility
         {
             public long FireAtTicks; public int Zone;
             public float Freq, Gain, Pan, DurSec; public SignalGeneratorType Wave;
+            // iter-62: a deferred beep carries the point it describes, not just a pan, so the
+            // BEHIND double-tick's second half lands in the same place as its first. Pan
+            // survives as the fallback for when no listener basis can be built.
+            public GTA.Math.Vector3 WorldPos; public bool HasWorldPos;
+            // Non-zero turns this into a two-tone chirp: fire at Freq, then queue ChirpTo.
+            public float ChirpTo;
         }
         private readonly List<DeferredNavBeep> navBeepQueue = new List<DeferredNavBeep>();
         // Query key (NumPad Divide): tap = Around Me, double-tap = What's Ahead,
@@ -846,6 +923,18 @@ namespace GrandTheftAccessibility
         private float brakeEpiPeakV0 = 0f;
         private float brakeEpiPeakVEnd = 0f;
         private float brakeEpiThrMax = 0f;
+        // iter-57 M: the fields that make a brake episode interpretable. ownerAt0 is the
+        // owner while it still owns the brake (the old owner= was read at episode end,
+        // which the cmd-drop exit guarantees is after release); thrAch/brakeAch are the
+        // ACHIEVED pedals rather than the player's, which the mod zeroes on ~25% of
+        // frames; and the last three name the conditions under which an achieved
+        // reading means something other than it appears.
+        private string brakeEpiOwnerAt0 = null;
+        private float brakeEpiThrAchMax = 0f;
+        private float brakeEpiBrakeAchMax = 0f;
+        private int   brakeEpiAirborneFrames = 0;
+        private bool  brakeEpiReverseRedirect = false;
+        private int   brakeEpiTempAction = 0;
 
         // ---- iter-39 Stage 3: watchdog vs recovery ----
         // When the currently-running escape maneuver began. A maneuver younger than
@@ -950,6 +1039,9 @@ namespace GrandTheftAccessibility
             "roadBoundaryV2", "groundNormalV2", "junctionDirectionsV2",
             // iter-43
             "vehicleGeometryV2",
+            // iter-56: the airborne reverse-redirect veto. Writes controls, so it
+            // belongs in the drive-assist census.
+            "brakeWriteV2",
             // iter-44: only the two intoxication gates that alter DRIVING belong
             // here. The riot gates never touch a control write, so they would sit
             // at eval:0/fire:0 forever and pollute the drive-assist gate census.
@@ -969,8 +1061,226 @@ namespace GrandTheftAccessibility
             // belongs in the census. polyDistrustV2 scales the cross-track steering
             // term, so it does too.
             "roadSpeedGovernorV2", "polyDistrustV2",
+            // ---- iter-57: the recovery-chain batch ----
+            // All three write or withhold a control decision on the recovery path, so
+            // all three belong in the census. Shipped ON (see defaultOnSettings) and
+            // individually switchable in-game, so a bad one can be killed mid-session
+            // without a rebuild — which is how attribution survives landing them
+            // together. See docs/plans/iter57-*.md.
+            "reverseEmergCorroborateV2", "stuckEscalationV2", "giveupHazardV2",
+            // iter-59: the one behaviour gate of this iteration. Ships OFF.
+            "laneTargetV2",
+            // iter-61: stands the assist down while a non-pause frontend menu holds the
+            // player's input. Ships OFF — the detector runs and logs regardless, and a
+            // false positive would stand the assist down mid-drive, so it earns the
+            // promotion on a session's evidence or not at all.
+            "frontendSuspendV2",
+            // iter-64: the one behaviour gate of this iteration. Ships OFF - it withholds
+            // throttle, and a false veto on a motorway is its own kind of failure.
+            "accLateralInterlockV2",
+            // ---- iter-71: the two convergence gates ----
+            // recoveryHoldV2 stops the state machine declaring LaneKeeping while it
+            // knows lane keeping is invalid; stuckConvergeV2 makes the escape ladder
+            // terminate instead of restarting at each new location.
+            "recoveryHoldV2", "stuckConvergeV2",
+            // ---- iter-64: the settings that escaped the ledger ----
+            // 08-19-051310 was run to A/B "precise ground detection" (groundHeightV2) and
+            // the log cannot say what it was set to, because every emitter here iterates
+            // GATE_SETTINGS and groundHeightV2 was not in it. The player toggled the menu
+            // item mid-session and the mod wrote NOTHING: no gate-toggle, no manifest
+            // re-emission, no epoch boundary. An experiment ran and left no trace, which
+            // is the one failure mode this project cannot afford.
+            //
+            // The iter-46 claim above — "a gate added later cannot escape the ledger" — is
+            // true of the CONSUMERS and false of the MEMBERSHIP. Adding to the ids[] list
+            // in setupSettings is mandatory (no menu row, no persistence otherwise);
+            // adding here was optional and silent. WriteGateUnlisted() below now closes
+            // that, so the next escape announces itself instead of costing a session.
+            //
+            // Everything below writes a vehicle control or changes a driving decision.
+            // Two are here for a subtler reason: vehicleGodMode, because if it is ON the
+            // whole damage ledger is vacuous and no artifact currently says so; and
+            // intoxEnabled, the master over intoxDriveImpair/intoxBlackoutDrive, both of
+            // which are already in this list — so the manifest could report
+            // intoxDriveImpair=1 while the subsystem was switched off underneath it.
+            //
+            // Not all of these are 0/1. steeringAssist, detectionRadius and hostileDetection
+            // are multi-value; the manifest is name=value, so that reads fine, and the
+            // census reports them via GATE_UNINSTRUMENTED like any other uninstrumented gate.
+            "steeringAssist", "adaptiveCruise", "autoResumeCreep", "laneOffsetPolyline",
+            "laneStability", "reverseRearV2", "stuckDamageArm", "standoffThreat",
+            "junctionAssist", "wrongWayAlert", "roadTeleport", "waypointDriveAssist",
+            "autodriveStyleV2", "shapeCasting", "detectionRadius", "groundHeightV2",
+            "xyDistanceFix", "vehicleGodMode", "intoxEnabled", "assistBeeps",
+            "trafficAwareness", "driveAssistBaseline",
+            "planeGearControl", "planeTaxiAssist", "heliLandModeV2",
+            // iter-71: the arm switch. In the ledger so the manifest states its VALUE,
+            // for the same reason groundHeightV2 was added in iter-64 — an experiment
+            // whose arm the log cannot name is an experiment that left no trace.
+            "iter71Experimental",
+            // Wildfire road hazard: raises the brake floor. Instrumented with
+            // GateReach/GateFire in UpdateWildfireHazard.
+            "wildfireDriveHazard",
         };
         private Dictionary<string, int> gateSnapshot = null;
+
+        // iter-53 D8: the gates that genuinely have NO GateReach() call site, verified by
+        // grep against this file. Everything else in GATE_SETTINGS is instrumented, so a
+        // reach count of zero means its condition never held — a completely different
+        // fact, and the one the reader needs. Keep this list honest: adding a GateReach
+        // to one of these without removing it here re-creates the lie in reverse.
+        //
+        // accStandstillRelease and distressFloor are worse than uninstrumented — they
+        // have no CONSUMER at all. Both are read only by the startup banner, both ship
+        // default-ON, and neither has done anything since it was added.
+        private static readonly HashSet<string> GATE_UNINSTRUMENTED =
+            new HashSet<string>(StringComparer.Ordinal)
+            {
+                "shapeTestV2", "accStandstillRelease", "distressFloor", "watchdogV2",
+                // iter-64: none of the newly-listed settings has a GateReach call site.
+                // They are listed so the manifest can state their VALUE, which is the
+                // thing 08-19 could not do; reach:0 here means "no call site", not
+                // "the condition never held", and that distinction is the whole point
+                // of this set.
+                "steeringAssist", "adaptiveCruise", "autoResumeCreep", "laneOffsetPolyline",
+                "laneStability", "reverseRearV2", "stuckDamageArm", "standoffThreat",
+                "junctionAssist", "wrongWayAlert", "roadTeleport", "waypointDriveAssist",
+                "autodriveStyleV2", "shapeCasting", "detectionRadius", "groundHeightV2",
+                "xyDistanceFix", "vehicleGodMode", "intoxEnabled", "assistBeeps",
+                "trafficAwareness", "driveAssistBaseline",
+                "planeGearControl", "planeTaxiAssist", "heliLandModeV2",
+                "iter71Experimental",   // arm switch: no GateReach of its own
+            };
+
+        // ---- iter-53: the drive-assist baseline set ----
+        // The gates a bisect session needs to stand down together. These are the eleven
+        // that went live for the first time in 08-11-182121 (the iter-49 vanilla-script
+        // batch), and they are the reason that session cannot be read: eleven behavioural
+        // and telemetry changes arrived at once, so every difference from the previous
+        // session had eleven candidate causes and no way to separate them.
+        //
+        // Deliberately NOT the whole of GATE_SETTINGS. The older gates (actuationV2 and
+        // the iter-40/41 batch) are settled, load-bearing fixes — standing those down
+        // would not produce a baseline, it would produce a mod that drives like iter-38.
+        private static readonly string[] BASELINE_EXPERIMENTAL = {
+            "roadFactsV2", "nodePropsV2", "kerbGeometryV2", "engineStuckTelemetryV2",
+            "nodeQueryArgsV2", "laneWidthV2", "nodeHazardV2", "pullOverAssist",
+            "engineStuckArmV2", "tempActionV2", "driveSequenceV2",
+        };
+        private int baselineWas = -1;
+        private Dictionary<string, int> baselineSaved = null;
+
+        /// <summary>iter-53: applies or lifts the baseline in one action. Nothing here
+        /// needs to log the individual changes — the gate poller above diffs
+        /// GATE_SETTINGS every frame and will emit an EVENT gate-toggle per gate plus a
+        /// fresh manifest by itself, which is exactly what triage-log.py splits epochs
+        /// on. So one keypress produces a clean, machine-readable epoch boundary.</summary>
+        private void ApplyDriveAssistBaseline()
+        {
+            int now = getSetting("driveAssistBaseline");
+            if (baselineWas < 0) { baselineWas = now; return; }   // first tick: adopt
+            if (now == baselineWas) return;
+            baselineWas = now;
+
+            // setSetting() serialises and rewrites the whole settings file on every
+            // call, so eleven of them in one frame is eleven disk writes during a drive.
+            // Write the values straight into settingsMenu and save once.
+            if (now == 1)
+            {
+                baselineSaved = new Dictionary<string, int>();
+                int off = 0;
+                foreach (string id in BASELINE_EXPERIMENTAL)
+                {
+                    int v = getSetting(id);
+                    baselineSaved[id] = v;
+                    if (v != 0) { SetSettingDeferred(id, 0); off++; }
+                }
+                saveSettings();
+                Speech.Info("Drive assist baseline on. " + off + " experimental "
+                    + (off == 1 ? "setting" : "settings") + " turned off. ");
+            }
+            else
+            {
+                int on = 0;
+                foreach (string id in BASELINE_EXPERIMENTAL)
+                {
+                    // Restore what the user had. Falling back to ON rather than OFF is
+                    // deliberate: if the saved state is gone (the mod reloaded while the
+                    // baseline was applied) the only useful thing this row can do is give
+                    // back the second half of the experiment.
+                    int v;
+                    if (baselineSaved == null || !baselineSaved.TryGetValue(id, out v)) v = 1;
+                    if (getSetting(id) != v) SetSettingDeferred(id, v);
+                    if (v == 1) on++;
+                }
+                saveSettings();
+                baselineSaved = null;
+                Speech.Info("Drive assist baseline off. " + on + " experimental "
+                    + (on == 1 ? "setting" : "settings") + " restored. ");
+            }
+        }
+
+        // ---- iter-71: the iteration's own experimental arm ----
+        // Three behaviour gates ship ON together this iteration (see defaultOnSettings
+        // for why they are one cascade rather than three changes). That is only
+        // affordable because they can be stood down as a unit, exactly the way the
+        // iter-53 baseline set can, so one drive produces a BASE arm and an EXP arm on
+        // the same route in the same vehicle instead of a single unattributable blend.
+        //
+        // The bridge's settings.set can flip any one of them individually; this row is
+        // for the common case of "give me the whole iteration off for two minutes".
+        private static readonly string[] ITER71_EXPERIMENTAL = {
+            "accLateralInterlockV2", "recoveryHoldV2", "stuckConvergeV2",
+        };
+        private int iter71Was = -1;
+        private Dictionary<string, int> iter71Saved = null;
+
+        private void ApplyIter71Experimental()
+        {
+            int now = getSetting("iter71Experimental");
+            if (iter71Was < 0) { iter71Was = now; return; }   // first tick: adopt
+            if (now == iter71Was) return;
+            iter71Was = now;
+
+            if (now == 0)
+            {
+                iter71Saved = new Dictionary<string, int>();
+                foreach (string id in ITER71_EXPERIMENTAL)
+                {
+                    iter71Saved[id] = getSetting(id);
+                    SetSettingDeferred(id, 0);
+                }
+                saveSettings();
+                Speech.Info("Iteration 71 gates off. Baseline arm.");
+            }
+            else
+            {
+                int on = 0;
+                foreach (string id in ITER71_EXPERIMENTAL)
+                {
+                    // Same fallback reasoning as the iter-53 row: if the saved state is
+                    // gone, restoring ON is the only thing that gives back the other
+                    // half of the experiment.
+                    int v;
+                    if (iter71Saved == null || !iter71Saved.TryGetValue(id, out v)) v = 1;
+                    if (getSetting(id) != v) SetSettingDeferred(id, v);
+                    if (v == 1) on++;
+                }
+                saveSettings();
+                iter71Saved = null;
+                Speech.Info("Iteration 71 gates on. " + on + " restored. Experimental arm.");
+            }
+        }
+
+        /// <summary>Writes a setting's value without persisting. For batch changes that
+        /// finish with a single saveSettings().</summary>
+        private void SetSettingDeferred(string id, int value)
+        {
+            for (int i = 0; i < settingsMenu.Count; i++)
+            {
+                if (settingsMenu[i].id == id) { settingsMenu[i].value = value; return; }
+            }
+        }
 
         // ---- iter-46 1-9: HOW TO READ A `reach` COUNT ----
         // The census printed eval:N for every gate with no indication of the
@@ -995,6 +1305,10 @@ namespace GrandTheftAccessibility
             { "actuationFeedbackV2", "frame" }, { "wheelStateV2", "frame" },
             { "roadBoundaryV2", "scan" }, { "groundNormalV2", "scan" },
             { "junctionDirectionsV2", "scan" }, { "vehicleGeometryV2", "call" },
+            // iter-56: reached once per apply frame; fires only when the veto bites,
+            // so this is a DIFFERENTIAL counter — fire:0 means "never went airborne
+            // while flagged reversing", which is healthy, not silent.
+            { "brakeWriteV2", "frame" },
             { "intoxDriveImpair", "frame" }, { "intoxBlackoutDrive", "frame" },
             // iter-49. The denominators differ by more than a factor of a
             // thousand across this batch, which is precisely why they are
@@ -1013,6 +1327,38 @@ namespace GrandTheftAccessibility
             // Reached on every Stanley evaluation that has an engine road reading;
             // fires only when the divergence actually reduced the cross-track term.
             { "polyDistrustV2", "frame" },
+            // ---- iter-57 ----
+            // All three are reached once per DECISION, not per frame, so the census
+            // denominators mean something: 08-14's stuckLadderV2=eval:542/fire:0 and
+            // recoverySuspendV2=eval:5/fire:0 are exactly the reads that made this
+            // session diagnosable, and these three have to be readable the same way.
+            { "reverseEmergCorroborateV2", "veto" },   // one emergencyBehind veto
+            { "stuckEscalationV2", "eval" },           // one escalation/give-up decision
+            { "giveupHazardV2", "handover" },          // one give-up handover
+            // iter-59: reached once per polyline vertex that resolved a road node;
+            // fires only on the multi-lane one-way arm this gate exists to add, so
+            // reach-vs-fire reads directly as "how much of the route was the case
+            // the legacy rule refused to offset".
+            { "laneTargetV2", "vertex" },
+            // iter-61: reached once per confirmed frontend-menu TRANSITION, not per
+            // frame — so reach is "how many menu spans the session had" and a
+            // reach of 0 means the player never opened one, which is a different
+            // statement from the detector being broken.
+            { "frontendSuspendV2", "transition" },
+            // iter-64: reached once per ACC frame that WANTED throttle above the speed
+            // floor, fired once per frame the veto actually removed it. So fire/reach is
+            // the fraction of ACC acceleration this gate refused, which is the number that
+            // decides whether it ships ON.
+            { "accLateralInterlockV2", "frame" },
+            // iter-71: both count EPISODES, not frames. A hold that lasts four seconds
+            // is one event a reader can act on; four hundred frames of it is a number
+            // that only measures the frame rate.
+            { "recoveryHoldV2", "episode" },
+            { "stuckConvergeV2", "episode" },
+            // The arm switch has no decision of its own, so its census row can only
+            // ever read reach:0. Declare the unit anyway: a "?" in that column is
+            // indistinguishable from a gate whose unit was forgotten.
+            { "iter71Experimental", "arm" },
         };
 
         private static string GateUnit(string id)
@@ -1049,6 +1395,113 @@ namespace GrandTheftAccessibility
                 sb.Append(' ').Append(GATE_SETTINGS[i]).Append('=')
                   .Append(getSetting(GATE_SETTINGS[i]));
             driveLogger.Write(sb.ToString());
+        }
+
+        /// <summary>
+        /// iter-61: which gates are live AGAINST the shipped defaults, named at F0.
+        ///
+        /// The 08-17 session ran at 12.31 markers/driving-min against iter-57's 1.54 with
+        /// three driving-model gates ON that iter-57 had OFF — laneTargetV2 and
+        /// roadSpeedGovernorV2 toggled from the in-game menu mid-session the evening
+        /// before, and brakePhysicsAssist ON despite its own source comment saying it
+        /// "stays OFF". Settings persist in gta11ySettings.json, so a menu toggle outlives
+        /// the session that made it and every later build inherits it silently. The
+        /// manifest already listed all 52 values; what no one could see at a glance was
+        /// which of them the build did not intend.
+        ///
+        /// The comparison that matters is against the PREVIOUS DRIVEN SESSION, not
+        /// against the shipped defaults. Many gates are deliberately promoted over time
+        /// by turning them on and leaving them on, so "ON against default" is a list of
+        /// twenty-odd entries that names nothing; "changed since you last drove" is
+        /// three entries and is exactly the regression. The default comparison stays as
+        /// a count on the same line, for the triage tool, and is never spoken.
+        ///
+        /// Derived from GATE_SETTINGS x defaultOnSettings — the two lists that already
+        /// exist. A third hand-maintained list is exactly how iter41-gates fell behind.
+        /// </summary>
+        /// <returns>How many gates changed since the previous session.</returns>
+        private int WriteGateDrift()
+        {
+            if (driveLogger == null || !driveLogger.IsRunning) return 0;
+
+            Dictionary<string, int> live = new Dictionary<string, int>();
+            // iter-63: NAME them. This line reported onAgainstDefault=26 on 08-17 and
+            // stopped there, which is the attribution problem restated as a number: a
+            // count cannot tell you that roadSpeedGovernorV2 — default-OFF in code —
+            // was ON from a persisted settings file, which is exactly how that session
+            // ran a gate nobody had chosen for it. The settings file, not the code
+            // default, is what runs.
+            List<string> againstDefault = new List<string>();
+            int onAgainstDefault = 0;
+            for (int i = 0; i < GATE_SETTINGS.Length; i++)
+            {
+                string g = GATE_SETTINGS[i];
+                int v = getSetting(g);
+                live[g] = v;
+                if (v == 1 && !defaultOnSettings.Contains(g))
+                {
+                    onAgainstDefault++;
+                    againstDefault.Add(g);
+                }
+            }
+
+            Dictionary<string, int> prev = ReadPrevGateState();
+            List<string> changed = new List<string>();
+            if (prev != null)
+            {
+                for (int i = 0; i < GATE_SETTINGS.Length; i++)
+                {
+                    string g = GATE_SETTINGS[i];
+                    int was;
+                    // A gate that did not exist last session is not drift — it is a new
+                    // gate, and saying otherwise would cry wolf every iteration.
+                    if (!prev.TryGetValue(g, out was)) continue;
+                    if (was != live[g]) changed.Add(g + ":" + was + "->" + live[g]);
+                }
+            }
+
+            driveLogger.Write("[F" + driveLogFrameCount + "] EVENT gate-drift:"
+                + " havePrev=" + (prev != null ? 1 : 0)
+                + " changedSinceLast=" + (prev != null ? changed.Count : -1)
+                + " onAgainstDefault=" + onAgainstDefault
+                + " onAgainstDefaultNames=" + (againstDefault.Count > 0
+                    ? string.Join(",", againstDefault.ToArray()) : "-")
+                + " changed=" + (changed.Count > 0 ? string.Join(",", changed.ToArray()) : "-"));
+
+            WritePrevGateState(live);
+            return changed.Count;
+        }
+
+        /// <summary>iter-61: last session's gate values, or null on a first run.</summary>
+        private Dictionary<string, int> ReadPrevGateState()
+        {
+            try
+            {
+                string p = GateStatePath();
+                if (!System.IO.File.Exists(p)) return null;
+                return JsonConvert.DeserializeObject<Dictionary<string, int>>(
+                    System.IO.File.ReadAllText(p));
+            }
+            catch (Exception) { return null; }   // unreadable == no baseline, never fatal
+        }
+
+        private void WritePrevGateState(Dictionary<string, int> live)
+        {
+            try
+            {
+                System.IO.File.WriteAllText(GateStatePath(),
+                    JsonConvert.SerializeObject(live, Formatting.Indented));
+            }
+            catch (Exception) { }
+        }
+
+        private static string GateStatePath()
+        {
+            string dir = System.IO.Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+                "Rockstar Games", "GTA V", "ModSettings");
+            System.IO.Directory.CreateDirectory(dir);
+            return System.IO.Path.Combine(dir, "gta11y-gatestate.json");
         }
 
         /// <summary>Where this experiment began — one per epoch, so segments are comparable.</summary>
@@ -1094,7 +1547,10 @@ namespace GrandTheftAccessibility
                     + " name=" + id
                     + " from=" + was
                     + " to=" + now
-                    + " src=menu"
+                    // iter-71: a gate set from the diagnostic bridge is a deliberate
+                    // epoch boundary; one set from the pause menu mid-drive is the
+                    // iter-58->60 regression. They must not read alike in the log.
+                    + " src=" + (bridgeGateSource ?? "menu")
                     + " pos=" + FmtV(v != null ? v.Position : Game.Player.Character.Position)
                     + " street=" + World.GetStreetName(
                         v != null ? v.Position : Game.Player.Character.Position)
@@ -1105,7 +1561,18 @@ namespace GrandTheftAccessibility
             {
                 WriteTestAnchor("gate-toggle");
                 WriteGateManifest();
+                // iter-63: re-arm the iter-51 dependency warning. It is a once-per-
+                // session latch, and 08-17-111533 flipped the drive-assist baseline
+                // NINE times: roadFactsV2 is in BASELINE_EXPERIMENTAL, and
+                // roadSpeedGovernorV2/polyDistrustV2 are inert without its sampler, so
+                // five separate epochs ran with those two silently dead and the log
+                // said so exactly once, at F884. A warning that fires only for the
+                // first of nine identical configurations is not a warning.
+                iter51DepWarned = false;
             }
+            // Consumed once: the attribution belongs to the diff it explains, and a
+            // later menu toggle must not inherit "src=bridge".
+            bridgeGateSource = null;
         }
 
         // ---- iter-41 Stage 0.3: GATE CENSUS ----
@@ -1202,8 +1669,19 @@ namespace GrandTheftAccessibility
                         + " name=" + id
                         + " unit=" + GateUnit(id)
                         + " onForMs=" + ((ModClock.Ticks - gateOnSinceTicks[id]) / 10000)
-                        + " why=no-GateReach-call-site"
-                        + " note=uninstrumented-not-unreached");
+                        // iter-53 D8: this used to assert "no-GateReach-call-site"
+                        // unconditionally, which is a claim about the SOURCE inferred
+                        // purely from a runtime count of zero. It is true for the four
+                        // genuinely uninstrumented gates and false for the rest —
+                        // intoxDriveImpair and intoxBlackoutDrive both have call sites
+                        // and were simply never reached because the player was never
+                        // drunk, and the digest then advised the reader not to trust a
+                        // verdict that was itself the lie.
+                        + " why=" + (GATE_UNINSTRUMENTED.Contains(id)
+                            ? "no-GateReach-call-site" : "never-reached")
+                        + " note=" + (GATE_UNINSTRUMENTED.Contains(id)
+                            ? "uninstrumented-not-unreached"
+                            : "instrumented-condition-never-held"));
                 }
             }
             driveLogger.Write(sb.ToString());
@@ -1285,6 +1763,20 @@ namespace GrandTheftAccessibility
                         + " ctrlT=" + Function.Call<float>(Hash.GET_CONTROL_NORMAL, 0, 71).ToString("F2")
                         + " mode=" + currentDriveMode
                         + " spd=" + veh.Speed.ToString("F1"));
+                // iter-53 D5: immobile-under-throttle is the dominant failure mode —
+                // 28.4 s across three spans on 08-11-182121, the worst 17.7 s — and it
+                // was the ONE failure with no snapshot, so "wedged / kerbed / boxed in by
+                // traffic" stayed unanswerable exactly where the ray fan would have
+                // answered it in one line.
+                //
+                // Fires once, at the 3 s arm, and deliberately does NOT repeat. The
+                // plan called for a 5 s heartbeat, but SnapshotFailure suppresses a tag
+                // whose car has not moved SNAPSHOT_MOVED_M (:37970) — and a car that has
+                // not moved is the definition of this span, so every repeat would be
+                // dropped. It would also be worthless if it were not: successive frames
+                // of a stationary car are the same photograph, and they would spend the
+                // 120-image budget. Duration is already carried by phase=hold/end `ms=`.
+                SnapshotFailure("IMMOBILE", "heldMs=" + heldMs);
                 return;
             }
             if (nowWall - immobileLastBeatTicks >= IMMOBILE_BEAT_TICKS)
@@ -1374,6 +1866,8 @@ namespace GrandTheftAccessibility
                  // lane-depart.
                  : (giveWayBrakeRequest > 0.05f
                     && giveWayBrakeRequest + 0.001f >= curveBrakeRequest) ? "giveway"
+                 : (wildfireBrakeRequest > 0.05f
+                    && wildfireBrakeRequest + 0.001f >= curveBrakeRequest) ? "wildfire"
                  : (lastLaneDepartBrakeReq > 0.05f
                     && lastLaneDepartBrakeReq + 0.001f >= curveBrakeRequest) ? "lanedepart"
                  : curveBrakeRequest > 0.05f       ? "curve"
@@ -1755,6 +2249,34 @@ namespace GrandTheftAccessibility
         private const long ROAD_TELEPORT_COOLDOWN_TICKS = 30000000; // 3 second cooldown between teleports
         private long lastTeleportTicks = 0;              // Last time we teleported
 
+        // ---- iter-71 B3 (stuckConvergeV2): make the escape ladder TERMINATE ----
+        // The ladder has always gone all the way — autodrive, then teleport. What it
+        // has never done is stop. Three separate defects compound into one loop:
+        //
+        //  1. TeleportToNearestRoad neither checks nor stamps lastTeleportTicks. The
+        //     3 s cooldown above is honoured only inside the roadTeleport-setting
+        //     monitor; all three LADDER teleports bypass it entirely.
+        //  2. The cumulative-bypass branch zeroes stuckLocusCumTicks immediately after
+        //     teleporting, so escalation restarts from zero at the new location — the
+        //     exact mistake iter-57 already fixed for the fast-move path and left here.
+        //  3. Nothing counts attempts. ResetStuckRecovery is called from five sites,
+        //     three of them ordinary mode transitions, and it clears every timer that
+        //     was meant to escalate.
+        //
+        // Together: floor to teleport in ~20.5 s, repeatable forever, with a blind
+        // driver being relocated each time. The counter below is the thing that was
+        // missing — it survives ResetStuckRecovery on purpose, and it is anchored to a
+        // POSITION so that genuinely getting away resets the series while being dumped
+        // fifty metres down the same blocked road does not.
+        private int  stuckEscalationAttempts = 0;
+        private GTA.Math.Vector3 stuckEscalationAnchorPos = GTA.Math.Vector3.Zero;
+        private long stuckEscalationLastTicks = 0;
+        private bool stuckConvergeHandedBack = false;
+        private const int  STUCK_CONVERGE_MAX_ATTEMPTS = 3;
+        private const float STUCK_CONVERGE_ESCAPE_M = 60f;      // moved this far => a new series
+        private const long STUCK_CONVERGE_SERIES_TICKS = 1800000000L; // 180 s idle => new series
+        private const long STUCK_CONVERGE_TELEPORT_COOLDOWN = 80000000L; // 8 s between ladder teleports
+
         // Audio feedback
         private WaveOutEvent outSteerAssist;
         private SignalGenerator steerAssistBeep;
@@ -1862,6 +2384,20 @@ namespace GrandTheftAccessibility
         // steering hard at speed launches it off-road (#10, airborne +11.75 m).
         private const float RECOVERY_BRAKE_FIRST_SPEED = 12f;  // m/s (~27 mph)
         private bool lastRecoverySpeedFlipReject = false;      // set by FindBestRecoveryNode for the recovery-search EVENT
+        // ---- iter-71 A2: why the recovery search came back empty ----
+        // `found=False` has been the whole answer since the function was written, and
+        // it conflates three different worlds: the region had not streamed in, every
+        // candidate was rejected on geometry, or the native returned nothing at all.
+        // Those need opposite fixes, and the scan's penalties are SOFT-SCORED, so
+        // "scored zero candidates" and "scored several and disliked them all" are
+        // indistinguishable from the outside. These counters separate them.
+        private int  recoverySearchScanned = 0;        // native nth-node calls that returned ok
+        private int  recoverySearchRejPerp = 0;        // primary node in the junction-phantom band
+        private int  recoverySearchRejFlip = 0;        // primary node beyond RECOVERY_FLIP_ANGLE
+        private int  recoverySearchRejZ = 0;           // primary node on a stacked deck
+        private bool recoverySearchUnloaded = false;   // streaming gap: we cannot tell, which is not "no node"
+        private bool recoverySearchPrimaryHit = false; // the static graph answered without the fallback scan
+        private bool recoverySearchUturnReject = false;// scan found a node, then the U-turn gate dropped it
         // When |delta| above this AND speed below REVERSE_UTURN_SPEED, perform a
         // reverse U-turn (back up + counter-steer) to break out of the dead zone.
         // Lowered from 150 deg: the common stuck case is a ~85 deg skew at creep
@@ -1995,6 +2531,22 @@ namespace GrandTheftAccessibility
         // release/re-holds at ~1 Hz forever behind a parked car (07-31: 41.5 s).
         private bool  accReleaseLatched = false;
         private float accThrottleOut = 0f;   // 0..1, applied every tick when ACC is active
+
+        // ---- iter-64 accLateralInterlockV2 tuning ----
+        // LAT_MARGIN matches EVENT offroad-risk's additive 1.5 m so the veto and the
+        // early-warning line agree about where the carriageway ends.
+        // SKEW 20 deg sits above ordinary cornering and below the overshoot regime: 08-19
+        // incident 29 read skew 15.8-16.3 one second before impact and 73.6 at the wedge.
+        // MIN_SPD keeps this clear of the standstill/creep logic, which has its own owners.
+        private const float ACC_INTERLOCK_LAT_MARGIN_M  = 1.5f;
+        private const float ACC_INTERLOCK_SKEW_DEG      = 20f;
+        private const float ACC_INTERLOCK_MIN_SPD       = 5f;
+        private const long  ACC_INTERLOCK_LAT_STALE_MS  = 1000L;
+        private long lastAccInterlockLogTicks = 0;
+        // iter-71 A4: the settled lane-validity verdict, published out of
+        // ProcessSteeringAssist so ComputeACC's interlock line can state whether it
+        // agreed with the lane model or overrode it.
+        private bool lastLaneKeepOk = true;
         private float accBrakeOut = 0f;      // 0..1, merged into the brake pipeline
         private int   lastAccLeadHandle = 0; // detects lead-vehicle handoff for PID reset
         // iter-31: the mod's actually-applied throttle + the player's raw intent, carried
@@ -2038,6 +2590,24 @@ namespace GrandTheftAccessibility
         private const float BRAKE_WARN_TTC_MIN = 0.2f;        // Saturate (fastest+loudest) below this
         private const float BRAKE_WARN_FREQ_HZ = 262f;        // Middle C
 
+        // ---- iter-59 A1/A2: steer-threat cue rate ----
+        // The cue used to read lastThreatCueTicks and never write it back, so the
+        // intended 2 s gate was permanently open (Now.Ticks - 0 is ~6.4e17) and the
+        // 80 ms sample restarted every frame — ~44/s. It never played to completion,
+        // so the PITCH, which is the whole information content, was inaudible as
+        // pitch. The player heard a continuous stutter and reasonably read it as a
+        // debug artifact. PlaySteerCue now owns its interval the way PlayBrakeWarning
+        // (:23137) always has: compute -> compare -> STAMP.
+        private const long STEER_CUE_INTERVAL_CALM_TICKS   = 9000000L;  // 900 ms at urgency 0
+        private const long STEER_CUE_INTERVAL_URGENT_TICKS = 2500000L;  // 250 ms at urgency 1
+        private const float STEER_CUE_FREQ_BASE_HZ = 400f;    // urgency 0
+        private const float STEER_CUE_FREQ_SPAN_HZ = 600f;    // -> 1000 Hz at urgency 1
+        private const double STEER_CUE_DURATION_S = 0.08;
+        // The handbrake-turn callout sat inside the same broken gate and had no
+        // throttle of its own — it was spoken 55 times in driveassist-2026-08-15.
+        private long lastHandbrakeCueSpeechTicks = 0;
+        private const long HANDBRAKE_CUE_SPEECH_TICKS = 40000000L;      // 4 s
+
         // Adjacent-vehicle latch (no more side-brushing)
         private const float ADJACENT_LATERAL_BAND = 2.0f;     // ±2 m lateral overlap
         private const float ADJACENT_LONG_BACK = 3.0f;        // 3 m behind to
@@ -2051,6 +2621,15 @@ namespace GrandTheftAccessibility
 
         // Reverse driving support
         private bool isReversing = false;                     // True when vehicle is moving backward
+        // iter-56 brakeWriteV2: log throttle for the airborne reverse-redirect veto.
+        //
+        // Deliberately ONE behaviour change. The plan also listed restoring the top-band
+        // handbrake (rampedBrake>=0.95) and blocking throttle-arbitration's release-both
+        // while the brake demand is high. Both were dropped after reading the frames:
+        // every hb-band-skip in incident 09's run-up carries wheelsOk=False, so the
+        // handbrake was correctly suppressed for want of wheels and restoring it would
+        // have changed nothing except the attributability of this epoch.
+        private long brakeWriteAirborneLastTicks = 0;
 
         // Road-following pathfinding
         private float roadSteerCorrection = 0f;       // Steering needed to stay on road
@@ -2062,9 +2641,50 @@ namespace GrandTheftAccessibility
         // The alignment / recovery branches override lane-keeping so a wrong-way
         // spawn or an off-road drift gets corrected before normal lane following
         // resumes.
-        private enum DriveMode { LaneKeeping, AligningHeading, RecoveringToRoad }
+        //
+        // ---- iter-71 B2: HoldingNoTarget ----
+        // The fourth state exists because the machine had no way to say "lane keeping
+        // is NOT valid and there is nowhere to recover to". When FindBestRecoveryNode
+        // came back empty the mod declared LaneKeeping anyway, with laneKeepOk still
+        // false, and the next scan re-entered recovery — 40 of 08-17-083434's 82 mode
+        // changes, at ~22/min, every one logged as "-> LaneKeeping recoveryDist=999.0".
+        // iter-61 labelled that transition honestly (why=no-recovery-node) and left the
+        // behaviour alone. This is the behaviour.
+        //
+        // HoldingNoTarget is PASSIVE. It must answer "no" to both questions the rest of
+        // the file asks of this enum — it is not lane keeping, and it is not a recovery
+        // maneuver either — which is why the two helpers below exist and why a bare
+        // `!= LaneKeeping` is no longer a safe way to ask "am I recovering". Getting
+        // that wrong would hand recovery steering authority to a state that has no
+        // target to steer toward, which is worse than the thrash it replaces.
+        private enum DriveMode { LaneKeeping, AligningHeading, RecoveringToRoad, HoldingNoTarget }
         private DriveMode currentDriveMode = DriveMode.LaneKeeping;
         private DriveMode lastAnnouncedMode = DriveMode.LaneKeeping;
+
+        /// <summary>Normal lane following is running and owns the wheel.</summary>
+        private bool IsLaneKeepingMode()
+        {
+            return currentDriveMode == DriveMode.LaneKeeping;
+        }
+
+        /// <summary>
+        /// An active recovery maneuver — alignment or road recovery — is engaged.
+        /// Deliberately NOT `!= LaneKeeping`: HoldingNoTarget is neither.
+        /// </summary>
+        private bool IsRecoveryManeuverMode()
+        {
+            return currentDriveMode == DriveMode.AligningHeading
+                || currentDriveMode == DriveMode.RecoveringToRoad;
+        }
+
+        // ---- iter-71 B2: the HoldingNoTarget dwell ----
+        // A silent passive hold is the worst failure mode this mod has. The player
+        // cannot see that the assist has quietly stopped steering, and "a feature that
+        // fails silently is indistinguishable from one that was never installed". So
+        // the hold is bounded by an announcement, not just by a state transition.
+        private long holdNoTargetSinceTicks = 0;
+        private bool holdNoTargetSpoken = false;
+        private const long HOLD_NO_TARGET_SPEAK_MS = 2500L;
         private long lastDriveModeAnnounceTicks = 0;
         private bool alignmentEngageReverse = false;          // Reverse U-turn currently active
 
@@ -2088,6 +2708,14 @@ namespace GrandTheftAccessibility
         // continue steering / braking toward the OLD location).
         private GTA.Math.Vector3 lastDriveAssistVehiclePos = GTA.Math.Vector3.Zero;
         private bool lastDriveAssistVehiclePosValid = false;
+        // iter-57 H: WHEN that baseline was taken. Without it, `planar` conflates a
+        // teleport with three seconds of ordinary driving during which this block did
+        // not run — which is all three of 08-14's TELEPORT-JUMP markers.
+        private long lastDriveAssistVehiclePosTicks = 0;   // ModClock
+        // No car covers ground at 80 m/s (179 mph) under its own power for a sustained
+        // sample. Deliberately well above the fastest vanilla vehicle so a genuinely
+        // quick car on a straight can never trip it.
+        private const float TELEPORT_IMPLIED_SPEED_MS = 80f;
         // Iter-9 Patch C lowered this from 50 m to 10 m. The 50 m threshold
         // was sized for player long-range teleports (>500 m), but
         // driveassist-2026-05-25-180748 showed CheckRoadTeleport jumps were
@@ -2206,6 +2834,10 @@ namespace GrandTheftAccessibility
         private float waterAheadDist = -1f;
         private long lastWaterSpeechTicks = 0;
         private long lastWaterLogTicks = 0;
+        // iter-57 D: armed down to a crawl. Was 8 m/s, which meant a car rolling into a
+        // river at 2 m/s was never probed — see the water guard in the scan block.
+        private const float WATER_PROBE_MIN_SPEED = 0.5f;
+        private long lastWaterArmedLogTicks = 0;
         // PERSISTENT-SKEW ESCALATION. The 4-layer stuck recovery (see
         // MonitorStuckAutodrive) only fires when speed < 0.7 m/s, which means a
         // car still rolling but pinned >50 deg sideways never escalates. The
@@ -2383,6 +3015,16 @@ namespace GrandTheftAccessibility
         // accrued distress is already a terrible blind-user experience.
         private const long  STUCK_LOCUS_AUTODRIVE_TICKS = 300000000L; // 30 s cum -> layer 3 now
         private const long  STUCK_LOCUS_TELEPORT_TICKS  = 600000000L; // 60 s cum -> layer 4 now
+        // iter-57 F (stuckEscalationV2): what 08-14 says those numbers should be. The
+        // whole-session maximum accrual was 32.8 s and the river strand — two minutes
+        // and four give-ups — reached 17.5 s. A threshold no observed wedge has ever
+        // crossed is not a safety margin, it is an unreachable rung.
+        private const long  STUCK_LOCUS_AUTODRIVE_V2_TICKS = 120000000L; // 12 s cum
+        private const long  STUCK_LOCUS_TELEPORT_V2_TICKS  = 250000000L; // 25 s cum
+        // Decay rather than discard when the car briefly moves fast. A lurch inside a
+        // two-minute strand is not evidence the situation is resolved; zeroing the
+        // clock restarts a countdown that then never completes.
+        private const float STUCK_LOCUS_FAST_DECAY = 0.5f;
         // iter-40 stuckLadderV2: the thresholds above assume being stuck is merely
         // frustrating. Stopped in a live travel lane it is dangerous — 07-28 lost
         // 467.5 (57% of the session) to traffic while the car sat across a freeway
@@ -2429,6 +3071,10 @@ namespace GrandTheftAccessibility
         private long recoveryGiveupSinceTicks = 0;
         private GTA.Math.Vector3 recoveryGiveupAnchorPos = GTA.Math.Vector3.Zero;
         private DriveMode recoveryGiveupLastMode = DriveMode.LaneKeeping;
+        // iter-57 C: how many times this give-up has been held back to let a native
+        // temp action be cancelled first. Bounded (2) so a native that refuses to
+        // cancel can never trap the handover — see the give-up block.
+        private int recoveryGiveupTempDeferrals = 0;
         private int  recoveryFlipCount = 0;
         private long recoveryFlipWindowStart = 0;
         private GTA.Math.Vector3 recoveryFlipAnchorPos = GTA.Math.Vector3.Zero; // pos at flip-window start; gives up only if no net progress
@@ -2615,6 +3261,28 @@ namespace GrandTheftAccessibility
         // them and on which side, not just that they now have control. Reads the
         // nav-assist scan the mod already maintains; deliberately short because it
         // is appended to an already-long critical announcement.
+        /// <summary>
+        /// iter-57 G: planar distance to the cached SUB-BUMPER obstacle ahead, or -1.
+        /// This is the geometry the static-cast rejector correctly keeps out of the
+        /// brake path (you must not emergency-brake for a kerb) and which the wedge
+        /// machinery therefore has to consult separately — 99.9% of 08-14's 6607
+        /// static rejects were `belowBumper`, and a fence foot, a kerb, a tyre stack
+        /// and a river bank are all in that bucket.
+        /// </summary>
+        private float LowObstacleDistanceAhead(Vehicle veh)
+        {
+            if (veh == null || !veh.Exists()) return -1f;
+            if (cachedLowObstaclePos == GTA.Math.Vector3.Zero) return -1f;
+            // 5 s freshness: the scan legitimately throttles while stopped, which is
+            // exactly when this reading matters most.
+            if (ModClock.Ticks - cachedLowObstacleStamp > 50000000L) return -1f;
+            GTA.Math.Vector3 toObs = cachedLowObstaclePos - veh.Position;
+            if (GTA.Math.Vector3.Dot(veh.ForwardVector, toObs) <= 0f) return -1f;
+            float d = PlanarDist(veh.Position, cachedLowObstaclePos)
+                - GetVehicleHalfLengthForClearance(veh);
+            return d < 0f ? 0f : d;
+        }
+
         private string DescribeNearestHazard()
         {
             float best = 999f;
@@ -2622,6 +3290,16 @@ namespace GrandTheftAccessibility
             if (navAssistDistCenter < best) { best = navAssistDistCenter; side = "ahead"; }
             if (navAssistDistLeft < best) { best = navAssistDistLeft; side = "on your left"; }
             if (navAssistDistRight < best) { best = navAssistDistRight; side = "on your right"; }
+            // iter-57 G: the low-obstacle cache last, so it wins ties at equal distance
+            // — when both channels see something, the sub-bumper one is the thing the
+            // car is actually touching.
+            if (getSetting("giveupHazardV2") == 1)
+            {
+                Ped p = Game.Player.Character;
+                Vehicle v = (p != null && p.IsInVehicle()) ? p.CurrentVehicle : null;
+                float low = LowObstacleDistanceAhead(v);
+                if (low >= 0f && low <= best) { best = low; side = "ahead, low"; }
+            }
             if (best >= 900f || side == "") return "Path unclear";
             // Whole metres — sub-metre precision is noise at this range and reads
             // badly through a screen reader.
@@ -2755,7 +3433,14 @@ namespace GrandTheftAccessibility
                         {
                             lastDrawdownTicks = dNow;
                             GateFire("damageDrawdownV2");
+                            // iter-64: BRACED. SnapshotFailure sat outside this `if`
+                            // with no braces, so the indentation stated the opposite of
+                            // what the code did. Harmless only because SnapshotFailure
+                            // re-checks IsRunning itself — but this is the only damage-path
+                            // emitter in the file with that shape, and the next person to
+                            // add a line inside it would have been wrong.
                             if (driveLogger != null && driveLogger.IsRunning)
+                            {
                                 driveLogger.Write("[F" + driveLogFrameCount + "] EVENT damage-drawdown:"
                                     + " sum=" + drawdownAccum.ToString("F1")
                                     + " winMs=" + ((dNow - drawdownWindowStartTicks) / 10000L)
@@ -2763,8 +3448,10 @@ namespace GrandTheftAccessibility
                                     + " lat=" + lastLaneLateralError.ToString("F1")
                                     + " nativeOnRoad=" + (veh != null
                                         && IsPositionOnRoad(veh.Position))
-                                    + " owner=" + ComputeBrakeOwner());
-                                SnapshotFailure("DAMAGE-DRAWDOWN", null);
+                                    + " owner=" + ComputeBrakeOwner()
+                                    + DamageContextTag(veh));   // iter-71 A5
+                                    SnapshotFailure("DAMAGE-DRAWDOWN", null);
+                            }
                             drawdownWindowStartTicks = dNow;
                             drawdownAccum = 0f;
                         }
@@ -2881,6 +3568,18 @@ namespace GrandTheftAccessibility
         private int   lastLaneOffsetFwd = 0;      // fwd lane count used for the offset decision
         private int   lastLaneOffsetBwd = 0;      // bwd lane count (0 => divided carriageway => no offset)
         private float lastLaneOffsetJBlend = 1f;  // junction blend factor [0..1] (0 at a junction node)
+        // ---- iter-59 C1: make the offset decision auditable ----
+        // lastLaneOffsetFwd/Bwd above are the SHIPPED GRAPH's counts. Since iter-49 B2
+        // the near vertex may instead decide on the engine's live road facts, and the
+        // poly-offset line published the graph's numbers either way — so no session
+        // could tell which of the two experiments it had actually run. These publish
+        // the counts the decision used, and their provenance, alongside.
+        private int  lastLaneOffsetBiasFwd = 0;
+        private int  lastLaneOffsetBiasBwd = 0;
+        private bool lastLaneOffsetSplitEngine = false;
+        // iter-59 B2: lookahead vertices whose offset was backed off the road edge.
+        // Cumulative, never reset — a truncated log still carries the total.
+        private long laneTargetVertexBackoffs = 0;
         private const int POLYLINE_MAX_HOLD = 6;
         // iter-40 roadModelV2: drift guard for the lateral polyline hold. Tracks
         // whether the car is steadily moving away from the HELD line, which means
@@ -3360,6 +4059,7 @@ namespace GrandTheftAccessibility
         private bool bodyguardSystemEnabled = false;
         private List<Ped> bodyguards = new List<Ped>(); // Index 0 = primary guard (Butler)
         private int bodyguardGroupId = -1;              // GTA V ped group ID
+        private List<int> bodyguardGroupIds = new List<int>(); // chained groups; first ID mirrors bodyguardGroupId
 
         // Menu state
         private int bodyguardMenuIndex = 0;
@@ -3380,7 +4080,9 @@ namespace GrandTheftAccessibility
         // Hard cap on simultaneous guards. The fixed-size tracking arrays below are sized
         // from this, and every spawn/index path is gated by it, so the limit can be raised
         // in one place without risking an IndexOutOfRangeException on the warning arrays.
-        private const int MAX_GUARDS = 7;
+        // A Rockstar group is one leader plus seven members. Three chained groups allow
+        // 21 guards: guard 6 leads group 2 and guard 13 leads group 3.
+        private const int MAX_GUARDS = 21;
 
         // Guard health and status tracking
         private bool[,] guardHealthWarnings = new bool[MAX_GUARDS, 3]; // per-guard 3 thresholds (75%, 50%, 25%)
@@ -3462,6 +4164,19 @@ namespace GrandTheftAccessibility
         private Dictionary<int, GuardCombatState> guardCombatState = new Dictionary<int, GuardCombatState>();
         private Dictionary<int, long> guardLastRepositionTicks = new Dictionary<int, long>();
 
+        // iter-67: bodyguard combat is difficult to diagnose from speech alone, especially
+        // for animals whose attack animation can fail without throwing. This compact log
+        // is always active while the bodyguard system has guards: assignments are events,
+        // state is sampled every two seconds, and explicit FAILURE lines identify friendly
+        // combat and assigned targets that have not produced combat after five seconds.
+        private StreamWriter bodyguardLog = null;
+        private string bodyguardLogPath = null;
+        private long bodyguardLogTicks = 0;
+        private readonly Dictionary<int, long> guardTargetAssignedTicks = new Dictionary<int, long>();
+        private readonly Dictionary<int, int> guardTargetInitialHealth = new Dictionary<int, int>();
+        private readonly Dictionary<int, float> guardTargetMinDistance = new Dictionary<int, float>();
+        private readonly Dictionary<string, long> guardFailureLogTicks = new Dictionary<string, long>();
+
         // Static data arrays
         private static readonly (string name, PedHash hash)[] GUARD_MODELS = {
             ("Agent (Black Suit)", PedHash.FbiSuit01),
@@ -3476,6 +4191,18 @@ namespace GrandTheftAccessibility
             ("Redneck", PedHash.Hillbilly01AMM),
             ("Scientist", PedHash.Scientist01SMM),
             ("Paramedic", PedHash.Paramedic01SMM),
+            ("Cat", PedHash.Cat),
+            ("Chop", PedHash.Chop),
+            ("Husky", PedHash.Husky),
+            ("Poodle", PedHash.Poodle),
+            ("Pug", PedHash.Pug),
+            ("Retriever", PedHash.Retriever),
+            ("Rottweiler", PedHash.Rottweiler),
+            ("Shepherd", PedHash.Shepherd),
+            ("West Highland Terrier", PedHash.Westy),
+            ("Mountain Lion", PedHash.MountainLion),
+            ("Cow", PedHash.Cow),
+            ("Deer", PedHash.Deer),
         };
 
         // Vehicle models matched to guard style for helicopter ground convoy
@@ -3492,6 +4219,10 @@ namespace GrandTheftAccessibility
             VehicleHash.BobcatXL,    // Redneck → Bobcat XL pickup
             VehicleHash.Dilettante,  // Scientist → Dilettante (civilian)
             VehicleHash.Ambulance,   // Paramedic → Ambulance
+            VehicleHash.Granger, VehicleHash.Granger, VehicleHash.Granger,
+            VehicleHash.Granger, VehicleHash.Granger, VehicleHash.Granger,
+            VehicleHash.Granger, VehicleHash.Granger, VehicleHash.Granger,
+            VehicleHash.Granger, VehicleHash.Granger, VehicleHash.Granger,
         };
 
         private static readonly float HELI_GROUND_CONVOY_SPEED = 22.352f; // 50 mph in m/s
@@ -3570,7 +4301,10 @@ namespace GrandTheftAccessibility
         private float autopilotAltitude = 200f;
 
         // Plane autopilot phase machine — drives takeoff → cruise → landing transitions.
-        private enum PlanePhase { Takeoff, Cruise, Landing }
+        // Taxi (iter-62, planeTaxiAssist) precedes Takeoff: the shipped RUNWAYS table
+        // puts the LSIA spawn ~560 m from its own threshold and the Sandy Shores spawn on
+        // the runway END, so rotating from the spawn point departs the wrong end of the strip.
+        private enum PlanePhase { Taxi, Takeoff, Cruise, Landing }
         private PlanePhase planePhase = PlanePhase.Cruise;
         // Index into RUNWAYS for the chosen landing destination, or -1 if no landing.
         private int planeLandingRunwayIndex = -1;
@@ -3650,52 +4384,341 @@ namespace GrandTheftAccessibility
                 new GTA.Math.Vector3(-1646.0f, 3247.0f, 32.0f)),
         };
 
-        // Driving style flag names (bit 0-31)
+        // Driving-style flag names, bits 0-31. GENERATED — do not hand-edit.
+        //   python toolserify-vehicle-tasks.py --write-flags
+        // reflects GTA.VehicleDrivingFlags out of the vendored nightly and prints this
+        // literal; --verify fails the build check if the two ever drift apart. Hand-editing
+        // is what produced the previous table, which mislabelled bit 18 as "Take shortest
+        // path" (it is shortcut links), bit 22 as "Ignore roads" (it is prefer-navmesh), and
+        // left bits 12, 13, 23 and 31 as "Unknown" when the nightly names all four.
+        //
+        // Bits 15, 16, 17, 20, 26, 27 and 28 are unnamed by the nightly too. Those stay
+        // "Unknown (bit N)": a bit nobody can name is read aloud as unknown rather than given
+        // an invented label a player would then act on.
+        //
+        // The strings are SPOKEN, so they are phrases rather than identifiers; the wording
+        // lives in SPOKEN[] in the generator, keyed on the nightly enum name.
         private string[] autodriveFlagNames = {
-            "Stop before vehicles",           // 0 - 1
-			"Stop before peds",                // 1 - 2
-			"Avoid vehicles",                  // 2 - 4
-			"Avoid empty vehicles",            // 3 - 8
-			"Avoid peds",                      // 4 - 16
-			"Avoid objects",                   // 5 - 32
-			"Don't steer around player",                 // 6 - 64
-			"Stop at traffic lights",         // 7 - 128
-			"Go off-road when avoiding",                    // 8 - 256
-			"Allow going wrong way",          // 9 - 512
-			"Drive in reverse gear",          // 10 - 1024
-			"Wander fallback (no straight-line)",                // 11 - 2048
-			"Unknown (bit 12)",                // 12 - 4096
-			"Unknown (bit 13)",                // 13 - 8192
-			"Adjust cruise speed to road speed",                // 14 - 16384
-			"Unknown (bit 15)",                // 15 - 32768
-			"Unknown (bit 16)",                // 16 - 65536
-			"Unknown (bit 17)",                // 17 - 131072
-			"Take shortest path",              // 18 - 262144
-			"Change lanes around obstructions",    // 19 - 524288
-			"Unknown (bit 20)",                // 20 - 1048576
-			"Use switched-off nodes",                // 21 - 2097152
-			"Ignore roads (local pathing)",   // 22 - 4194304
-			"Unknown (bit 23)",                // 23 - 8388608
-			"Ignore all pathing (straight)",  // 24 - 16777216
-			"Smooth turns at junctions",                // 25 - 33554432
-			"Unknown (bit 26)",                // 26 - 67108864
-			"Unknown (bit 27)",                // 27 - 134217728
-			"Unknown (bit 28)",                // 28 - 268435456
-			"Avoid highways when possible",   // 29 - 536870912
-			"Force join in road direction",                // 30 - 1073741824
-			"Unknown (bit 31)"                 // 31 - 2147483648 (sign bit)
-		};
+            "Stop for vehicles",                                // 0 - 1  FollowTraffic / StopForVehicles
+            "Stop for pedestrians",                             // 1 - 2  StopForPeds / YieldToPeds
+            "Swerve around all vehicles",                       // 2 - 4  AvoidVehicles / SwerveAroundAllVehicles
+            "Steer around parked vehicles",                     // 3 - 8  AvoidEmptyVehicles / SteerAroundStationaryVehicles
+            "Steer around pedestrians",                         // 4 - 16  AvoidPeds / SteerAroundPeds
+            "Steer around objects",                             // 5 - 32  AvoidObjects / SteerAroundObjects
+            "Don't steer around the player",                    // 6 - 64  DontSteerAroundPlayerPed
+            "Stop at traffic lights",                           // 7 - 128  StopAtTrafficLights
+            "Use indicators, go off-road when avoiding",        // 8 - 256  GoOffRoadWhenAvoiding / UseBlinkers
+            "Allow driving into oncoming lanes",                // 9 - 512  AllowGoingWrongWay
+            "Drive in reverse",                                 // 10 - 1024  Reverse
+            "Cruise instead of beelining when lost",            // 11 - 2048  UseWanderFallbackInsteadOfStraightLine
+            "Avoid restricted areas",                           // 12 - 4096  AvoidRestrictedAreas
+            "No background pathfinding, cruise only",           // 13 - 8192  PreventBackgroundPathfinding
+            "Match the road's speed limit",                     // 14 - 16384  AdjustCruiseSpeedBasedOnRoadSpeed
+            "Unknown (bit 15)",                                 // 15 - 32768  (unnamed in nightly)
+            "Unknown (bit 16)",                                 // 16 - 65536  (unnamed in nightly)
+            "Unknown (bit 17)",                                 // 17 - 131072  (unnamed in nightly)
+            "Use shortcut links and median crossings",          // 18 - 262144  AllowMedianCrossing / DrivingModePloughThrough / UseShortCutLinks
+            "Change lanes around obstructions",                 // 19 - 524288  ChangeLanesAroundObstructions
+            "Unknown (bit 20)",                                 // 20 - 1048576  (unnamed in nightly)
+            "Use dirt roads and car parks",                     // 21 - 2097152  UseSwitchedOffNodes
+            "Prefer navmesh routes, drive by sight",            // 22 - 4194304  DriveBySight / PreferNavmeshRoute
+            "Plane taxi mode, drive on the ground",             // 23 - 8388608  PlaneTaxiMode
+            "Ignore pathfinding, go straight there",            // 24 - 16777216  ForceStraightLine / IgnorePathFinding
+            "Smooth the line through junctions",                // 25 - 33554432  UseStringPullingAtJunctions
+            "Unknown (bit 26)",                                 // 26 - 67108864  (unnamed in nightly)
+            "Unknown (bit 27)",                                 // 27 - 134217728  (unnamed in nightly)
+            "Unknown (bit 28)",                                 // 28 - 268435456  (unnamed in nightly)
+            "Avoid highways",                                   // 29 - 536870912  TryToAvoidHighways
+            "Join the road facing the right way",               // 30 - 1073741824  ForceJoinInRoadDirection
+            "Stop at the destination"                           // 31 - 2147483648  StopAtDestination
+        };
 
-        // Helper function to calculate driving style integer from flags
+        // Packs the 32 driving-style toggles into the integer the TASK_VEHICLE_* natives take.
+        //
+        // This used to stop at bit 30, commented "bit 31 would make it negative". The native
+        // takes a BIT PATTERN, not a signed magnitude — the sign bit is just another flag, and
+        // stopping short made GTA.VehicleDrivingFlags.StopAtDestination (bit 31) impossible to
+        // set from the menu at all. unchecked() states that the wrap is intended.
         private int GetDrivingStyleFromFlags()
         {
-            int result = 0;
-            for (int i = 0; i < 31; i++) // Only bits 0-30 (bit 31 would make it negative)
+            uint result = 0;
+            for (int i = 0; i < 32; i++)
             {
                 if (autodriveFlags[i])
-                    result |= (1 << i);
+                    result |= (1u << i);
             }
-            return result;
+            return unchecked((int)result);
+        }
+
+        // ============================================
+        // iter-62 W3 — AVIATION CORRECTNESS
+        // ============================================
+        // Everything in this region is grounded in docs/vehicle-task-conventions.md, generated
+        // by tools/verify-vehicle-tasks.py out of Rockstar's own scripts plus the vendored
+        // nightly enum. Where this code disagrees with a community native list, the report is
+        // the reason, and the citation is in the comment.
+
+        // Landing-gear read states. GET_LANDING_GEAR_STATE returns these; the grouping is
+        // pilot_school.c:107352, which switches on the state and treats {3,0} and {4,1} as the
+        // two pairs, with 5 as damaged.
+        private const int GEAR_STATE_DEPLOYED   = 0;
+        private const int GEAR_STATE_RETRACTING = 1;
+        private const int GEAR_STATE_DEPLOYING  = 3;
+        private const int GEAR_STATE_RETRACTED  = 4;
+        private const int GEAR_STATE_BROKEN     = 5;
+
+        // Landing-gear write commands. CONTROL_LANDING_GEAR takes these.
+        //
+        // THE POLARITY IS PINNED BY ONE LINE, pilot_school.c:114940:
+        //     if (IS_ENTITY_IN_AIR(veh) && GET_LANDING_GEAR_STATE(veh) == 0)
+        //         CONTROL_LANDING_GEAR(veh, 1);
+        // A plane in the air with state 0 gets command 1. That fixes state 0 as DOWN and
+        // command 1 as RETRACT in a single statement, which is the only part of this that
+        // actually matters: reversed, the assist would raise the gear on final approach.
+        private const int GEAR_CMD_DEPLOY  = 0;
+        private const int GEAR_CMD_RETRACT = 1;
+
+        // Was the gear commanded up? Tracks intent, not state, so the "still hasn't moved"
+        // check has something to compare against across ticks.
+        private bool planeGearCommandedUp = false;
+        private long planeGearLastCmdTicks = 0;
+        private bool planeGearBrokenAnnounced = false;
+
+        // Taxi phase: which runway we are departing from, so the threshold is known. -1 = none.
+        private int planeTakeoffRunwayIndex = -1;
+        private long planeTaxiStartTicks = 0;
+        // A taxi that cannot reach the threshold must not strand the flight — it flies anyway.
+        private const int PLANE_TAXI_TIMEOUT_MS = 60000;
+        // Close enough to the threshold to rotate. Runways are wide; this is deliberately loose.
+        private const float PLANE_TAXI_ARRIVE_M = 45f;
+        // Further than this from the threshold and a taxi is worth doing at all.
+        private const float PLANE_TAXI_ARM_M = 70f;
+        private const float PLANE_TAXI_SPEED = 13.4f;   // ~30 mph, a realistic taxi speed
+
+        // Ground-taxi driving style: PlaneTaxiMode (bit 23, "will cause them to drive along the
+        // ground instead of fly") plus ForceStraightLine (bit 24).
+        //
+        // Rockstar's own plane goto in pilot_school.c passes 262144 (UseShortCutLinks), and this
+        // deliberately does NOT copy that: their call is an AIRBORNE goto, where road links are
+        // irrelevant either way. A runway apron has no vehicle path nodes at all, so a
+        // node-following style has nothing to follow and the taxi would not start.
+        private const int PLANE_TAXI_STYLE = (1 << 23) | (1 << 24);
+
+        /// <summary>True when the vehicle is a plane that has landing gear and that gear is not
+        /// broken. Mirrors Rockstar's own guard at pilot_school.c:107350 — they check both, and
+        /// commanding gear on a plane without any is at best a no-op.</summary>
+        private bool PlaneGearUsable(Vehicle veh)
+        {
+            if (veh == null || !veh.Exists()) return false;
+            try
+            {
+                if (!Function.Call<bool>(Hash.IS_THIS_MODEL_A_PLANE, veh.Model.Hash)) return false;
+                if (!Function.Call<bool>(Hash.GET_VEHICLE_HAS_LANDING_GEAR, veh)) return false;
+                return Function.Call<bool>(Hash.IS_PLANE_LANDING_GEAR_INTACT, veh);
+            }
+            catch { return false; }
+        }
+
+        private int PlaneGearState(Vehicle veh)
+        {
+            if (veh == null || !veh.Exists()) return -1;
+            try { return Function.Call<int>(Hash.GET_LANDING_GEAR_STATE, veh); }
+            catch { return -1; }
+        }
+
+        private string PlaneGearStateName(int state)
+        {
+            switch (state)
+            {
+                case GEAR_STATE_DEPLOYED:   return "down";
+                case GEAR_STATE_RETRACTING: return "raising";
+                case GEAR_STATE_DEPLOYING:  return "lowering";
+                case GEAR_STATE_RETRACTED:  return "up";
+                case GEAR_STATE_BROKEN:     return "broken";
+                default:                    return "unknown";
+            }
+        }
+
+        /// <summary>Commands the landing gear up or down, gated on planeGearControl.
+        ///
+        /// Fails LOUD, not closed: broken gear on approach is exactly the thing a blind pilot
+        /// cannot see and most needs told. The go-around watchdog otherwise scores the resulting
+        /// crash as "bad runway" and burns one of its three attempts on a problem no number of
+        /// retries can fix.</summary>
+        private void SetPlaneGear(Vehicle veh, bool down, string why)
+        {
+            if (getSetting("planeGearControl") != 1) return;
+            if (veh == null || !veh.Exists()) return;
+
+            int state = PlaneGearState(veh);
+            if (state == GEAR_STATE_BROKEN)
+            {
+                if (!planeGearBrokenAnnounced)
+                {
+                    planeGearBrokenAnnounced = true;
+                    Speech.Critical("Landing gear is damaged. The landing will be rough.");
+                }
+                LogPlaneGear(veh, state, down, "broken", why);
+                return;
+            }
+            if (!PlaneGearUsable(veh))
+            {
+                LogPlaneGear(veh, state, down, "no-gear", why);
+                return;
+            }
+            // Already where it is being asked to go, including mid-travel in that direction.
+            bool alreadyDown = (state == GEAR_STATE_DEPLOYED || state == GEAR_STATE_DEPLOYING);
+            bool alreadyUp = (state == GEAR_STATE_RETRACTED || state == GEAR_STATE_RETRACTING);
+            if ((down && alreadyDown) || (!down && alreadyUp))
+            {
+                LogPlaneGear(veh, state, down, "already", why);
+                return;
+            }
+            try
+            {
+                Function.Call(Hash.CONTROL_LANDING_GEAR, veh,
+                    down ? GEAR_CMD_DEPLOY : GEAR_CMD_RETRACT);
+                planeGearCommandedUp = !down;
+                planeGearLastCmdTicks = DateTime.Now.Ticks;
+                LogPlaneGear(veh, state, down, "sent", why);
+                Speech.Ambient(down ? "Landing gear down." : "Landing gear up.");
+            }
+            catch (Exception ex) { ReportSubsystemError("landing gear", ex); }
+        }
+
+        private void LogPlaneGear(Vehicle veh, int state, bool wantDown, string outcome, string why)
+        {
+            if (driveLogger == null || !driveLogger.IsRunning) return;
+            driveLogger.Write("[F" + driveLogFrameCount + "] EVENT plane-gear:"
+                + " want=" + (wantDown ? "down" : "up")
+                + " was=" + state + "(" + PlaneGearStateName(state) + ")"
+                + " outcome=" + outcome + " why=" + why);
+        }
+
+        /// <summary>Behaviour-neutral phase telemetry, ships ON.
+        ///
+        /// The runway coordinates in RUNWAYS come from community modding sources and CANNOT be
+        /// verified from the decompiled scripts — runway geometry lives in map data, not script.
+        /// So the only way to settle them is to record what the aircraft was actually doing at
+        /// each transition and read it back. That is what this line is for.</summary>
+        private void LogPlanePhase(string from, string to, Vehicle veh,
+            float aboveGround, float horizDist, string why)
+        {
+            if (driveLogger == null || !driveLogger.IsRunning) return;
+            float spd = 0f;
+            try { if (veh != null && veh.Exists()) spd = veh.Speed; } catch { }
+            int gear = PlaneGearState(veh);
+            string runway = (planeLandingRunwayIndex >= 0 && planeLandingRunwayIndex < RUNWAYS.Length)
+                ? RUNWAYS[planeLandingRunwayIndex].name : "none";
+            driveLogger.Write("[F" + driveLogFrameCount + "] EVENT plane-phase:"
+                + " " + from + "->" + to
+                + " agl=" + FmtF(aboveGround)
+                + " spd=" + FmtF(spd)
+                + " distToDest=" + FmtF(horizDist)
+                + " gear=" + gear + "(" + PlaneGearStateName(gear) + ")"
+                + " destRunway=" + runway
+                + " attempts=" + planeLandingAttempts
+                + " why=" + why);
+        }
+
+        /// <summary>Should the flight taxi to the runway threshold before rotating?
+        ///
+        /// This is not hypothetical geometry. The shipped RUNWAYS table puts the LSIA spawn
+        /// ~560 m from its own runwayStart threshold, and the Sandy Shores spawn sits ON the
+        /// runway END — so a plane that rotates from where it spawns is departing from the wrong
+        /// end of the strip, or from the apron beside it. Taxiing first is what makes the
+        /// takeoff match the runway the table describes.</summary>
+        private bool PlaneShouldTaxi(Vehicle veh, int runwayIdx)
+        {
+            if (getSetting("planeTaxiAssist") != 1) return false;
+            if (veh == null || !veh.Exists()) return false;
+            if (runwayIdx < 0 || runwayIdx >= RUNWAYS.Length) return false;
+            try { if (veh.IsInAir) return false; } catch { return false; }
+            GTA.Math.Vector3 thr = RUNWAYS[runwayIdx].runwayStart;
+            GTA.Math.Vector3 p = veh.Position;
+            float d = (float)Math.Sqrt((p.X - thr.X) * (p.X - thr.X)
+                                     + (p.Y - thr.Y) * (p.Y - thr.Y));
+            return d > PLANE_TAXI_ARM_M;
+        }
+
+        /// <summary>Issues the ground-taxi task toward the departure runway's threshold.</summary>
+        private void IssuePlaneTaxi(Ped pilot, Vehicle veh)
+        {
+            if (pilot == null || !pilot.Exists() || veh == null || !veh.Exists()) return;
+            if (planeTakeoffRunwayIndex < 0 || planeTakeoffRunwayIndex >= RUNWAYS.Length) return;
+            GTA.Math.Vector3 thr = RUNWAYS[planeTakeoffRunwayIndex].runwayStart;
+            try
+            {
+                pilot.AlwaysKeepTask = false;
+                Function.Call(Hash.CLEAR_PED_TASKS, pilot);
+                // TASK_VEHICLE_MISSION_COORS_TARGET, mission 4 (GoTo) — the same native and
+                // mission Rockstar uses for planes in pilot_school.c, rather than
+                // TASK_PLANE_MISSION, which has no ground mode at all.
+                Function.Call(Hash.TASK_VEHICLE_MISSION_COORS_TARGET,
+                    pilot, veh, thr.X, thr.Y, thr.Z,
+                    4, PLANE_TAXI_SPEED, PLANE_TAXI_STYLE, 15f, 5f, true);
+                pilot.AlwaysKeepTask = true;
+            }
+            catch (Exception ex) { ReportSubsystemError("plane taxi", ex); }
+        }
+
+        /// <summary>Distance from the aircraft to the departure threshold, or -1.</summary>
+        private float PlaneTaxiRemaining(Vehicle veh)
+        {
+            if (veh == null || !veh.Exists()) return -1f;
+            if (planeTakeoffRunwayIndex < 0 || planeTakeoffRunwayIndex >= RUNWAYS.Length) return -1f;
+            GTA.Math.Vector3 thr = RUNWAYS[planeTakeoffRunwayIndex].runwayStart;
+            GTA.Math.Vector3 p = veh.Position;
+            return (float)Math.Sqrt((p.X - thr.X) * (p.X - thr.X)
+                                  + (p.Y - thr.Y) * (p.Y - thr.Y));
+        }
+
+        /// <summary>The driving style ground autodrive should use.
+        ///
+        /// Default (gate OFF) is the existing user-toggled flag set. With autodriveStyleV2 ON it
+        /// becomes Rockstar's own passenger-carrying style, 1076627627, observed three times in
+        /// am_taxi.c — the mod's current 786603 plus three bits that matter to a passenger who
+        /// cannot see why the car stopped making progress:
+        ///
+        ///   bit 11 UseWanderFallbackInsteadOfStraightLine — when pathfinding fails, cruise
+        ///          instead of beelining. A beeline off-road is the failure the drive assist
+        ///          then has to rescue.
+        ///   bit 21 UseSwitchedOffNodes — dirt roads, driveways and car parks become reachable,
+        ///          so "drive me there" can actually arrive rather than stopping on the street.
+        ///   bit 30 ForceJoinInRoadDirection — never join a road facing the wrong way.
+        ///
+        /// Kept behind a gate because it changes how the AI drives with the player aboard, and
+        /// this iteration ships no unattributable driving changes.</summary>
+        private int AutodriveStyle()
+        {
+            if (getSetting("autodriveStyleV2") == 1)
+            {
+                const int ROCKSTAR_PASSENGER_STYLE = 1076627627;
+                if (!autodriveStyleV2Logged && driveLogger != null && driveLogger.IsRunning)
+                {
+                    autodriveStyleV2Logged = true;
+                    driveLogger.Write("[F" + driveLogFrameCount + "] EVENT autodrive-style:"
+                        + " src=rockstar-am_taxi value=" + ROCKSTAR_PASSENGER_STYLE
+                        + " base=" + GetDrivingStyleFromFlags()
+                        + " adds=UseWanderFallbackInsteadOfStraightLine,UseSwitchedOffNodes,"
+                        + "ForceJoinInRoadDirection");
+                }
+                return ROCKSTAR_PASSENGER_STYLE;
+            }
+            return GetDrivingStyleFromFlags();
+        }
+        private bool autodriveStyleV2Logged = false;
+
+        /// <summary>Mission mode for the helicopter landing task.
+        ///
+        /// The mod has always passed 20, taken from a community list. tools/verify-vehicle-tasks
+        /// finds mode 20 in NONE of Rockstar's scripts: am_heli_taxi.c lands with mode 9 (twice,
+        /// at the passenger drop-off), and the corpus otherwise uses 4, 8, 19 and 23. That is
+        /// not proof 20 is wrong — but 9 is the mode Rockstar ships for exactly this job, so it
+        /// gets a gate and a field test rather than a silent swap.</summary>
+        private int HeliLandMissionMode()
+        {
+            return getSetting("heliLandModeV2") == 1 ? 9 : 20;
         }
 
         // Updates the autodrive task with new speed/flags while driving
@@ -3791,7 +4814,7 @@ namespace GrandTheftAccessibility
             if (veh == null || !veh.Exists() || veh.IsDead) return;
 
             Ped driver = (guardDriverActive && bodyguards.Count > 0 && bodyguards[0] != null && bodyguards[0].Exists() && bodyguards[0].IsAlive) ? bodyguards[0] : Game.Player.Character;
-            int drivingStyle = GetDrivingStyleFromFlags();
+            int drivingStyle = AutodriveStyle();
 
             if (autodriveWanderMode)
             {
@@ -3862,7 +4885,7 @@ namespace GrandTheftAccessibility
                         Function.Call(Hash.TASK_VEHICLE_DRIVE_TO_COORD_LONGRANGE,
                             driver, veh,
                             autodriveDestination.X, autodriveDestination.Y, autodriveDestination.Z,
-                            autodriveSpeed, GetDrivingStyleFromFlags(), 20f);
+                            autodriveSpeed, AutodriveStyle(), 20f);
                         LogAutodrivePhase("sequence-stall->cruise", dist);
                         Speech.Ambient("Re-planning the route.");
                     }
@@ -3910,7 +4933,7 @@ namespace GrandTheftAccessibility
                         Function.Call(Hash.TASK_VEHICLE_DRIVE_TO_COORD_LONGRANGE,
                             driver, veh,
                             autodriveDestination.X, autodriveDestination.Y, autodriveDestination.Z,
-                            autodriveSpeed, GetDrivingStyleFromFlags(), 20f);
+                            autodriveSpeed, AutodriveStyle(), 20f);
                         LogAutodrivePhase("navmesh->cruise(overshoot)", dist);
                         break;
                     }
@@ -4108,6 +5131,15 @@ namespace GrandTheftAccessibility
                 Function.Call(Hash.TASK_PLANE_LAND, pilot, veh,
                     rw.runwayStart.X, rw.runwayStart.Y, rw.runwayStart.Z,
                     rw.runwayEnd.X,   rw.runwayEnd.Y,   rw.runwayEnd.Z);
+                return;
+            }
+
+            // Plane Taxi: drive along the ground to the departure threshold. A different
+            // native and a different mission from every other branch here — see IssuePlaneTaxi
+            // for why TASK_PLANE_MISSION cannot do this at all.
+            if (planePhase == PlanePhase.Taxi)
+            {
+                IssuePlaneTaxi(pilot, veh);
                 return;
             }
 
@@ -4557,7 +5589,11 @@ namespace GrandTheftAccessibility
             autonavMode = "fly";
             autodriveDestination = destRunwayMid;
             planeLandingRunwayIndex = destIdx;
-            planePhase = PlanePhase.Takeoff;
+            planeTakeoffRunwayIndex = originIdx;
+            planeGearBrokenAnnounced = false;
+            planePhase = PlaneShouldTaxi(plane, originIdx)
+                ? PlanePhase.Taxi : PlanePhase.Takeoff;
+            planeTaxiStartTicks = planePhase == PlanePhase.Taxi ? DateTime.Now.Ticks : 0;
             isAutodriving = true;
             autodriveWanderMode = false;
             autodriveVehicleHandle = plane.Handle;
@@ -4650,7 +5686,7 @@ namespace GrandTheftAccessibility
             Function.Call(Hash.TASK_VEHICLE_DRIVE_TO_COORD_LONGRANGE,
                 driver, car,
                 dest.X, dest.Y, dest.Z,
-                autodriveSpeed, GetDrivingStyleFromFlags(), 20f);
+                autodriveSpeed, AutodriveStyle(), 20f);
 
             string distText = autodriveStartDistance >= 1000f
                 ? (autodriveStartDistance / 1000f).ToString("F1") + " kilometers"
@@ -4779,6 +5815,11 @@ namespace GrandTheftAccessibility
             JunctionDb.Load();
             MenuLabelDb.Load();
             MenuBindDb.Load();   // v1.5: learned pref -> profile-id bindings
+            // iter-58: model-hash -> spoken name, replacing scripts/hashes.txt. IS in
+            // the failure banner below: with no table every ped, prop, door and gate
+            // falls back to a generic description, which is the whole world going vague
+            // at once and is nothing like an empty street.
+            ModelNames.Load();
             // iter-52: collectibles, restricted areas, places, interactions, the
             // random-event registry. Deliberately NOT in the failure banner below —
             // every feature that reads it ships OFF, so a missing file is only worth
@@ -4788,6 +5829,14 @@ namespace GrandTheftAccessibility
             driveLogger = new DriveAssistLogger();
             snapshotWriter = new SnapshotWriter();
             menuLogger = new MenuLogger();
+            // iter-54 D: a SECOND writer instance rather than a shared one. SnapshotWriter
+            // is already generic — Start(logPath) derives its output directory from any
+            // log's stem — and the two have genuinely different lifetimes: the drive
+            // writer follows driveLogger, this one follows menuLogger, and a session
+            // routinely runs one without the other. Sharing would mean one image budget
+            // and one directory for two unrelated investigations.
+            menuSnapshotWriter = new SnapshotWriter();
+            StartDiagnosticBridge();
             Speech.Ambient("Mod Ready");
             // Surface silent map-data load failures — without this a blind user
             // gets no cue that crossings/street-ahead/junction assist are degraded.
@@ -4806,28 +5855,20 @@ namespace GrandTheftAccessibility
                 if (failed.Count > 0)
                     Speech.Ambient("Warning: " + string.Join(", ", failed)
                         + " data failed to load. Some navigation features unavailable.");
+                // iter-60: the name table gets its OWN sentence. It was already in the
+                // list above, but "some navigation features unavailable" describes
+                // nothing that actually breaks — so the one warning that would have
+                // caught iter-58 on day one led nowhere. Without this table every
+                // person is "man"/"woman" and every prop "unknown object", which
+                // sounds like a quiet street rather than a missing file.
+                // Prefix test: "ok(Nmalformed)" is still a usable table.
+                if (!ModelNames.LoadStatus.StartsWith("ok"))
+                    Speech.Ambient("Warning: the model name table did not load, so people "
+                        + "and objects will not be named in the nearby scans. Reinstall the "
+                        + "mod's data files.");
             }
 
             currentWeapon = Game.Player.Character.Weapons.Current.Hash.ToString();
-            // Missing or malformed hashes.txt must not abort construction — the
-            // mod loads with object-name lookup degraded instead of no mod at all.
-            try
-            {
-                string[] lines = System.IO.File.ReadAllLines("scripts/hashes.txt");
-                string[] result;
-                foreach (string line in lines)
-                {
-                    result = line.Split('=');
-                    if (result.Length < 2)
-                        continue;
-                    if (!hashes.ContainsKey(result[1]))
-                        hashes.Add(result[1], result[0]);
-                }
-            }
-            catch (Exception)
-            {
-                Speech.Ambient("Warning: hashes file missing. Vehicle and object names unavailable.");
-            }
 
             locations.Add(new Location("MICHAEL'S HOUSE", new GTA.Math.Vector3(-852.4f, 160.0f, 65.6f)));
             locations.Add(new Location("FRANKLIN'S HOUSE", new GTA.Math.Vector3(7.9f, 548.1f, 175.5f)));
@@ -5204,6 +6245,8 @@ namespace GrandTheftAccessibility
 
         private void onTick(object sender, EventArgs e)
         {
+            PumpDiagnosticBridge();
+
             // Bodyguard system tick (skip during loading to avoid invalid entity access)
             if (bodyguardSystemEnabled && !Game.IsLoading)
                 try { TickBodyguardSystem(); } catch (Exception ex) { ReportSubsystemError("bodyguard", ex); }
@@ -5335,6 +6378,7 @@ namespace GrandTheftAccessibility
             // that tick cached; see TickCivilUnrestFrame.
             try { TickCivilUnrestFrame(); } catch (Exception ex) { ReportSubsystemError("civil unrest frame", ex); }
             try { TickIntoxication(); } catch (Exception ex) { ReportSubsystemError("intoxication", ex); }
+            try { TickWildfires(); } catch (Exception ex) { ReportSubsystemError("wildfires", ex); }
 
             if (!Game.IsLoading)
             {
@@ -5700,9 +6744,39 @@ namespace GrandTheftAccessibility
                                     Math.Pow(planePos.X - autodriveDestination.X, 2) +
                                     Math.Pow(planePos.Y - autodriveDestination.Y, 2));
 
-                                if (planePhase == PlanePhase.Takeoff && aboveGround >= 60f)
+                                // Taxi -> Takeoff: rolling to the threshold, or out of time. A
+                                // taxi that cannot reach the threshold must never strand the
+                                // flight, so the timeout departs from wherever it got to and
+                                // says so, rather than sitting on the apron in silence.
+                                if (planePhase == PlanePhase.Taxi)
                                 {
+                                    float taxiLeft = PlaneTaxiRemaining(flyVeh);
+                                    bool taxiTimedOut = planeTaxiStartTicks > 0
+                                        && (DateTime.Now.Ticks - planeTaxiStartTicks) / 10000L
+                                           > PLANE_TAXI_TIMEOUT_MS;
+                                    if ((taxiLeft >= 0f && taxiLeft <= PLANE_TAXI_ARRIVE_M)
+                                        || taxiTimedOut || aboveGround >= 20f)
+                                    {
+                                        LogPlanePhase("Taxi", "Takeoff", flyVeh, aboveGround,
+                                            planeHorizDist,
+                                            taxiTimedOut ? "taxi-timeout" : "at-threshold");
+                                        planePhase = PlanePhase.Takeoff;
+                                        planeTaxiStartTicks = 0;
+                                        ReissueFlightMission();
+                                        Speech.Info(taxiTimedOut
+                                            ? "Could not reach the runway threshold. Taking off from here."
+                                            : "Lined up. Taking off.");
+                                    }
+                                }
+                                else if (planePhase == PlanePhase.Takeoff && aboveGround >= 60f)
+                                {
+                                    LogPlanePhase("Takeoff", "Cruise", flyVeh, aboveGround,
+                                        planeHorizDist, "agl>=60");
                                     planePhase = PlanePhase.Cruise;
+                                    // Gear up once established in the climb. Rockstar retracts on
+                                    // exactly this condition — airborne with the gear still down,
+                                    // pilot_school.c:114940.
+                                    SetPlaneGear(flyVeh, false, "takeoff-climb");
                                     ReissueFlightMission();
                                     Speech.Info("Climbed to cruise altitude. Heading to destination.");
                                 }
@@ -5713,8 +6787,16 @@ namespace GrandTheftAccessibility
                                          && planeHorizDist < 1500f
                                          && DateTime.Now.Ticks > planeGoAroundCooldownUntil)
                                 {
+                                    LogPlanePhase("Cruise", "Landing", flyVeh, aboveGround,
+                                        planeHorizDist, "within-1500m");
                                     planePhase = PlanePhase.Landing;
                                     planeLandingStartTicks = DateTime.Now.Ticks;
+                                    // Gear down BEFORE the approach task is issued, so the
+                                    // extension overlaps the descent rather than the flare. A
+                                    // plane that flares gear-up does not land, it crashes — and
+                                    // the go-around watchdog would then charge that crash to the
+                                    // runway and spend an attempt it cannot possibly fix.
+                                    SetPlaneGear(flyVeh, true, "landing-approach");
                                     ReissueFlightMission();
                                     Speech.Info("Beginning landing approach at "
                                         + RUNWAYS[planeLandingRunwayIndex].name + ".");
@@ -5729,9 +6811,12 @@ namespace GrandTheftAccessibility
                                     planeLandingAttempts++;
                                     if (planeLandingAttempts < PLANE_MAX_LANDING_ATTEMPTS)
                                     {
+                                        LogPlanePhase("Landing", "Cruise", flyVeh, aboveGround,
+                                            planeHorizDist, "go-around");
                                         planePhase = PlanePhase.Cruise;
                                         planeGoAroundCooldownUntil = DateTime.Now.Ticks
                                             + (long)PLANE_GOAROUND_COOLDOWN_MS * 10000L;
+                                        SetPlaneGear(flyVeh, false, "go-around-climb");
                                         ReissueFlightMission();
                                         Speech.Info("Landing attempt " + planeLandingAttempts
                                             + " failed. Going around.");
@@ -5750,6 +6835,9 @@ namespace GrandTheftAccessibility
                                             flyVeh.Position.X + fwd.X * 2000f,
                                             flyVeh.Position.Y + fwd.Y * 2000f,
                                             autopilotAltitude);
+                                        LogPlanePhase("Landing", "Cruise", flyVeh, aboveGround,
+                                            planeHorizDist, "attempts-exhausted");
+                                        SetPlaneGear(flyVeh, false, "give-up-climb");
                                         Function.Call(Hash.TASK_PLANE_MISSION,
                                             climbPilot, flyVeh, 0, 0,
                                             climbTgt.X, climbTgt.Y, climbTgt.Z,
@@ -5771,8 +6859,13 @@ namespace GrandTheftAccessibility
                                     isAutodriving = false; autodriveSequenceActive = false;
                                     autodriveWanderMode = false;
                                     autonavMode = "drive";
+                                    LogPlanePhase("Landing", "Landed", flyVeh, aboveGround,
+                                        planeHorizDist, "agl<2 spd<5");
                                     planePhase = PlanePhase.Cruise;
                                     planeLandingRunwayIndex = -1;
+                                    planeTakeoffRunwayIndex = -1;
+                                    planeTaxiStartTicks = 0;
+                                    planeGearBrokenAnnounced = false;
                                     autodriveVehicleHandle = 0;
                                     planeLandingStartTicks = 0;
                                     planeLandingAttempts = 0;
@@ -6050,9 +7143,12 @@ namespace GrandTheftAccessibility
                     Weapon wep = Game.Player.Character.Weapons.Current;
                     string weaponName = currentWeapon;
 
-                    // Try to get a readable name from hashes
-                    if (hashes.ContainsKey(wep.Hash.ToString()))
-                        weaponName = hashes[wep.Hash.ToString()];
+                    // iter-58: this used to look the weapon up in hashes.txt by
+                    // wep.Hash.ToString(), which is the ENUM name ("Pistol") and could
+                    // never match a numeric key — and hashes.txt had no weapon rows
+                    // anyway, so the lookup was dead twice over. The game names weapons
+                    // itself, localized, for every DLC weapon ever added.
+                    weaponName = WeaponDisplayName(wep.Hash) ?? weaponName;
 
                     // Build ammo announcement string
                     string ammoInfo = "";
@@ -6861,10 +7957,18 @@ namespace GrandTheftAccessibility
                             ? Math.Min(0.5f, Math.Max(0.03f, (navNowTicks - navPrevScanTicks) / 10000000f))
                             : 0.1f;
                         navPrevScanTicks = navNowTicks;
-                        UpdateNavZoneState(0, distLeft, typeLeft, maxRange, vehLeft, pedLeft, inVehicle, vehicleSpeed, bearLeft, scanDtSec);
-                        UpdateNavZoneState(1, distCenter, typeCenter, maxRange, vehCenter, pedCenter, inVehicle, vehicleSpeed, bearCenter, scanDtSec);
-                        UpdateNavZoneState(2, distRight, typeRight, maxRange, vehRight, pedRight, inVehicle, vehicleSpeed, bearRight, scanDtSec);
-                        UpdateNavZoneState(3, distBehind, typeBehind, maxRange, vehBehind, null, inVehicle, vehicleSpeed, bearBehind, scanDtSec);
+                        // iter-62: each zone now also reports WHERE. Reconstructed from the
+                        // scan's own direction and distance, which costs nothing — the alternative
+                        // was plumbing four more out-parameters through the cast helpers.
+                        GTA.Math.Vector3 zEye = playerPos + new GTA.Math.Vector3(0f, 0f, 0.6f);
+                        UpdateNavZoneState(0, distLeft, typeLeft, maxRange, vehLeft, pedLeft, inVehicle, vehicleSpeed, bearLeft, scanDtSec,
+                            zEye - rightVec * distLeft, distLeft < 900f);
+                        UpdateNavZoneState(1, distCenter, typeCenter, maxRange, vehCenter, pedCenter, inVehicle, vehicleSpeed, bearCenter, scanDtSec,
+                            zEye + forwardVec * distCenter, distCenter < 900f);
+                        UpdateNavZoneState(2, distRight, typeRight, maxRange, vehRight, pedRight, inVehicle, vehicleSpeed, bearRight, scanDtSec,
+                            zEye + rightVec * distRight, distRight < 900f);
+                        UpdateNavZoneState(3, distBehind, typeBehind, maxRange, vehBehind, null, inVehicle, vehicleSpeed, bearBehind, scanDtSec,
+                            zEye - forwardVec * distBehind, distBehind < 900f);
                         navZoneBehindAudible = isMovingBackwards;
                         navScanInVehicle = inVehicle;
                         navScanVehicleSpeed = vehicleSpeed;
@@ -6891,13 +7995,23 @@ namespace GrandTheftAccessibility
                             navHazardScanCounter++;
                             if (navHazardScanCounter % 3 == 0)
                             {
-                                float hereGround = World.GetGroundHeight(playerPos);
-                                if (hereGround > 0.01f)
+                                // groundHeightV2: the deprecated one-argument GetGroundHeight
+                                // returns 0 both for "no ground here" and for "ground at sea
+                                // level", and this probe has to tell those apart — the whole
+                                // point of the far sample is to notice a VOID ahead. The
+                                // > 0.01f tests below are that ambiguity written down. The
+                                // nightly's out-parameter form separates the two properly.
+                                float hereGround, nearGround, farGround;
+                                bool hereOk, nearOk, farOk;
+                                SampleGround(playerPos, out hereGround, out hereOk);
+                                if (hereOk)
                                 {
-                                    float nearGround = World.GetGroundHeight(playerPos + forwardVec * 1.0f);
-                                    float farGround = World.GetGroundHeight(playerPos + forwardVec * 2.0f);
-                                    float drop1 = nearGround > 0.01f ? hereGround - nearGround : 0f;
-                                    float drop2 = farGround > 0.01f
+                                    SampleGround(playerPos + forwardVec * 1.0f,
+                                        out nearGround, out nearOk);
+                                    SampleGround(playerPos + forwardVec * 2.0f,
+                                        out farGround, out farOk);
+                                    float drop1 = nearOk ? hereGround - nearGround : 0f;
+                                    float drop2 = farOk
                                         ? hereGround - farGround
                                         : playerPos.Z - farGround; // void/water edge ahead
                                     float maxDrop = Math.Max(drop1, drop2);
@@ -6985,6 +8099,12 @@ namespace GrandTheftAccessibility
                 // ============================================
                 int steeringAssistMode = getSetting("steeringAssist");
 
+                // iter-61: run the frontend-menu detector BEFORE the suspend gates, and
+                // unconditionally — the whole point is to see the spans the assist was
+                // blind to, including the ones where it was already stood down for some
+                // other reason.
+                UpdateFrontendMenuState();
+
                 // ---- iter-19 G2: suspension housekeeping ----
                 // A setting toggle always clears the suspend latch (and any grace);
                 // otherwise a suspended assist resumes after the player sustains
@@ -7011,7 +8131,10 @@ namespace GrandTheftAccessibility
                 // iter-44: intoxAssistSuspend gates the same scan block, so it needs
                 // the same keep-alive or an intoxicated drive poisons scanAgeMs for
                 // its whole duration.
-                if (assistSuspended || intoxAssistSuspend)
+                // iter-61: frontendAssistSuspend is the fourth parallel latch and needs
+                // the same scanAgeMs keep-alive, or a menu span poisons the staleness
+                // clock the way a suspend did before iter-34.
+                if (assistSuspended || intoxAssistSuspend || frontendAssistSuspend)
                 {
                     steeringAssistTicks = DateTime.Now.Ticks;
                     // iter-36 P0-2: a suspend prevents UpdateStuckRecovery from
@@ -7085,7 +8208,7 @@ namespace GrandTheftAccessibility
                 // Closing this gate also means ApplyCachedSteeringInputs never runs,
                 // so no DISABLE_CONTROL_ACTION fires and the blackout's throttle/steer
                 // writes land uncontested (see the iter-39 Stage 1A root cause).
-                if (steeringAssistMode > 0 && !assistSuspended && !intoxAssistSuspend && Game.Player.Character.IsInVehicle() && !isAutodriving)
+                if (steeringAssistMode > 0 && !assistSuspended && !intoxAssistSuspend && !frontendAssistSuspend && Game.Player.Character.IsInVehicle() && !isAutodriving)
                 {
                     Vehicle playerVeh = Game.Player.Character.CurrentVehicle;
                     // iter-36 B1: dead-vehicle latch. A destroyed hull must not be
@@ -7155,14 +8278,14 @@ namespace GrandTheftAccessibility
                         if (!strandedHold) strandedSinceTicks = 0;
 
                         if (vehicleSpeed > 2f
-                            || currentDriveMode != DriveMode.LaneKeeping
+                            || !IsLaneKeepingMode()
                             || emergencyBrakeActive
                             || rampedBrakeInput > 0.1f
                             || InWatchdogGrace() // iter-19 G2: keep scans + UpdateStuckRecovery alive during grace
                             || strandedHold      // iter-24 S2: stranded against an obstacle — keep recovery alive
                             || autoCreepActive   // iter-25 M7: keep alive while auto-creep is resuming the car
                             || (getSetting("autoResumeCreep") == 1
-                                && currentDriveMode == DriveMode.LaneKeeping
+                                && IsLaneKeepingMode()
                                 && vehicleSpeed < CREEP_SPEED
                                 && lastAssistBrakeTicks != 0
                                 && DateTime.Now.Ticks - lastAssistBrakeTicks < CREEP_AFTER_BRAKE_TICKS) // iter-25 M7: cleared-hazard resume window
@@ -7263,19 +8386,17 @@ namespace GrandTheftAccessibility
                 {
                     driveLogger.Start();
                     // iter-52: images live or die with the log they are joined to.
-                    // Only pay the self-test when the user actually asked for images.
-                    if (driveLogger.IsRunning && getSetting("snapshotImage") == 1)
-                    {
-                        try { snapshotWriter.Start(driveLogger.FilePath); } catch { }
-                        driveLogger.Write("[F" + driveLogFrameCount + "] EVENT capture-selftest: "
-                            + snapshotWriter.Census()
-                            + " videoWindowed=" + SettingsXmlRaw("video", "Windowed")
-                            + " screenW=" + SettingsXmlRaw("video", "ScreenWidth")
-                            + " screenH=" + SettingsXmlRaw("video", "ScreenHeight"));
-                        if (snapshotWriter.SelfTestStatus == "black")
-                            Speech.Ambient("Failure screenshots are unavailable in exclusive "
-                                + "fullscreen. Switch to borderless windowed to enable them.");
-                    }
+                    // iter-53 S1: the writer's start USED to live here and only here —
+                    // inside this rising edge — so it ran at most once, at the instant
+                    // debug logging was switched on, and only if snapshotImage already
+                    // read 1 at that exact moment. Enable images afterwards (the natural
+                    // order: start logging, then go turn images on) and the writer stayed
+                    // dead for the whole session while every Capture() silently returned.
+                    // That is why 08-11-182121 produced 82 markers and zero .jpg files
+                    // with all four snapshot gates set to 1. The start now lives in
+                    // EnsureSnapshotWriter(), called every frame; this just re-arms it.
+                    snapshotStartAttempted = false;
+                    snapshotUnavailableLogged = false;
                     if (driveLogger.IsRunning)
                     {
                         // Iter-9 Patch F: startup banner + iter-version sentinel.
@@ -7395,6 +8516,16 @@ namespace GrandTheftAccessibility
                             + "brake-standoff low-obstacle-cache rear-ground-ignored "
                             + "navDist-types street-1hz-fallback apply-assist-unchanged-thin "
                             + "frame-10hz-parked decision/path/veh-trim; "
+                            + "iter-62: W1:spatializer3d(ITD+pinna-lowpass+distance,setting=listenerFrame) "
+                            + "W1:scan-sweep(setting=scanAudioSweep) W1:elev-chirp(setting=spatialElevationCue) "
+                            + "W2:one-hostile-detector(setting=hostileDetection,named+placed) "
+                            + "W3:plane-gear(setting=planeGearControl) W3:plane-taxi(setting=planeTaxiAssist) "
+                            + "W3:heli-land-mode(setting=heliLandModeV2) W3:autodrive-style(setting=autodriveStyleV2) "
+                            + "W4:xydist(setting=xyDistanceFix) W4:ground(setting=groundHeightV2) "
+                            + "W4:pathfind-probe(setting=pathFindRuntimeV2,telemetry-only); "
+                            + "iter-62-log: plane-phase plane-gear heli-land-issue nav-sweep spatial-elev "
+                            + "spatial-fallback xydist pathfind-probe pathfind-census guard-patrol "
+                            + "autodrive-style; "
                             + "iter-37: N1:pulse-scheduler+one-voice-arbiter(setting=navAssistVerbosity) "
                             + "N2:beep-envelope+distance-gain N3:behind-double-tick "
                             + "N4:around-me/whats-ahead/where-am-i(NumPad-Divide) "
@@ -7410,7 +8541,7 @@ namespace GrandTheftAccessibility
                             + "nav-guidance)");
                         driveLogger.Write("# vehicleaihandling: " + VehicleAIHandlingRegistry.LoadedFrom);
                         driveLogger.Write("# Started: " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
-                        driveLogger.Write("[F" + driveLogFrameCount + "] EVENT iter-version: iter52-worlddata"); // iter-52 (WORLD DATA + FAILURE SNAPSHOTS — static world knowledge harvested from Rockstar's own decompiled scripts, plus the instrumentation to see a drive-assist failure instead of inferring it) // tools/build-worlddata.py harvests scripts/gta11y-worlddata.json from calamity-inc/GTA-V-Decompiled-Scripts@senpai: 50 letter scraps + 50 spaceship parts (case-dispatch Vector3 tables), 135 underwater cache pickups across 12 dive sites, 8 restricted-area groups as 56 angled boxes, 63 Strangers & Freaks trigger points (the func_118 table embedded in every re_*.c), 27 interactable props and the 33-entry random-event id registry. Parsed, not transcribed: hand-transcribing the RE ids got them wrong (re_securityvan is 9, not 8; id 8 is RE_BIKETHIEFSTAMP with no script). Read by WorldDataDb.cs on MapDb.Load's fail-closed contract // WORLD DIRECTORY (menu 9, collectibleNav + placesDirectory, both OFF): distance-sorted collectibles and places, waypoint + audio homing on the nav-assist emitter (880 Hz square, octave down when behind you, cadence by distance). Collected-state comes from GET_PACKED_STAT_BOOL_CODE, whose base index is not a literal anywhere — it is calibrated at runtime by matching a 50-bit popcount against STAT_GET_INT(num_hidden_packages_N) and FAILS CLOSED to showing everything, because telling someone they already found a collectible they have not is worse than a longer list. HAS_PICKUP_BEEN_COLLECTED is useless here: the scripts only CREATE_PICKUP within 50 m // RESTRICTED AREAS (restrictedAreaWarn, OFF): approach/enter/clear speech from the restrictedareas.c boxes, AABB-prefiltered so IS_POINT_IN_ANGLED_AREA is only paid for a candidate. Only 4 of 8 groups are named; the rest speak GET_NAME_OF_ZONE rather than a guessed landmark. Parameterised ceilings (IntToFloat(250 + iParam4)) are harvested as their base — writing null there would deserialize to 0 and collapse the box // INTERACTION CATALOGUE (interactionCatalogue, OFF): the ob_* scripts say what a prop is FOR, so the NumPad 8 scan appends it. Curated per script, not auto-scraped: the scrape returned 99 rows, mostly held props shared by the consumable scripts this mod already models properly // EVENTS AND SERVICES (menu 10): randomEventAlerts (OFF) reads Global_112911 and exposes SUPRESS_RANDOM_EVENT_THIS_FRAME; emergencyDispatch (OFF) is 911 without the phone UI via CREATE_INCIDENT services 7/5/3 from emergencycall.c, sited on a road node, DELETE_INCIDENT on timeout and onAborted. NO force-start: the brain system passes each re_ script its world point in ScriptParam_0.f_1 and START_NEW_SCRIPT cannot supply it, so 33 menu rows would all have reported "did not start" // FAILURE SNAPSHOTS: LogCollisionSnapshot had TWO call sites (AUTO-COLLISION, PLAYER-INDICATED-FAILURE) — every engine-stuck, stuck-layer, wedge-damage and damage-tally fired blind, which is why triage-log.py needs an unmarked-damage sweep. snapshotAllFailures (OFF) adds 13 tagged call sites, rate-limited per tag and while the car has not moved, reporting suppressedSinceLast. snapshotGeometry (OFF) appends a 16-way bumper fan + 8-way knee ring through CapsuleSweep (refused != clear), the entity table with relative bearings, chassis attitude and ground clearance. snapshotImage (OFF) writes JPEGs on a background thread and SELF-TESTS capture first — CopyFromScreen returns black under exclusive fullscreen, and a folder of black frames costs an analyst a session. snapshotPreroll (OFF) grows the snapshot ring 32->200 frames (~500 ms -> ~3.3 s; safe because every *LastMs query breaks on its time cutoff) and keeps 4 raw 1 Hz frames armed only on stuck signals, encoded only when a failure fires. triage-log.py copies them to triage/<stem>/snaps/ joined on collisionMarkerSeq and names them in digest.md; MARKER_RE now matches the SHAPE of a snapshot header (guarded by the preceding ==== rule) so a tag added in C# is picked up without a matching edit here // iter-51 (FOUR SYSTEMS against one session's evidence — on 08-11 the second steering channel steered the car BACKWARDS, a citywide riot recorded inCombat=0 on all 649 samples, every consume abandoned its animation at 95% with no outro, and the phone read ringtone names out as contacts) // DRIVE ASSIST — steerBiasV2 SIGN: SET_VEHICLE_STEER_BIAS is documented -1=full RIGHT / +1=full LEFT while control 59 in this mod is left-NEGATIVE, so the bias opposed lane-keep on every frame the gate was on; and because the native LOCKS steering rather than adding to it, that was lane-keep in reverse rather than a second opinion. Negated at its single write site; lastSteerBiasWritten now reaches the FRAME line (it was assigned and read by nothing, which is how the inversion survived a whole session); EVENT steer-bias carries cmd + bias + an honestly-named achSteerNormPrev // ONE steering denominator: commanded divided by min(0.61 rad, lockRad), achieved divided by the raw reported lock with no cap — so on TEZERACT (reported 19.0 deg, reached 40.1) an identical physical angle read 1.84x larger on the achieved side and pegged at its clamp. SteerNormLimitRad is now shared by both sides, and EffectiveSteerLockDeg believes the largest OBSERVED angle over a reported lock it exceeds by >10% (EVENT lock-override names the crossing; still bounded by the legacy 35 deg cap, so an observation can only widen the limit back toward the gate-off default, never past it) // roadSpeedGovernorV2 (OFF): a cap from the ENGINE's road class rather than the shipped graph — 2-lane 22 m/s, 4-lane 27, highway 33. The node-category governor reads pathNodeIndices and is inert on GPS-route paths, which is why 106 mph down a rural two-lane cost 1181 of the session's 1292 drawdown. Raises the shared speedzone request, so driver override and brake arbitration are unchanged (EVENT speed-governor) // polyDistrustV2 (OFF): roadFactsV2 measured the engine's road edge sitting a MEDIAN 6.0 m from the polyline being steered against (p95 33.1, max 79.7) — a parallel-road snap, and the mechanism behind the session's only player-marked failure. Past 4 m the cross-track term fades to zero while the heading term keeps full authority: heading hold, not hands off (EVENT poly-diverge). Both new gates consume roadFactsV2 and say so via EVENT gate-degraded when it is off // CIVIL UNREST — the scenario-ped density zeroing at stage 3+ is DELETED: it suppressed exactly the standing/sitting on-foot peds the recruiter recruits, at the moment the riot was supposed to escalate, and the roster tracked it one-for-one 3 -> 1 -> 0. Recruits are pulled OUT of their scenarios instead (normal exit below stage 3, panic above, then wander), roster cap 60 -> 64, and EVENT unrest-scan names every rejection reason beside the candidate count so an empty roster is finally attributable // INSTIGATORS, the narrow relaxation of the never-order-a-rioter rule: at most TWO tasked peds, armed, stage 2+, each on a DISTINCT hated target within 25 m, never each other, and no new orders while anything is still fighting. TASK_COMBAT_PED + SET_PED_KEEP_TASK + a temporary event block — which is what R*'s own re_gangfight.c does, and the direct rebuttal to hoping hate relationships start a fight unaided // heat decay 1.5/s -> 0.4/s (holding the stage-1 threshold used to require one fresh engagement every two seconds forever, so dynamic escalation was arithmetically unreachable and every advance read why=time), plus fires/alarms/dispatches as new inputs, plus unrestPace Relaxed/Normal/Fast because the ladder was a fixed ten minutes to citywide // POLICE: the incident anchor is the riot CENTROID and is recreated only on invalidity or a 60 m drift, not on a 60 s stopwatch that deleted a working dispatch and sent the units somewhere new — that churn IS the "going in circles". The COP -> faction hate edge is added at stage 3+ with police >= 2 (spoken, and torn down in both directions) so copsEngaged can leave 0; dispatched cops in stopped cars are asked to get out instead of being rejected for being in one; the copstop no longer early-returns past the scan that assigns copsEngaged; a roster that empties no longer publishes stale fighting/armed stats; unrest lines carry riotT= because driveLogFrameCount is frozen on foot and all 1663 of them read [F31198] // INTOXICATION — OUTROS: every consume ended by abandoning the enter clip at phase 0.95 and clearing tasks, so the bottle was never put down. The catalogue now carries per-intoxication-stage exit clips for the player AND the props, transcribed from the shared safehouse template (func_2 / func_6) and validated clip-by-clip against the game's own animation dictionary dump; a second synchronized scene plays them, and the audio-scene and bank teardown move after it (EVENT intox-exit) // kind=14's dictionary never existed — the real one has no trailing @ and holds only bartender and bottle clips, so it could never have been a solo consume; repointed at mp_player_intdrink, which is the actual solo bottle set with intro/loop/outro. Every clip is gated on GET_ANIM_DURATION > 0 (EVENT intox-clip-missing) so a bad name costs the outro instead of freezing the player. intoxDriveImpair and intoxBlackoutDrive finally have GateReach/GateFire call sites after censusing QUIET through the very session named after them // MENU READER — the phone page probe scored pages by "how many rows resolve" with no notion of which page belongs to the app that just opened, and chose the same page 4 at a perfect 16/16 for all four apps, which is why Contacts and Messages read out the ringtone and wallpaper list. It is now app-aware (a page whose signature is identical across two apps is a global table; a page where EVERY row resolves is a static one), refuses rather than guessing, and the working char-sheet contacts channel it had been shadowing runs first) // iter-50 (MENU READER v1.5 — the pause menu could NAME every settings row and say what almost none of them were SET to: 110 of 149 rows had no value source at all, whole panes of them, and pressing Left/Right was completely silent because the selection natives do not move on a value change, so the settings menu was navigable but not operable without sight) // A1 the pref -> profile-setting-id map is now LEARNED at runtime rather than hand-pinned: the profile store has been scanned since v1.1 and the reader has always known which row is highlighted, but nothing joined them — when exactly one id moves inside 900 ms of a Left/Right on a focused pref row, that id IS the row, and it is bound, spoken and persisted to gta11y-menubind.json so it survives the session (ambiguous multi-id moves are logged for tools/bind-profile-ids.py and bound to nothing, and a shipped pin always outranks a learned one) // A2 live value speech on Left/Right, plus the removal of the v1.4 mrRowLrCount suppression on the PROFILE path — that gate existed because the snapshot only committed on close, which stopped being true once the rescan follows the keypress; the settings.xml path KEEPS the suppression and says reader-value-nolive, because that file really is only rewritten when the menu closes // A3 position announcements (2 of 17) off the per-row ord, with the pane total taken from an observed paneRowCount when align-panes.py has one and a non-conditional row count otherwise, logged with its provenance so a wrong total is visible rather than merely wrong // A4 native value providers for the rows that are neither profile settings nor settings.xml keys — radio station and measurement system // A5 the open announcement is HELD 250 ms: 15 of 39 opens across the post-v1.4 sessions lived under a second (four of them one frame) before the frontend aborted and a second activation opened it for real, so one Esc press produced "Pause menu" / "Menu closed" / "Pause menu", and the middle utterance was a lie // B1 contact names were spoken as raw GXT KEYS ("CELL_FRANKLIN_N" 59 times across three sessions) because the char sheet stores a TEXT_LABEL and v1.4 returned it unlocalized; the rejection rules now live once in MenuLabelDb.ResolveGxt and an unresolved key is never spoken — "row 3" tells a blind user strictly more than an identifier does // B2 the contacts row map was the WRONG ARRAY: appcontacts.c line 9298 reads the selection through Global_21655 and v1.4 tried 21616 first behind a validator so weak (four entries, in-range and printable) that any array of small ints passed it, which is why rows 0 and 2 both resolved to slot 177 and the reader said the same contact twice on a monotone walk — candidates reordered, the validator now demands 6 distinct of 8, and an adjacent duplicate demotes the channel to "row N" // B3 phoneRowTextV2 (DEFAULT OFF): every phone app writes its visible rows into ONE shared array, Global_10324[char][page].f_7[row], as TEXT_LABELs handed to the scaleform by SET_DATA_SLOT — so a single provider reads Phone Settings, Checklist, Texts and Email instead of the per-app tables phoneAppRows was going to need, and the page index (the one unconfirmed offset) is probed and logged before anything is spoken // B4 the Texts/Email store sweep is RETIRED: it ran four sessions and only ever rediscovered the char sheet at base 2349, because those apps read their senders out of it — ~39k probes per app open for a base that is now pinned as data // B5 locked home tiles say so // iter-49 (THE ENGINE'S OWN ROAD MODEL — thirteen gates, ALL DEFAULT OFF, read out of the decompiled vanilla scripts rather than guessed, the same method that produced iter-44 through iter-48) — the lateral model, the junction detector and the stuck ladder were all built from shipped offline data (a paths.xml/junctions.xml dump, an 82-row JunctionDb, a hand-picked LANE_WIDTH_M) plus hand-tuned heuristics, while taxiservice.c and taxilauncher.c have contained a complete "find my lane / find the correct kerb / is this node driveable / am I stuck" implementation the whole time // A1 roadFactsV2 (TELEMETRY): GET_CLOSEST_ROAD gives live lanesFwd/lanesBwd/median-width plus the road edge as a real segment, and answers three questions open since iter-32 — do the shipped lane counts agree with the engine (BuildSteerPolyline bets the offset SIGN on them), is `width` the median gap the citizenfx contract says it is (which would confirm the iter-32 finding that paths.xml Width is not road width), and how far does our steering polyline sit from the engine's own edge (a DIRECT measurement of the parallel-arm snap iter-36 could only clamp); also picks up GET_NTH_CLOSEST_VEHICLE_NODE_ID + IS_VEHICLE_NODE_ID_VALID + GET_VEHICLE_NODE_IS_SWITCHED_OFF/IS_GPS_ALLOWED, the validation R* runs on every node and this mod ran on none, and the outLanes output all 14 node-query sites have allocated and discarded since iteration one // A2 nodePropsV2 (TELEMETRY): GET_VEHICLE_NODE_PROPERTIES returns eVehicleNodeProperties — OFF_ROAD ON_PLAYERS_ROAD NO_BIG_VEHICLES SWITCHED_OFF TUNNEL_OR_INTERIOR LEADS_TO_DEAD_END HIGHWAY JUNCTION TRAFFIC_LIGHT GIVE_WAY WATER — at any coordinate with nothing shipped, which is the whole of what the 82-junction database, the 1,443-node TrafficLight fallback and the street-name surface detector were approximating, plus give-way and dead-end which the mod had no concept of at all // A3 nodeQueryArgsV2: every node query in this file passed nodeFlags=1, which is not a default but GCNF_INCLUDE_SWITCHED_OFF_NODES — an explicit opt-IN to driveways, service spurs and disabled paths, and the likeliest mechanical source of the lat-snap the iter-36 clamp treats symptomatically; path sources now take IGNORE_SLIPLANES|IGNORE_SWITCHED_OFF_DEADENDS, the same-direction recovery search adds GCNF_FAVOUR_FACING (the engine doing in one call what FindNearestSameDirectionRoadNode does by iterating 1..10 and filtering a 45-degree window), recovery targets deliberately KEEP the switched-off nodes because a driveway is a fine place to be pushed back onto out of a ditch, nthClosest 0 -> 1 at the eleven sites passing an out-of-contract 0, and GET_APPROX_FLOOR_FOR_AREA as taxiservice's deck disambiguator in place of a flat 12 m Z window // A4 nodeHazardV2: consumes A2 — a THIRD junction arming source covering the whole map, arming LAST so a DB template still wins; a give-way governor and announcement; a dead-end warning plus a veto on recovering INTO one (driving out of a wedge into a cul-de-sac is how the 07-31 strand pattern starts); HIGHWAY lifting the coarse speed-category cap so a freeway is not governed to a surface-street speed; and TUNNEL_OR_INTERIOR vetoing the off-road arm, because under covered road IS_POINT_ON_ROAD reads False AND the polyline snaps to the street overhead, so BOTH halves of the "genuinely departed" conjunct fire at speed inside a tunnel. What this does NOT do is claim to know a light's COLOUR — IS_VEHICLE_STOPPED_AT_TRAFFIC_LIGHTS appears exactly once in the whole 1,156-script corpus and is widely reported unreliable, so a light still arms a slow-down governor and never a stop // B1 kerbGeometryV2 (TELEMETRY): taxilauncher.c's picker ported verbatim — both kerbs via GET_POSITION_BY_SIDE_OF_ROAD, the perpendicular of the near one dotted against the approach vector to choose the side reachable without crossing, +180 degrees on the heading if the far one was taken; the `side` parameter is UNDOCUMENTED so all three of R*'s values (0, 1, -1) are sampled and logged and the convention is settled from a session, exactly as the eMenuPref shift and the SteeringAngle sign were // B2 laneWidthV2: LANE_WIDTH_M is 5.3 m and R*'s own drop-off maths uses 4.2 m per lane, so the "half lane" bias has really been 2.65 m of a 4.2 m lane since iter-30 — most of a full lane, and on a narrow street the difference between the inside lane and the kerb; the one-way/two-way decision also moves off the shipped graph onto the live GET_CLOSEST_ROAD counts, and the latHalfW distrust clamp gets the same correction (a 4-lane road was credited 10.6 m of half-carriageway instead of 8.4 m, so blown lateral errors up to 2.2 m larger passed the test); deliberately NOT imported is taxiservice's full 4.2*lanes magnitude and its +0.9*width/-0.7 corrections, which walk a point to the KERB and belong to pullOverAssist // B3 pullOverAssist: a Pull Over command (Auto-Drive item 37) that stops at the kerb on the driver's own side — Full mode and AI drivers get a real park, Assistive mode gets a spoken bearing and a brake FLOOR any throttle press cancels, because seizing the wheel in Assistive would break the whole contract of the mode; the same kerb target replaces the raw road NODE in Park at Nearest Safe Spot and in the auto-drive park handoff, where the heading was veh.Heading — never a considered choice, simply wherever the nose happened to point when the handoff fired; targets are validated with IS_POINT_OBSCURED_BY_A_MISSION_ENTITY as taxiservice does // C1 engineStuckTelemetryV2 (TELEMETRY) + C2 engineStuckArmV2: IS_VEHICLE_STUCK_TIMER_UP has four types and the mod has read none of them for 48 iterations; taxiservice polls the fast pair at 7 s and the slow pair at 30 s, the type meanings are undocumented so all four are sampled at three thresholds beside upright/onAllWheels/roll (which is what will separate a roll detector from a jam detector) and beside the mod's own verdict; the arm is ADDITIVE ONLY and never a veto, because an engine timer that fails to fire must not be able to suppress an arm the heuristics got right — the rule the iter-43 queue-veto broke at a cost of a 32 s strand — and RESET_VEHICLE_STUCK_TIMER now runs on every release so a stale timer cannot re-arm instantly and produce a recovery loop that reads like a car which never got free // C3 tempActionV2: the most expensive bug in this project was the mod disabling the controls it was writing to, and even post-actuationV2 every rung of the recovery ladder still goes through that one channel; TASK_VEHICLE_TEMP_ACTION does not touch it at all, and vanilla uses it exactly where we use control writes (taxiservice holds a cab with TA_WAIT and stops it with TA_BRAKE_ACTION, re_bus_tours stops a coach the same way), so the pivot rungs get TA_HANDBRAKE_TURN_LEFT/RIGHT and the reverse rungs get TA_GO_IN_REVERSE instead of a ForwardSpeed velocity injection onto a car that may still be physically wedged; HARD-restricted to Full mode with a recovery already engaged, because a temp action is a task on the driver ped and takes the wheel from whoever holds it // C4 driveSequenceV2: taxiservice queues DRIVE_TO_COORD_LONGRANGE and TASK_VEHICLE_PARK as ONE OPEN_SEQUENCE_TASK and lets the engine own the handoff, against our hand-rolled Cruise->Navmesh->Park machine with its overshoot re-arm latch; the phase machine stays as the fallback and watches for an 8 s stall short of the destination, because the one thing the engine will not do is tell us it has given up, and a blind passenger sitting in a stopped car with no explanation is the failure this subsystem exists to prevent; TASK_VEHICLE_PARK also finally gets a real heading via DestinationParkHeading rather than the car's own // C5 steerBiasV2: SET_VEHICLE_STEER_BIAS is a steering write outside the control system (drunk.c swerves a car with it), staged as measurement first — write the bias, log it against the actuationFeedbackV2 achieved-angle readback, and promote it only if achSteer actually moves, because whether it does anything on a PLAYER-driven car is unverified // D gunfireAttribV2: iter-46 0b-4 established that 932.1 of 07-31's 1552.0 marked-damage units were police gunfire and that nothing in the log said so, leaving the analyst to infer it from wanted= — a poor proxy that is non-zero for whole minutes with no shots fired and zero during a gang shootout; taxiservice answers it directly with IS_BULLET_IN_AREA(7 m) and IS_PROJECTILE_IN_AREA(15 m), so bullet=/proj= now ride UNGATED on the marker header and the unmarked-damage sweep (measurement, iter-46 Stage 0b precedent) and triage grows a fire column plus a gunfire section, while the GATE covers only the behaviour: standing the damage-grind arm down under fire (its premise is "a stopped car losing health is being ground against something", which is exactly wrong when the health is coming off because someone is shooting) and a "Taking fire" cue // rollout: the four TELEMETRY gates change nothing perceptible and share one session; everything else is one gate per epoch per the iter-41 discipline // iter-48 (CIVIL UNREST ESCALATION OVERHAUL — the riot now escalates into the WORLD instead of only into combat attributes, because a stage-3 "full riot" differed from stage 1 by a few attributes and a slightly larger radius while traffic, ambience and police were untouched, which for a player who cannot see the riot meant the escalation the narration promised was never audible) — the mechanism designs come out of the decompiled vanilla scripts, not guesswork: joaat("COP")/joaat("ARMY") are real built-in relationship groups (re_arrests.c sets its criminal group Dislike toward COP with NO reverse edge, which is exactly the one-directional form used here), CREATE_INCIDENT(service,x,y,z,units,3f,&id,0,0) with a 60 s refresh is emergencycall.c's shape verbatim, vanilla's own ambient brawl (re_gangfight.c) runs CR_Near + 100 m perception for its MELEE variant and CR_Medium only for the gun variant which is why our stage 3 stood off, and PLAY_PED_AMBIENT_SPEECH_NATIVE's third argument is a speech PARAM not a voice name // 0 (UNGATED, lands first) RestoreUnrestPed leaked six things ApplyUnrestStageProfile/TryArmUnrestPed wrote — combat range, seeing 60 m, hearing 80 m, accuracy, attrs 27/49 and config flag 150 — so every ex-rioter inside the recruit radius stayed permanently hyper-alert after a riot ended, with no explanation a blind player could get; origAccuracy is now captured at recruit via GET_PED_ACCURACY and the orphan sweep mirrors the absolute resets it can know // 0b weapon-confiscation pass (BF_AlwaysEquipBestWeapon off + whitelist check on the profile slice), mandatory once police are in the fight because a rioter picking a Carbine Rifle off a dead cop silently breaks the "nothing automatic or long-range, ever" rule the weapon pools exist to enforce // 1 fifth stage "citywide riot" at 10:00 (0-3 keep their exact timings and names) + a heat model DARK-LAUNCHED behind unrestEscalation: heat rises on casualties/fresh engagements/player gunfire, decays 1.5/s of ModClock time, and is computed and logged every second while consuming nothing until the gate is flipped; stage selection is MONOTONIC by construction because a blind player told "full riot" must never then be told it calmed down while people are still fighting // 2 TickCivilUnrestFrame, a per-FRAME half — the population multipliers are _THIS_FRAME natives and TickCivilUnrest is gated to 4 Hz, so a density write inside that body would have been live for one frame in fifteen and done nothing observable; it also IS the teardown story, since _THIS_FRAME natives revert on the next frame after a crash whereas ADD_POP_MULTIPLIER_AREA's area id is process-local and unrecoverable // 3 unrestBrutality: CR_Near at stage>=3 is the single change that turns a standoff into a brawl, plus CanChaseTargetOnFoot / MaintainMinDistance off / SwitchToAdvanceIfCantFindCover / CanFlank / FrustratedAdvance / TLR_SearchForTarget / shoot rate 250-400 / move-rate override on the REGISTER slice because that native must be looped — and a deliberate safety INVERSION, blind fire from cover is turned OFF at brutality>=1 (BlindFireChance 0f) because "more brutal" must mean closer and more committed, not more unaimed rounds near someone who cannot see the shooter // 4 unrestAmbience: engine ped barks are the highest-value item here for a blind player (the crowd literally sounds like a riot at zero TTS cost) with pools chosen by VOICE COVERAGE so they actually fire on a random street ped, terrified bystanders mixed under shouting aggressors, and one-way arbitration where barks yield to the screen reader and never the reverse; car alarms 12-50 m; ped density 1.5-2.5x with scenario peds zeroed at stage>=3 // 4b unrestFires (double-gated, stage 4 only): 25 m hard floor, max 2, always announced Critical with a bearing at ANY verbosity, because a blind player who simply walks forward burns to death with no warning and FireIds are the one residual a hard reload cannot recover // 5 unrestTraffic on a roster entirely SEPARATE from unrestPeds (IsEligibleForUnrest still rejects anyone in a vehicle): aggressiveness/ability/wander speed by stage, driving styles built from the documented bit table and NOT from GetDrivingStyleFromFlags which reads the player's own Auto-Drive menu state; level 2 clears steers-around-peds and therefore HARD-REQUIRES Navigation Assist (its on-foot TTC alert is the only warning a blind pedestrian gets), clamping to level 1 and saying so when unmet, plus a 25 m no-arm bubble, a 10 m eject pass, and a 20% horn cue // 6 unrestPolice 0-4: level 1 is pure relationship work so "angry police" comes out of the same emergent mechanism as everything else, with a NEW wanted-level interlock because ReleaseUnrestCops only ever covered cops in the roster and level 1 recruits none — without it a player at 2 stars stands inside a rioter-versus-police firefight; level 2 delegates to the game's dispatch anchored 30-50 m OFF the player so sirens arrive nearby instead of converging onto them; level 3 is the ONE authorised order to a ped this mod does not own, a street stop whose outcome rolls arrest/taze/shoot at 80/15/5 -> 45/35/20 -> 20/40/40 by stage (lawful policing at stage 2, mostly beating and shooting people by stage 4), pistol forced for the shoot outcome so a carbine cop cannot spray and the line announced Critical at any verbosity; level 4 re-enables SWAT/army dispatch, whose spawn success at zero stars is UNVERIFIED and therefore logged as ok= rather than assumed // 6b SET_RIOT_MODE_ENABLED evaluated and REJECTED: its own documentation says all NPCs turn hostile including the player and it hands out uncontrolled pistols/SMGs, which breaks the group-level Respect invariant the feature is built on, bypasses the unrestMelee/unrestFirearms gates, and leaves the safety watchdog with nothing to eject from — vanilla director_mode.c never calls it either // 7 new EVENT kinds unrest-heat / unrest-traffic / unrest-driver / unrest-bark / unrest-police / unrest-copstop / unrest-firefight / unrest-alarm / unrest-fire / unrest-density / unrest-weapon-confiscate, and wanted= on unrest-combat as the specific evidence for the open question of whether config flag 42 covers crimes committed BY a flagged rioter against a cop // iter-47 (INTOXICATION PIPELINE, from the 2026-08-09 session where bank ok=1 + scene running + anim playing still produced no foley, and animations were cut off mid-move while the mod announced them finished) — all six root causes read out of the decompiled vanilla consumable scripts (ob_bong.c / ob_franklin_beer.c / drunk_controller.c), not guessed: A1 the consume was timed from the MENU PRESS against a hand-picked Consumable.Ms, so the anim dict's whole streaming window (up to 3 s) was billed to the animation and every safehouse clip was truncated — the clock now starts when the animation actually starts and its length comes from GET_ANIM_DURATION, with Ms demoted to a floor; A2 completion is now PHASE-driven off GET_SYNCHRONIZED_SCENE_PHASE >= 0.95 exactly as vanilla sequences these, with the wall clock kept only as a backstop, plus a scene-end path for a scene that stops on its own; A3 TASK_PLAY_ANIM duration Ms -> -1 (Ms told the engine to amputate the clip) with AF_LOOPING added only where the consume outlasts the clip; B1 START_AUDIO_SCENE was never called — an ambient bank makes the sounds RESIDENT and the audio scene is what ROUTES them, which is why loading the bank alone changed nothing; FRANKLIN/MICHAEL/TREVOR_SAFEHOUSE_ACTIVITIES_SCENE derived from the bank name and stopped on every exit path; B2 the synchronized scene now uses vanilla's blend 4f and flags 5 (USE_PHYSICS|DONT_INTERRUPT) instead of 8f/0 — DONT_INTERRUPT is what stops an ambient event nudging the player out partway through; B3 PLAY_SYNCHRONIZED_ENTITY_ANIM's BOOL return was discarded on both props, and the prop half is where the drink/smoke foley lives; B4 the scene no longer starts before the PROP MODELS are resident (08-09 logged prop2=0 on the first bong and prop2=1 on the two after it, and TickConsumeProp deliberately will not touch a prop the scene owns, so a late model was lost for the whole consume); C1 SET_GAMEPLAY_CAM_SHAKE_AMPLITUDE only scales a shake that is already running, so the drunk shake was dead after the one-shot expired — re-armed per frame the way drunk_controller.c does; C2 SET_AUDIO_SPECIAL_EFFECT_MODE moved off the raw hash cast, one-shot 0 on teardown; D1 EVENT intox-state heartbeat every 10 s carrying mode/clipset/impairment — intox-audio carried clipset= but fired on the one frame the clipset provably cannot be applied yet, so every log so far read clipset=none and the DrunkStage-from-clipset theory was untestable; D2 EVENT intox-done with why/ms/phase and ms= on the anim line, because on foot the frame counter never advances and [F0] was the only clock the log had; E1 re-selecting a consume now CANCELS it (1.5 s grace) — a synchronized scene blocks the sprint/movement interrupts, so a now-longer consume had no way out; E2 weapon forced to unarmed for the sequence as vanilla does, since a drawn weapon owns the same hand the prop attaches to; E3 whiskey second prop prop_cs_whiskey_bottle -> p_whiskey_bottle_s to match the model the clip was authored against; E4 vanilla-only mode no longer claims in a comment that the meters keep running six lines after zeroing them — it now speaks the end of the game's own drunk window instead of sobering up in silence // iter-46 Stage 0b+1 (MEASUREMENT + GATE INSTRUMENTATION, no behaviour change): 0b-1 collision-suppressed was an `else if` chained to the marker-SETTLE test, so every marker frame ALSO emitted a "discarded" event stamped reason=cooldown — 07-31 reported 1340.4 discarded against a real 10.4; 0b-2 the discarded total is now accumulated unthrottled (cumDrop=) and the line carries pos/street/lat/owner/mode/contact, which it never had; 0b-3 the steer actuation-divergence detector is speed-gated >3 m/s exactly as the brake detector was in iter-43 — the "43.1% of steer commands not actuated" headline was the same stationary-readback artifact for the third iteration running; 0b-4/0b-5 EVENT combat-state on every wanted transition + wanted= on every marker header, because 932.1 of 07-31's 1552.0 "marked damage" was police gunfire and nothing in the log said so; 0b-6 DEAD-VEHICLE/INTOX-STANDDOWN failClass + vehDead=/intoxSusp= on the header — a destroyed hull was classified UNKNOWN-STALE with assist=ON 14 s after it died // 1-1 GateReach/GateFire added to the 9 gates that had NONE (actuationV2, steerFreezeAtStop, reverseV2, brakeDeadzoneV2, graceArbitrationV2, recoverySuspendV2, recoveryTargetV2, stuckLadderV2, vehicleGeometryV2) — all of them censused eval:0/fire:0, which the digest rendered as "SILENT — never reached" and which was the reason no gate could be retired on evidence; 1-2 ONE EVENT gate-manifest driven by GATE_SETTINGS replaces five hand-written per-iteration emitters that had drifted (iter-44/45 never got one at all); 1-3 census carries dEval/dFire deltas so a gate that dies mid-session is visible on one line (junctionDirectionsV2 froze at fire:4048 for the last 44k frames and printed ACTIVE); 1-4/1-5 creepClearV2 and stuckArmHysteresisV2 counted their VETO as a fire, so the census read backwards — vetoes now counted separately; 1-6 offroadBrakeV2/roadModelV2 fires hoisted out of their log throttles so fire counts actions not log lines; 1-9 unit= per gate so eval:57453 (per frame) and eval:36 (per episode) are no longer compared as like quantities; 1-10 EVENT gate-quiet — a gate ON for 60 s with zero evaluations now says so // iter-43 (from the 266.7 MB / 53.2-driving-minute 07-31 field test) — A vehicleGeometryV2 (DEFAULT OFF): per-vehicle wheelbase in the pure-pursuit curvature feedforward (was a fixed 2.8 m "sedan"), per-vehicle steering-lock cap (was a fixed 0.61 rad), rear-overhang clamp 4.0->8.0 m in the reverse/bumper-true clearance checks, and mass+overhang-scaled BRAKE_DIST_*/MIN_BRAKE_DISTANCE; EVENT vehicle-geometry writes halfW/halfLen/mass/lockDeg/wheelbase per vehicle so vehicle SIZE is finally correlatable // B strand fix: queue-veto now expires after 8 s of a non-moving "queue" (EVENT queue-veto-expired), ACC standstill release is LATCHED against the ~1 Hz re-hold cycle, and immobile-under-throttle owns a spoken reason so a blind driver is never left flooring the pedal in silence (07-31: 32 s strand, 7 unanswered F1 flags) // C actuation telemetry corrections: SteeringAngle sign NEGATED (22,247 of 22,446 frames disagreed in sign; fit was -0.779*liveSteer) and the brake-divergence detector is speed-gated >3 m/s (BrakePower reads ~0 on a stopped car — the "52.9% dead brakes" headline was a readback artifact) // G junctionDirectionsV2: precondition relaxed to waypoint-OR-mission-tracking (GENERATE_DIRECTIONS_TO_COORD needs a coord, not a GPS route) + EVENT gen-dir-skip names which precondition rejected the sample + EVENT nav-state heartbeat // gates promoted to default ON on field evidence: creepClearV2 throttleAuthorityV2 skewGateV2 offroadBrakeV2 nodeStreamGuardV2 // iter-42 (game-metadata batch, ALL GATES DEFAULT OFF) — C1 nodeStreamGuardV2: ARE_NODES_LOADED_FOR_AREA guard on all 4 node-query sites, so a path-node streaming gap no longer reads as "off-road" nor collapses the polyline (EVENT nodes-not-loaded) // A1/A3 actuationFeedbackV2 + wheelStateV2: achieved-state readback (SteeringAngle normalised by HandlingData.SteeringLock, BrakePower, ThrottlePower) and per-wheel contact/slip/tyre + wheel-contact plane fit, conditional-emit to protect the log budget // A2: EVENT actuation-divergence, log-only detector for commanded-but-never-actuated brake/steer // B1/B2 roadBoundaryV2 + groundNormalV2 (DARK, feed nothing): measured carriageway via GET_ROAD_BOUNDARY_USING_HEADING and grade/camber via GET_GROUND_Z_AND_NORMAL_FOR_3D_COORD; curve-brake gravity term deferred until grade is cross-validated against the A3 wheel plane // C2/C3 junctionDirectionsV2: GENERATE_DIRECTIONS_TO_COORD as a map-wide junction backstop + cross-check (EVENT junction-disagree) and turn-by-turn speech // iter-41 Stage T (triage: rolling damage sweep, synthetic incidents, epoch comparison, marker-independent trend) + Stage 0 (observability: throttle-hold ledger across all 7 disable-71 sites, gate-census, gate-toggle/test-anchor, immobile-under-throttle, brake aPeak, rolling damage-tally, applied-throttle truth fix) + behaviour gates ALL DEFAULT OFF: creepClearV2, accStandstillV2, assistVoiceV2, throttleAuthorityV2, damageDrawdownV2, stuckArmHysteresisV2, offroadBrakeV2, skewGateV2, handbrakeBandV2 //  iter-40: reverseV2 (ForwardSpeed velocity-injection -> commanded reverse), brakeDeadzoneV2 (control-72 dead-zone pre-compensation + rate-scaled lane-depart cap + rolling-wheel handbrake gate), graceArbitrationV2 (watchdog latch order, brake-vs-throttle arbitration, governor spans grace), recoverySuspendV2 (hazard-aware handover + spoken direction + throttle hold + assist-suspend event), recoveryTargetV2 (blocked/receding target re-resolve, rear-slope sentinel, on-road pause timeout), stuckLadderV2 (roadway auto-reposition, pivot no-progress abort), roadModelV2 (poly-hold drift guard, softer gross-departure eject) // iter-39 Stage 0 (instrumentation) + Stage 1 (actuationV2: stop disabling the controls we write; scoped steer urgency; brake-demand caps; brake-episode measurement) + Stage 3 (watchdogV2: watchdog no longer cancels the recovery that armed it, post-release speed governor)
+                        driveLogger.Write("[F" + driveLogFrameCount + "] EVENT iter-version: iter71-bridge-harness-authority-convergence"); // iter-71: bridge test harness; recovery/ACC/ladder authority and convergence.
                         // W4.2: prove the fixes are present + their gate states in every log.
                         driveLogger.Write("[F" + driveLogFrameCount + "] EVENT pinfix-gates:"
                             + " damageSensor=alwaysOn"
@@ -7442,6 +8573,17 @@ namespace GrandTheftAccessibility
                         // for ONE session so an older triage build still parses this
                         // log; delete them next iteration.
                         WriteGateManifest();
+                        // iter-61: and immediately after it, the subset that matters —
+                        // the gates the build did NOT intend to be live. Spoken as well
+                        // as logged: this whole block only runs with the drive-assist
+                        // debug log on, so it reaches the person running the experiment
+                        // and no one else, and a silent config drift is what cost the
+                        // 08-16/08-17 sessions their attribution.
+                        int gateDriftChanged = WriteGateDrift();
+                        if (gateDriftChanged > 0)
+                            Speech.Info("Note: " + gateDriftChanged
+                                + (gateDriftChanged == 1 ? " drive gate has" : " drive gates have")
+                                + " changed since your last drive. See gate drift in the log.");
                         // iter-42: same one-gate-per-session discipline.
                         driveLogger.Write("[F" + driveLogFrameCount + "] EVENT iter42-gates:"
                             + " nodeStreamGuardV2=" + getSetting("nodeStreamGuardV2")
@@ -7469,6 +8611,16 @@ namespace GrandTheftAccessibility
                             + " juncLoad=" + JunctionDb.LoadStatus
                             + " juncFile=" + JunctionDb.LoadedFileInfo
                             + " mapLoad=" + MapDb.LoadStatus);
+                        // iter-60: the name table's own health, in the log rather than
+                        // only in the gaps-log header. A triage read of the 08-16 session
+                        // could not tell that every ped and prop was unnamed because the
+                        // FILE was missing — that fact lived in a file nobody opens
+                        // unless they already suspect it.
+                        driveLogger.Write("[F" + driveLogFrameCount + "] EVENT modelnames-load: "
+                            + "status=" + ModelNames.LoadStatus
+                            + " rows=" + ModelNames.RowCount
+                            + " generated=" + (ModelNames.GeneratedStamp.Length > 0
+                                               ? ModelNames.GeneratedStamp : "unknown"));
                         // iter-52: world-data census. Gated so a session that is not
                         // exercising any of it does not carry a line implying it was.
                         // The counts are what a triage read needs to tell "the feature
@@ -7531,10 +8683,39 @@ namespace GrandTheftAccessibility
                 else if (!driveLogEnabled && driveLogWasEnabled)
                 {
                     Speech.LogSink = null;
+                    // iter-53 S1: report the capture census on the way out, so the tail of
+                    // every log says how many images actually landed. A session that
+                    // captured nothing now says so in its own log instead of being
+                    // discovered by counting files afterwards.
+                    if (driveLogger.IsRunning)
+                    {
+                        // iter-59 C5: the gate census belongs here too. It samples on a
+                        // 30 s heartbeat, so any gate whose first fire lands in the
+                        // final <30 s reads as never-fired — see the tempActionV2 note
+                        // in onAborted.
+                        WriteGateCensus();
+                        if (snapshotWriter != null)
+                            driveLogger.Write("[F" + driveLogFrameCount + "] EVENT capture-final: "
+                                + snapshotWriter.Census());
+                    }
+                    try { if (snapshotWriter != null) snapshotWriter.Stop(); } catch { }
+                    snapshotStartAttempted = false;
                     driveLogger.Stop();
                     Speech.Info("Drive assist debug logging stopped");
                 }
                 driveLogWasEnabled = driveLogEnabled;
+
+                // iter-53 S1: bring the screenshot writer up whenever images are wanted,
+                // not only on the log's own rising edge. Cheap: two field reads once it
+                // is running.
+                EnsureSnapshotWriter();
+
+                // iter-53: one keypress stands the experimental gate set down or brings
+                // it back, so a bisect epoch boundary is something a blind driver can
+                // actually produce mid-session.
+                ApplyDriveAssistBaseline();
+                // iter-71: the same, for this iteration's own three gates.
+                ApplyIter71Experimental();
 
                 // W2.1 (overhaul): stamp the damage signal EVERY tick, before the
                 // debug-log block. Runs whether or not logging is on and whether or
@@ -7558,6 +8739,8 @@ namespace GrandTheftAccessibility
                     // built, and outside its thinning, so the values on a logged
                     // frame always belong to that frame.
                     SampleVehicleFeedback(logVeh);
+                    // iter-64: immediately after, so whlContactMask is this frame's.
+                    UpdateAirborneEpisode(logVeh);
                     if (logVeh != null || isAutodriving)
                         LogDriveAssistFrame(logVeh);
 
@@ -7691,6 +8874,12 @@ namespace GrandTheftAccessibility
                             // recovery works with logging off. This block keeps only its
                             // diagnostic EVENT logging below.
                             long geNow = ModClock.Ticks; // pause-proof: grind-episode + collision-debounce durations (a pause must not look like a grind gap or fresh damage)
+                            // iter-53 D6: the gap since the previous damage scan, so a
+                            // "one frame" death can be proven to be one frame rather than
+                            // assumed. ModClock, matching geNow — never mix a wall clock
+                            // into a value compared against a ModClock one.
+                            long geDt = damageScanLastTicks == 0 ? 0 : geNow - damageScanLastTicks;
+                            damageScanLastTicks = geNow;
                             // iter-34 BS-1: a jump UP this big on the same handle is a
                             // replaced/repaired vehicle (GTA reuses handles) — log the
                             // swap and skip delta math this frame (baselines update below).
@@ -7764,8 +8953,29 @@ namespace GrandTheftAccessibility
                                         ? (geNow - geStartAtDeath) / 10000 : -1)
                                     + " sinceFirstDamageMs=" + (firstBodyDropTicks != 0
                                         ? (DateTime.Now.Ticks - firstBodyDropTicks) / 10000 : -1) // firstBodyDropTicks is wall-stamped elsewhere — keep clocks matched
-                                    + " attacker=" + IdentifyAttacker(logVeh));
+                                    + " attacker=" + IdentifyAttacker(logVeh)
+                                    // iter-53 D6: on 08-11-182121 the hull went 821 -> 0
+                                    // and 571 -> -1 in ONE frame, upright, at 2.6 m/s,
+                                    // with nothing inside 2.2 m — and the line said only
+                                    // attacker=none, which merely means "no VEHICLE rammed
+                                    // us" because IdentifyAttacker walks GetNearbyVehicles
+                                    // and never looks at peds. The cause was unknowable
+                                    // from the artifacts. These four fields are what would
+                                    // have named it: fire and a ruptured tank are the two
+                                    // ways a car dies without being hit, dtMs proves
+                                    // whether it really was one frame, and the ped sweep
+                                    // covers the half of the world the vehicle sweep
+                                    // cannot see.
+                                    + " onFire=" + SafeIsVehicleOnFire(logVeh)
+                                    + " petrolTank=" + SafePetrolTankHealth(logVeh).ToString("F0")
+                                    + " dtMs=" + (geDt / 10000)
+                                    + " pedAttacker=" + IdentifyPedAttacker(logVeh));
                                 autoCollisionLastTicks = geNow;
+                                // iter-53 D5: the single most expensive event of a session
+                                // produced no snapshot at all. It does now — the scene
+                                // geometry and the screenshot are exactly what separates
+                                // "it exploded" from "something drove into it".
+                                SnapshotFailure("VEHICLE-DEATH", null);
                             }
                             // iter-34 BS-2: grind-episode state machine — one episode
                             // with duration + cumulative damage + contact entity,
@@ -7854,7 +9064,8 @@ namespace GrandTheftAccessibility
                                     + " engineDelta=-" + engineDrop.ToString("F1")
                                     + " impactSpeed=" + logVeh.Speed.ToString("F1")
                                     + " attacker=" + IdentifyAttacker(logVeh) // iter-36 P0
-                                    + (logVeh.IsInAir ? " airborne=true" : "")); // iter-28 L / iter-30 air
+                                    + (logVeh.IsInAir ? " airborne=true" : "") // iter-28 L / iter-30 air
+                                    + DamageContextTag(logVeh));   // iter-71 A5
                                 autoCollisionLastTicks = ModClock.Ticks;
                                 // iter-39 L2: open a settling window. The marker header
                                 // can only ever carry ONE FRAME of damage, but a real
@@ -7988,7 +9199,16 @@ namespace GrandTheftAccessibility
                                     (geNow - autoCollisionLastTicks) < 50000000L
                                     || grindEpisodeStartTicks != 0
                                     || deathCliff || vehDeadNow;
+                                // iter-53 D1: these braces are load-bearing. Without them
+                                // only the Write() was guarded and SnapshotFailure("DAMAGE")
+                                // ran on EVERY window rollover, damage or not — an 8 s tag
+                                // cooldown turned it into a ~10.3 s metronome that produced
+                                // 34 of the 82 markers in the 08-11-182121 session while
+                                // EVENT damage-tally itself fired exactly once. It made the
+                                // marker rate, the failClass histogram and the incident
+                                // count meaningless, and ate the snapshot image budget.
                                 if (!tallyCovered && dmgTallyBh + dmgTallyEh >= 5f)
+                                {
                                     driveLogger.Write("[F" + driveLogFrameCount + "] EVENT damage-tally:"
                                         + " winMs=" + ((geNow - dmgTallyWindowStartTicks) / 10000)
                                         + " bhDrop=" + dmgTallyBh.ToString("F1")
@@ -8005,6 +9225,7 @@ namespace GrandTheftAccessibility
                                         + " wanted=" + Game.Player.WantedLevel
                                         + " pos=" + FmtV(logVeh.Position));
                                     SnapshotFailure("DAMAGE", null);
+                                }
                                 dmgTallyWindowStartTicks = geNow;
                                 dmgTallyBh = 0f;
                                 dmgTallyEh = 0f;
@@ -8100,28 +9321,31 @@ namespace GrandTheftAccessibility
                             {
                                 waypointBeepTicks = DateTime.Now.Ticks;
 
-                                // Check if waypoint is behind (dotForward < -0.5)
-                                bool waypointBehind = (dotForward < -0.5f);
-
-                                // Pitch based on whether we're facing toward or away
-                                // Facing toward (dotForward > 0): higher pitch (good)
-                                // Facing away (dotForward < 0): lower pitch (turn around)
-                                // One octave lower if waypoint is behind
-                                float baseFreq = 400 + (dotForward * 200); // 200-600 Hz
-                                float freq = waypointBehind ? baseFreq / 2f : baseFreq; // 100-300 Hz if behind
-
-                                // Pan: center for behind, left/right for sides
-                                float actualPan = waypointBehind ? 0f : pan;
-
+                                // iter-62: ONE audio language. Pitch is FIXED here, because
+                                // under the iter-37 doctrine pitch means what kind of thing
+                                // this is, and distance means pulse rate — which beepInterval
+                                // above already does. This cue used to bend pitch by facing
+                                // (400 +/- 200 Hz) and halve it when behind, so a rising tone
+                                // meant "you are pointed the right way" here and "this is a
+                                // pedestrian" three hundred lines away.
+                                //
+                                // Facing no longer needs an encoding: the spatializer puts the
+                                // tone where the waypoint actually is, so turning toward it is
+                                // something you hear rather than something you decode.
                                 outWaypoint.Stop();
                                 waypointBeep.Gain = 0.1;
-                                waypointBeep.Frequency = freq;
-                                waypointBeep.Type = SignalGeneratorType.Sin; // Smooth tone for waypoint
+                                waypointBeep.Frequency = 520f;   // the waypoint's own note
+                                waypointBeep.Type = SignalGeneratorType.Sin;
 
                                 var wpSample = waypointBeep.Take(TimeSpan.FromSeconds(0.1));
-                                var wpPanned = new PanningSampleProvider(wpSample) { Pan = actualPan };
-                                outWaypoint.Init(wpPanned);
-                                outWaypoint.Play();
+                                var wpShaped = new EnvelopeSampleProvider(wpSample, 0.1);
+                                // applyDistance false: a waypoint is a navigation target, not an
+                                // obstacle, and one 800 m away must stay exactly as audible as
+                                // one 20 m away. Rate already carries the distance.
+                                PlaySpatial(outWaypoint, wpShaped,
+                                    new GTA.Math.Vector3(waypointPos.X, waypointPos.Y,
+                                        Game.Player.Character.Position.Z),
+                                    pan, false, "waypoint");
                             }
 
                             // Check if arrived (within 10 meters)
@@ -8172,22 +9396,21 @@ namespace GrandTheftAccessibility
                         {
                             missionBeepTicks = DateTime.Now.Ticks;
 
-                            bool behind = (dotForward < -0.5f);
-                            float pan = behind ? 0f : Math.Max(-1f, Math.Min(1f, dotRight));
+                            float pan = Math.Max(-1f, Math.Min(1f, dotRight));
 
-                            // Use different tone than waypoint (Triangle wave, slightly different pitch)
-                            float baseFreq = 350 + (dotForward * 150); // 200-500 Hz
-                            float freq = behind ? baseFreq / 2f : baseFreq;
-
+                            // Fixed note, same reasoning as the waypoint cue: the marker keeps
+                            // its own timbre (Triangle) and its own pitch, and its DIRECTION is
+                            // now placed rather than encoded.
                             outMissionBeep.Stop();
                             missionBeep.Gain = 0.1;
-                            missionBeep.Frequency = freq;
-                            missionBeep.Type = SignalGeneratorType.Triangle; // Different from waypoint
+                            missionBeep.Frequency = 350f;
+                            missionBeep.Type = SignalGeneratorType.Triangle;
 
                             var missionSample = missionBeep.Take(TimeSpan.FromSeconds(0.1));
-                            var missionPanned = new PanningSampleProvider(missionSample) { Pan = pan };
-                            outMissionBeep.Init(missionPanned);
-                            outMissionBeep.Play();
+                            var missionShaped = new EnvelopeSampleProvider(missionSample, 0.1);
+                            PlaySpatial(outMissionBeep, missionShaped,
+                                new GTA.Math.Vector3(blipPos.X, blipPos.Y, playerPos.Z),
+                                pan, false, "mission-blip");
                         }
 
                         // Check if arrived
@@ -8319,35 +9542,16 @@ namespace GrandTheftAccessibility
                 } catch (Exception ex) { ReportSubsystemError("navigation cues", ex); }
                 try {
                 // ============================================
-                // ENEMY DETECTION SYSTEM
-                // Proactive detection runs in TickProactiveThreatScan() when bodyguard system is active.
-                // Fallback: basic detection when bodyguard system is off.
-                // Directional beeps are handled below.
+                // HOSTILE DETECTION
                 // ============================================
-
-                if (!bodyguardSystemEnabled)
-                {
-                    // Basic enemy detection when bodyguard system is off
-                    if (DateTime.Now.Ticks - enemyCheckTicks > 20000000) // 2 seconds
-                    {
-                        enemyCheckTicks = DateTime.Now.Ticks;
-                        trackedEnemies.Clear();
-
-                        Ped[] nearbyPeds = World.GetNearbyPeds(Game.Player.Character.Position, 100f);
-                        foreach (Ped ped in nearbyPeds)
-                        {
-                            if (ped == Game.Player.Character || ped.IsDead) continue;
-                            if (ped.IsInCombatAgainst(Game.Player.Character))
-                                trackedEnemies.Add(ped);
-                        }
-
-                        if (trackedEnemies.Count > 0 && trackedEnemies.Count != lastAnnouncedEnemyCount)
-                        {
-                            Speech.Info(trackedEnemies.Count + " hostile" + (trackedEnemies.Count > 1 ? "s" : "") + " detected");
-                        }
-                        lastAnnouncedEnemyCount = trackedEnemies.Count;
-                    }
-                }
+                // iter-62: ONE detector. TickProactiveThreatScan used to be reachable only
+                // through TickBodyguardSystem, which returns immediately without guards — so
+                // every player who had never opened the bodyguard menu got a far cruder
+                // duplicate that lived here: a flat IsInCombatAgainst sweep with no armed
+                // layer, no aiming promotion, no police tell and no all-clear. That duplicate
+                // is gone; the real detector now runs for everyone the setting allows, and
+                // skips its guard-awareness layer when there are no guards to be aware of.
+                if (!bodyguardSystemEnabled) TickProactiveThreatScan();
 
                 // Play beeps for tracked enemies (every 300ms per closest enemy)
                 if (trackedEnemies.Count > 0 && DateTime.Now.Ticks - enemyBeepTicks > 3000000) // 300ms
@@ -8388,27 +9592,21 @@ namespace GrandTheftAccessibility
                             float dotForward = GTA.Math.Vector3.Dot(forwardVec, toEnemyNorm);
                             float dotRight = GTA.Math.Vector3.Dot(rightVec, toEnemyNorm);
 
-                            // Check if enemy is behind (dotForward < -0.5)
-                            bool enemyBehind = (dotForward < -0.5f);
+                            float pan = Math.Max(-1f, Math.Min(1f, dotRight));
 
-                            // Pan: center for behind, left/right for sides
-                            float pan = enemyBehind ? 0f : Math.Max(-1f, Math.Min(1f, dotRight));
-
-                            // Frequency based on distance (closer = higher pitch = more urgent)
-                            // One octave lower for enemies behind (divide by 2)
-                            float distFactor = Math.Min(closestDist / 50f, 1f);
-                            float baseFreq = 800 - (distFactor * 400); // 400-800 Hz
-                            float freq = enemyBehind ? baseFreq / 2f : baseFreq; // 200-400 Hz if behind
-
+                            // The sawtooth stays — that is the threat timbre and it is learned.
+                            // The pitch bend by distance goes: it collided with the same doctrine
+                            // as the waypoint tone, and an octave drop for "behind" is exactly
+                            // the crutch the spatializer exists to replace. Threat distance is
+                            // carried by the beep RATE and by the spoken range.
                             outEnemy.Stop();
                             enemyBeep.Gain = 0.12;
-                            enemyBeep.Frequency = freq;
-                            enemyBeep.Type = SignalGeneratorType.SawTooth; // Harsh tone for enemies
+                            enemyBeep.Frequency = 620f;
+                            enemyBeep.Type = SignalGeneratorType.SawTooth;
 
                             var enemySample = enemyBeep.Take(TimeSpan.FromSeconds(0.08));
-                            var enemyPanned = new PanningSampleProvider(enemySample) { Pan = pan };
-                            outEnemy.Init(enemyPanned);
-                            outEnemy.Play();
+                            var enemyShaped = new EnvelopeSampleProvider(enemySample, 0.08);
+                            PlaySpatial(outEnemy, enemyShaped, enemyPos, pan, true, "hostile");
                         }
                     }
                 }
@@ -8496,10 +9694,16 @@ namespace GrandTheftAccessibility
                             {
                                 if (prop == null || !prop.Exists()) continue;
 
-                                // Check if prop model contains pickup-related strings
-                                if (hashes.ContainsKey(prop.Model.NativeValue.ToString()))
+                                // Check if prop model contains pickup-related strings.
+                                // iter-58: DescribeModel returns null when the table has
+                                // nothing, which is the right behaviour HERE — this is a
+                                // name-shape heuristic, not a readout, so an unnamed prop
+                                // genuinely cannot be classified and must be skipped
+                                // rather than guessed at.
+                                string modelName = ModelNames.DescribeModel(prop.Model.Hash);
+                                if (modelName != null)
                                 {
-                                    string modelName = hashes[prop.Model.NativeValue.ToString()].ToLower();
+                                    modelName = modelName.ToLower();
                                     if (modelName.Contains("pickup") || modelName.Contains("health") ||
                                         modelName.Contains("armour") || modelName.Contains("armor") ||
                                         modelName.Contains("money") || modelName.Contains("briefcase"))
@@ -8575,16 +9779,19 @@ namespace GrandTheftAccessibility
                                 outPickup.Stop();
                                 pickupSound.Position = 0;
                                 var pickupSample = pickupSound.ToSampleProvider();
+                                // PlaySpatial plays it itself; the stereo branch below still
+                                // needs the shared Play(). NOT an early return — everything
+                                // after this point in onTick still has to run.
                                 if (pickupSample.WaveFormat.Channels == 1)
                                 {
-                                    var pickupPanned = new PanningSampleProvider(pickupSample) { Pan = pan };
-                                    outPickup.Init(pickupPanned);
+                                    PlaySpatial(outPickup, pickupSample, lastPickupPos, pan,
+                                        true, "pickup");
                                 }
                                 else
                                 {
                                     outPickup.Init(pickupSound);
+                                    outPickup.Play();
                                 }
-                                outPickup.Play();
                             }
                         }
                     }
@@ -8699,9 +9906,12 @@ namespace GrandTheftAccessibility
                                 dropoffTone.Gain = 0.12;
                                 dropoffTone.Type = SignalGeneratorType.Sin;
                                 var dropSample = dropoffTone.Take(TimeSpan.FromSeconds(0.15));
-                                var dropPanned = new PanningSampleProvider(dropSample) { Pan = dropPan };
-                                outDropoff.Init(dropPanned);
-                                outDropoff.Play();
+                                var dropShaped = new EnvelopeSampleProvider(dropSample, 0.15);
+                                // The edge is BELOW the listener, which is the one case the old
+                                // pan could not express at all — and the case where getting it
+                                // wrong means walking off it.
+                                PlaySpatial(outDropoff, dropShaped, checkPos, dropPan,
+                                    true, "dropoff");
 
                                 // Speak warning for larger drops (increased threshold to 15m for speech)
                                 float dropHeight = currentGround - groundZ;
@@ -9269,12 +10479,14 @@ namespace GrandTheftAccessibility
                         float dist = World.GetDistance(playerPos, prop.Position);
                         if (dist > 5f) continue; // Only within 5m for audio
 
-                        // Check if it's a door or ladder
-                        string modelName = "";
-                        if (hashes.ContainsKey(prop.Model.NativeValue.ToString()))
-                            modelName = hashes[prop.Model.NativeValue.ToString()].ToLower();
+                        // Check if it's a door or ladder. iter-58: the door test now asks
+                        // the game's door system first (ModelNames.IsDoorLike), so a DLC
+                        // gate whose model was never in hashes.txt gets its earcon. The
+                        // ladder test has no equivalent native and stays a name match.
+                        string modelName = ModelNames.DescribeModel(prop.Model.Hash);
+                        modelName = modelName == null ? "" : modelName.ToLower();
 
-                        bool isDoor = modelName.Contains("door") || modelName.Contains("gate");
+                        bool isDoor = ModelNames.IsDoorLike(prop);
                         bool isLadder = modelName.Contains("ladder");
 
                         if (isDoor && prop != lastAnnouncedDoor && doorSound != null && outDoor != null)
@@ -9289,14 +10501,14 @@ namespace GrandTheftAccessibility
                             // Apply panning if mono
                             if (doorSound.WaveFormat.Channels == 1)
                             {
-                                var panned = new PanningSampleProvider(doorSound.ToSampleProvider()) { Pan = pan };
-                                outDoor.Init(panned);
+                                PlaySpatial(outDoor, doorSound.ToSampleProvider(), prop.Position,
+                                    pan, true, "door");
                             }
                             else
                             {
                                 outDoor.Init(doorSound);
+                                outDoor.Play();
                             }
-                            outDoor.Play();
                             lastAnnouncedDoor = prop;
                         }
                         else if (isLadder && prop != lastAnnouncedLadder && ladderSound != null && outLadder != null)
@@ -9310,14 +10522,14 @@ namespace GrandTheftAccessibility
                             ladderSound.Position = 0;
                             if (ladderSound.WaveFormat.Channels == 1)
                             {
-                                var panned = new PanningSampleProvider(ladderSound.ToSampleProvider()) { Pan = pan };
-                                outLadder.Init(panned);
+                                PlaySpatial(outLadder, ladderSound.ToSampleProvider(),
+                                    prop.Position, pan, true, "ladder");
                             }
                             else
                             {
                                 outLadder.Init(ladderSound);
+                                outLadder.Play();
                             }
-                            outLadder.Play();
                             lastAnnouncedLadder = prop;
                         }
                     }
@@ -9439,6 +10651,10 @@ namespace GrandTheftAccessibility
             // this tick.
             try { NavAssistAudioTick(); } catch (Exception ex) { ReportSubsystemError("nav audio", ex); }
             try { DrainNavBeepQueue(); } catch { }
+            // Telemetry only, gated OFF, self-throttled to 2 s. Wrapped like every
+            // other tick helper here: a memory-backed probe must never be able to
+            // take the tick down with it.
+            try { TickPathFindProbe(); } catch { }
             try { NavQueryTick(); } catch (Exception ex) { ReportSubsystemError("nav query", ex); }
             try { NavGuidanceTick(); } catch (Exception ex) { ReportSubsystemError("nav guidance", ex); }
             // Menu Reader + menulog probe. Deliberately NOT gated on
@@ -9460,6 +10676,20 @@ namespace GrandTheftAccessibility
             try { TickEventsAndServices(); } catch (Exception ex) { ReportSubsystemError("events and services", ex); }
             try { TickSnapshotPreroll(); } catch (Exception ex) { ReportSubsystemError("snapshot preroll", ex); }
             try { TickInteractionCatalogue(); } catch (Exception ex) { ReportSubsystemError("interaction catalogue", ex); }
+            // iter-58: flushes the unnamed-model gap log at most once a minute, and only
+            // when something new was recorded. Deliberately NOT wrapped in
+            // ReportSubsystemError — ModelNames swallows its own write failures and
+            // stands itself down, because an instrumentation file must never be able to
+            // interrupt a session with speech.
+            try { ModelNames.Tick(ModClock.Ticks); } catch { }
+            // Apply external test controls last: control writes are one-frame and
+            // last-writer-wins. Doing this after the assist gives bridge readback an
+            // honest test command rather than one overwritten later in the same tick.
+            // iter-71: the scenario runner advances one step per tick, immediately
+            // before the held controls are written, so a step that starts a hold takes
+            // effect on the same frame it was decided rather than a frame later.
+            try { TickBridgeHarness(); } catch (Exception ex) { ReportSubsystemError("bridge harness", ex); }
+            try { ApplyDiagnosticInputHolds(); } catch (Exception ex) { ReportSubsystemError("diagnostic input", ex); }
             try { Speech.Drain(); } catch { }
         }
 
@@ -9593,40 +10823,36 @@ namespace GrandTheftAccessibility
                     keyState[4] = true;
                     float detectRadius = GetDetectionRadius();
                     Vehicle[] vehicles = World.GetNearbyVehicles(Game.Player.Character.Position, detectRadius);
-                    string status;
                     List<Result> results = new List<Result>();
-                    bool valid = false;
+                    bool detailed = getSetting("detailedScans") == 1;
+                    bool onscreenOnly = getSetting("onscreen") == 1;
+
                     foreach (Vehicle vehicle in vehicles)
                     {
-                        valid = false;
-
-                        if (getSetting("onscreen") == 0 && vehicle.IsVisible && !vehicle.IsDead)
-                            valid = true;
-
-                        if (getSetting("onscreen") == 1 && vehicle.IsVisible && !vehicle.IsDead && vehicle.IsOnScreen)
-                            valid = true;
-
-                        if (valid)
+                        // iter-58: same per-entity try the other three scans now carry —
+                        // a vehicle despawning mid-scan throws on the first property
+                        // read, and one throw used to lose the entire readout.
+                        try
                         {
-                            if (vehicle.IsStopped)
-                            {
-                                status = "a stationary";
-                            }
-                            else
-                            {
-                                status = "a moving";
-                            }
-                            if (Game.Player.Character.CurrentVehicle != vehicle)
-                            {
-                                string name = (status + " " + vehicle.LocalizedName);
-                                double xyDistance = Math.Round(World.GetDistance(Game.Player.Character.Position, vehicle.Position) - Math.Abs(Game.Player.Character.Position.Z - vehicle.Position.Z), 1);
-                                double zDistance = Math.Round(vehicle.Position.Z - Game.Player.Character.Position.Z, 1);
-                                string direction = getDir(calculate_x_y_angle(Game.Player.Character.Position.X, Game.Player.Character.Position.Y, vehicle.Position.X, vehicle.Position.Y, 0));
-                                Result result = new Result(name, xyDistance, zDistance, direction);
-                                results.Add(result);
-                            }
+                            if (vehicle == null || !vehicle.Exists()) continue;
+                            if (!vehicle.IsVisible || vehicle.IsDead) continue;
+                            if (onscreenOnly && !vehicle.IsOnScreen) continue;
+                            if (Game.Player.Character.CurrentVehicle == vehicle) continue;
 
+                            // DescribeVehicle adds the DisplayName and class fallbacks
+                            // LocalizedName alone did not have, so a vehicle with no
+                            // label reads as its class rather than as "NULL".
+                            string name = detailed
+                                ? ModelNames.DescribeVehicle(vehicle) + VehicleDetailClause(vehicle)
+                                : (vehicle.IsStopped ? "a stationary " : "a moving ")
+                                  + ModelNames.DescribeVehicle(vehicle);
+
+                            double xyDistance = GroundDistance(Game.Player.Character.Position, vehicle.Position);
+                            double zDistance = Math.Round(vehicle.Position.Z - Game.Player.Character.Position.Z, 1);
+                            string direction = getDir(calculate_x_y_angle(Game.Player.Character.Position.X, Game.Player.Character.Position.Y, vehicle.Position.X, vehicle.Position.Y, 0));
+                            results.Add(new Result(name, xyDistance, zDistance, direction));
                         }
+                        catch { }
                     }
 
                     Speech.Ambient(listToString(results, "Nearest Vehicles: "));
@@ -9987,30 +11213,37 @@ namespace GrandTheftAccessibility
                     keyState[6] = true; // was the lone handler without the repeat guard: holding the key re-ran the full ped scan on every OS auto-repeat
                     float detectRadius = GetDetectionRadius();
                     Ped[] peds = World.GetNearbyPeds(Game.Player.Character.Position, detectRadius);
-                    string status = "";
                     List<Result> results = new List<Result>();
-                    bool valid = false;
+                    bool detailed = getSetting("detailedScans") == 1;
+                    bool onscreenOnly = getSetting("onscreen") == 1;
 
                     foreach (Ped ped in peds)
                     {
-                        valid = false;
-                        if (getSetting("onscreen") == 0 && hashes.ContainsKey(ped.Model.NativeValue.ToString()) && ped.IsVisible && !ped.IsDead)
-                            valid = true;
-
-                        if (getSetting("onscreen") == 1 && hashes.ContainsKey(ped.Model.NativeValue.ToString()) && ped.IsVisible && ped.IsOnScreen && !ped.IsDead)
-                            valid = true;
-                        if (valid)
+                        // iter-58: the `hashes.ContainsKey(...)` term that used to sit in
+                        // this predicate did not gate NAMING, it gated EXISTENCE — an
+                        // unnamed ped was dropped from the readout entirely. Combined
+                        // with a table that held no ambient ped models and a key that
+                        // sign-extended, this scan announced almost nothing and a
+                        // crowded pavement sounded exactly like an empty one. Naming now
+                        // happens after the entity has already qualified, and always
+                        // produces something.
+                        try
                         {
-                            if (hashes[ped.Model.NativeValue.ToString()] != "player_one" && hashes[ped.Model.NativeValue.ToString()] != "player_two" && hashes[ped.Model.NativeValue.ToString()] != "player_zero")
-                            {
-                                string name = (status + " " + hashes[ped.Model.NativeValue.ToString()]);
-                                double xyDistance = Math.Round(World.GetDistance(Game.Player.Character.Position, ped.Position) - Math.Abs(Game.Player.Character.Position.Z - ped.Position.Z), 1);
-                                double zDistance = Math.Round(ped.Position.Z - Game.Player.Character.Position.Z, 1);
-                                string direction = getDir(calculate_x_y_angle(Game.Player.Character.Position.X, Game.Player.Character.Position.Y, ped.Position.X, ped.Position.Y, 0));
-                                Result result = new Result(name, xyDistance, zDistance, direction);
-                                results.Add(result);
-                            }
+                            if (ped == null || !ped.Exists()) continue;
+                            if (!ped.IsVisible || ped.IsDead) continue;
+                            if (onscreenOnly && !ped.IsOnScreen) continue;
+                            if (IsProtagonist(ped)) continue;
+
+                            string name = ModelNames.DescribePed(ped);
+                            if (detailed)
+                                name = name + ", " + PedActivity(ped) + PedWeaponClause(ped);
+
+                            double xyDistance = GroundDistance(Game.Player.Character.Position, ped.Position);
+                            double zDistance = Math.Round(ped.Position.Z - Game.Player.Character.Position.Z, 1);
+                            string direction = getDir(calculate_x_y_angle(Game.Player.Character.Position.X, Game.Player.Character.Position.Y, ped.Position.X, ped.Position.Y, 0));
+                            results.Add(new Result(name, xyDistance, zDistance, direction));
                         }
+                        catch { /* a ped despawning mid-scan must not lose the whole scan */ }
                     }
 
                     Speech.Ambient(listToString(results, "Nearest Characters: "));
@@ -10022,31 +11255,40 @@ namespace GrandTheftAccessibility
                     keyState[5] = true;
                     float detectRadius = GetDetectionRadius();
                     Prop[] props = World.GetNearbyProps(Game.Player.Character.Position, detectRadius);
-                    string status = "";
                     List<Result> results = new List<Result>();
-
-                    bool valid = false;
+                    bool detailed = getSetting("detailedScans") == 1;
+                    bool onscreenOnly = getSetting("onscreen") == 1;
 
                     foreach (Prop prop in props)
                     {
-                        valid = false;
-
-                        if (getSetting("onscreen") == 0 && hashes.ContainsKey(prop.Model.NativeValue.ToString()) && prop.IsVisible && !prop.IsAttachedTo(Game.Player.Character) && (hashes[prop.Model.NativeValue.ToString()].Contains("door") || hashes[prop.Model.NativeValue.ToString()].Contains("gate")))
-                            valid = true;
-
-                        if (getSetting("onscreen") == 1 && hashes.ContainsKey(prop.Model.NativeValue.ToString()) && prop.IsVisible && prop.IsOnScreen && !prop.IsAttachedTo(Game.Player.Character) && (hashes[prop.Model.NativeValue.ToString()].Contains("door") || hashes[prop.Model.NativeValue.ToString()].Contains("gate")))
-                            valid = true;
-
-                        if (valid)
+                        // iter-58: "is this a door" was a substring match on the model
+                        // name in hashes.txt, so any door or gate the 2022 file did not
+                        // list was invisible to this scan — the whole point of a door
+                        // scan being that you cannot see the door. ModelNames.IsDoorLike
+                        // asks the game's own door system first.
+                        try
                         {
-                            string name = (status + " " + hashes[prop.Model.NativeValue.ToString()]);
-                            double xyDistance = Math.Round(World.GetDistance(Game.Player.Character.Position, prop.Position) - Math.Abs(Game.Player.Character.Position.Z - prop.Position.Z), 1);
+                            if (prop == null || !prop.Exists()) continue;
+                            if (!prop.IsVisible || prop.IsAttachedTo(Game.Player.Character)) continue;
+                            if (onscreenOnly && !prop.IsOnScreen) continue;
+                            if (!ModelNames.IsDoorLike(prop)) continue;
+
+                            string name = ModelNames.DescribeProp(prop);
+                            if (detailed)
+                            {
+                                // Null means the door system does not own this door, so
+                                // its state genuinely cannot be read. Say that rather
+                                // than report a confident "closed" that may be a lie.
+                                string state = ModelNames.DoorState(prop);
+                                name = name + ", " + (state ?? "state unknown");
+                            }
+
+                            double xyDistance = GroundDistance(Game.Player.Character.Position, prop.Position);
                             double zDistance = Math.Round(prop.Position.Z - Game.Player.Character.Position.Z, 1);
                             string direction = getDir(calculate_x_y_angle(Game.Player.Character.Position.X, Game.Player.Character.Position.Y, prop.Position.X, prop.Position.Y, 0));
-                            Result result = new Result(name, xyDistance, zDistance, direction);
-                            results.Add(result);
-
+                            results.Add(new Result(name, xyDistance, zDistance, direction));
                         }
+                        catch { }
                     }
 
                     Speech.Ambient(listToString(results, "Nearest Doors: "));
@@ -10057,34 +11299,33 @@ namespace GrandTheftAccessibility
                     keyState[8] = true;
                     float detectRadius = GetDetectionRadius();
                     Prop[] props = World.GetNearbyProps(Game.Player.Character.Position, detectRadius);
-                    string status = "";
                     List<Result> results = new List<Result>();
-                    bool valid = false;
+                    bool detailed = getSetting("detailedScans") == 1;
+                    bool onscreenOnly = getSetting("onscreen") == 1;
 
                     foreach (Prop prop in props)
                     {
-                        valid = false;
-
-                        if (getSetting("onscreen") == 0 && hashes.ContainsKey(prop.Model.NativeValue.ToString()) && prop.IsVisible && !prop.IsAttachedTo(Game.Player.Character) && !hashes[prop.Model.NativeValue.ToString()].Contains("door") && !hashes[prop.Model.NativeValue.ToString()].Contains("gate"))
-                            valid = true;
-
-                        if (getSetting("onscreen") == 1 && hashes.ContainsKey(prop.Model.NativeValue.ToString()) && prop.IsVisible && prop.IsOnScreen && !prop.IsAttachedTo(Game.Player.Character) && !hashes[prop.Model.NativeValue.ToString()].Contains("door") && !hashes[prop.Model.NativeValue.ToString()].Contains("gate"))
-                            valid = true;
-
-                        if (valid)
+                        try
                         {
-                            // iter-52: hashes.txt gives the raw model name, so a vending
-                            // machine reads as "prop vend soda 01". Append what the object
-                            // is actually FOR when the catalogue knows it.
-                            string name = (status + " " + hashes[prop.Model.NativeValue.ToString()])
-                                + InteractionSuffix(unchecked((int)prop.Model.NativeValue));
-                            double xyDistance = Math.Round(World.GetDistance(Game.Player.Character.Position, prop.Position) - Math.Abs(Game.Player.Character.Position.Z - prop.Position.Z), 1);
+                            if (prop == null || !prop.Exists()) continue;
+                            if (!prop.IsVisible || prop.IsAttachedTo(Game.Player.Character)) continue;
+                            if (onscreenOnly && !prop.IsOnScreen) continue;
+                            if (ModelNames.IsDoorLike(prop)) continue;   // NumPad 5 has these
+
+                            // iter-52: the table gives the raw model name, so a vending
+                            // machine reads as "vend soda". Append what the object is
+                            // actually FOR when the catalogue knows it.
+                            string name = ModelNames.DescribeProp(prop)
+                                + InteractionSuffix(prop.Model.Hash);
+                            if (detailed)
+                                name = name + PropDetailClause(prop);
+
+                            double xyDistance = GroundDistance(Game.Player.Character.Position, prop.Position);
                             double zDistance = Math.Round(prop.Position.Z - Game.Player.Character.Position.Z, 1);
                             string direction = getDir(calculate_x_y_angle(Game.Player.Character.Position.X, Game.Player.Character.Position.Y, prop.Position.X, prop.Position.Y, 0));
-                            Result result = new Result(name, xyDistance, zDistance, direction);
-                            results.Add(result);
-
+                            results.Add(new Result(name, xyDistance, zDistance, direction));
                         }
+                        catch { }
                     }
 
                     Speech.Ambient(listToString(results, "Nearest Objects: "));
@@ -10326,11 +11567,45 @@ namespace GrandTheftAccessibility
                             settingsMenu[settingsMenuIndex].value = currentVal;
                             Speech.Ambient("Navigation Assist Detail: " + NavVerbosityName(currentVal));
                         }
+                        // iter-62: three more multi-value rows. Without a cycle block the
+                        // generic 0<->1 toggle further down strands them past 1.
+                        else if (settingsMenu[settingsMenuIndex].id == "listenerFrame")
+                        {
+                            int currentVal = (settingsMenu[settingsMenuIndex].value + 1) % 3;
+                            settingsMenu[settingsMenuIndex].value = currentVal;
+                            navListenerBasisTime = -1;    // drop the cached basis immediately
+                            Speech.Ambient("Sound Direction Reference: "
+                                + ListenerFrameName(currentVal));
+                        }
+                        else if (settingsMenu[settingsMenuIndex].id == "scanAudioSweep")
+                        {
+                            int currentVal = (settingsMenu[settingsMenuIndex].value + 1) % 3;
+                            settingsMenu[settingsMenuIndex].value = currentVal;
+                            Speech.Ambient("Scan Audio Sweep: " + ScanSweepName(currentVal));
+                        }
+                        else if (settingsMenu[settingsMenuIndex].id == "hostileDetection")
+                        {
+                            int currentVal = (settingsMenu[settingsMenuIndex].value + 1) % 4;
+                            settingsMenu[settingsMenuIndex].value = currentVal;
+                            Speech.Ambient("Hostile Detection: "
+                                + HostileDetectionName(currentVal));
+                        }
                         else if (settingsMenu[settingsMenuIndex].id == "navAssistFootRange")
                         {
                             int currentVal = (settingsMenu[settingsMenuIndex].value + 1) % navFootRangeOptions.Length;
                             settingsMenu[settingsMenuIndex].value = currentVal;
                             Speech.Ambient("On-Foot Detection Range: " + (int)navFootRangeOptions[currentVal] + " meters");
+                        }
+                        // iter-58: same reason — without this cycle block the generic
+                        // 0<->1 toggle below strands the cap at 3 or 5 forever.
+                        else if (settingsMenu[settingsMenuIndex].id == "scanResultCap")
+                        {
+                            int currentVal = (settingsMenu[settingsMenuIndex].value + 1) % scanResultCapOptions.Length;
+                            settingsMenu[settingsMenuIndex].value = currentVal;
+                            Speech.Ambient("Nearby Scan Length: "
+                                + (scanResultCapOptions[currentVal] == int.MaxValue
+                                   ? "everything in range"
+                                   : "nearest " + scanResultCapOptions[currentVal]));
                         }
                         // iter-44: multi-value unrest settings. Same reason as the
                         // nav-assist pair above — the generic 0<->1 toggle below
@@ -11039,7 +12314,7 @@ namespace GrandTheftAccessibility
                             // GROUND VEHICLE AUTO-DRIVE (existing behavior)
                             // ============================================
                             autonavMode = "drive";
-                            int drivingStyle = GetDrivingStyleFromFlags();
+                            int drivingStyle = AutodriveStyle();
 
                             // Set driver ability for better AI driving
                             Function.Call(Hash.SET_DRIVER_ABILITY, driver, 1.0f);
@@ -11479,30 +12754,77 @@ namespace GrandTheftAccessibility
 
         }
 
+        /// <summary>Ground distance to a point: the horizontal leg of the triangle.
+        ///
+        /// All four nearest-X scans computed this as <c>3D distance - |dz|</c>, which is not a
+        /// projection of anything. For a prop 10 m away and 6 m up, the true ground distance is
+        /// sqrt(10^2 - 6^2) = 8.0 m; the old form said 11.66 - 6 = 5.66 m. The error is always
+        /// an UNDER-report, it grows with slope, and it is spoken with complete confidence —
+        /// which is the exact failure class this mod exists to avoid.
+        ///
+        /// Behind a gate anyway, because it changes every distance a player has spent sessions
+        /// calibrating against. Both values are logged so one session settles it.
+        /// </summary>
+        private double GroundDistance(GTA.Math.Vector3 from, GTA.Math.Vector3 to)
+        {
+            double d3 = GTA.Math.Vector3.Distance(from, to);
+            double dz = Math.Abs(from.Z - to.Z);
+            double legacy = d3 - dz;
+            if (getSetting("xyDistanceFix") != 1) return Math.Round(legacy, 1);
+
+            double sq = d3 * d3 - dz * dz;
+            double corrected = sq > 0.0 ? Math.Sqrt(sq) : 0.0;
+            if (driveLogger != null && driveLogger.IsRunning
+                && Math.Abs(corrected - legacy) >= 0.5)
+            {
+                driveLogger.Write("[F" + driveLogFrameCount + "] EVENT xydist:"
+                    + " d3=" + d3.ToString("F1") + " dz=" + dz.ToString("F1")
+                    + " old=" + legacy.ToString("F1") + " new=" + corrected.ToString("F1"));
+            }
+            return Math.Round(corrected, 1);
+        }
+
+        /// <summary>Renders a nearest-X scan, nearest first, capped by the
+        /// "Nearby Scan Length" setting.
+        ///
+        /// iter-58, two fixes:
+        ///   * `vertical` was declared OUTSIDE the loop and only reassigned when
+        ///     zDistance != 0, so every result at the player's own level inherited the
+        ///     PREVIOUS result's "2.1 meters above". That is a wrong altitude spoken with
+        ///     full confidence — the exact class of failure this mod cannot afford.
+        ///   * " meters above , " carried a stray space before the comma.
+        ///
+        /// The cap is new. It exists because the naming repair turned these scans from
+        /// near-silent into full enumerations, and the detection radius goes to 1000 m.
+        /// Truncation is never silent: what was dropped is counted out loud, because
+        /// omitting entities without saying so is the behaviour iter-58 exists to end.
+        /// </summary>
         public string listToString(List<Result> results, string prependedText = "")
         {
             string text = prependedText;
-            string vertical = "";
 
             Result[] r = results.ToArray();
             Array.Sort(r);
+
+            int cap = ScanResultCap();
+            int shown = 0;
             foreach (Result i in r)
             {
-                if (i.zDistance != 0)
-                {
-                    if (i.zDistance > 0)
-                    {
-                        vertical = " " + Math.Abs(i.zDistance) + " meters above , ";
-                    }
-                    else
-                    {
-                        vertical = " " + Math.Abs(i.zDistance) + " meters below, ";
-                    }
+                if (shown >= cap) break;
+                shown++;
 
+                string vertical = "";
+                if (i.zDistance > 0)
+                    vertical = " " + Math.Abs(i.zDistance) + " meters above, ";
+                else if (i.zDistance < 0)
+                    vertical = " " + Math.Abs(i.zDistance) + " meters below, ";
 
-                }
                 text = text + i.xyDistance + " meters " + i.direction + ", " + vertical + i.name + ". ";
             }
+
+            int dropped = r.Length - shown;
+            if (dropped > 0)
+                text = text + "and " + dropped + " more. ";
             return (text);
 
         }
@@ -11635,6 +12957,11 @@ namespace GrandTheftAccessibility
             "announceHeadings", "announceZones", "altitudeIndicator", "announceTime",
             "targetPitchIndicator", "speed", "turnByTurnNavigation", "autoResumeCreep",
             "stuckDamageArm", "standoffThreat", "reverseRearV2", "laneStability",
+            // iter-59 A3: the drive-assist warning TONES (steer cue, pre-impact brake
+            // warn, ACC block cue). Default ON — they are safety cues, not decoration.
+            // Speech is never gated by this, and the nav-assist zone beeps keep their
+            // own navigationAssist / navAssistVerbosity controls.
+            "assistBeeps",
             // overhaul "pin fix" batch — default ON (active fixes), each revertible in-game
             "shapeTestV2", "accStandstillRelease", "steerFreezeAtStop", "distressFloor",
             // iter-39 Stage 1/3 — default ON, revertible in-game. actuationV2 is the
@@ -11649,6 +12976,46 @@ namespace GrandTheftAccessibility
             // commands started physically pinning and damaging the car.
             "reverseV2", "brakeDeadzoneV2", "graceArbitrationV2",
             "recoverySuspendV2", "recoveryTargetV2", "stuckLadderV2", "roadModelV2",
+            // ---- iter-57: the recovery chain, shipped ON together ----
+            // A deliberate departure from one-gate-per-session. The three are links in
+            // ONE chain — a car that leaves the road, cannot reverse out because a
+            // forward brake-threat vetoes the escape, never escalates to the teleport
+            // because the give-up outruns the ladder, and is then handed to a blind
+            // driver with no idea what is in front of it. Fixing one link per session
+            // would leave the chain intact for three more sessions, and the session
+            // that motivated this ended with the car in a river. Attribution is
+            // rebuilt per-gate instead: each is switchable in-game, each has
+            // GateReach/Fire/Veto on its decision, and each emits its own event.
+            "reverseEmergCorroborateV2", "stuckEscalationV2", "giveupHazardV2",
+            // ---- iter-71: the authority/convergence trio, shipped ON together ----
+            // Another deliberate departure from one-gate-per-session, and the reasoning
+            // is the iter-57 reasoning: these are three links in one cascade, and the
+            // 08-19 incident-29 sequence ran all three of them in order.
+            //
+            //   accLateralInterlockV2 - ACC held full throttle from 15.4 to 32.4 m/s
+            //     while the mod's OWN lateral estimate crossed the carriageway. That is
+            //     the first link, and it is why the car was ever off line.
+            //   recoveryHoldV2 - the wedge that followed put the machine into the
+            //     declare-LaneKeeping/re-enter-recovery loop, so nothing converged.
+            //   stuckConvergeV2 - and the escape ladder then restarted from zero at
+            //     each new location, forever, because the teleport cleared the very
+            //     clock that was supposed to escalate it.
+            //
+            // Fixing one link per session leaves the cascade intact for two more
+            // sessions. Attribution is rebuilt the iter-57 way instead: each gate is
+            // switchable in-game AND from the diagnostic bridge, each has
+            // GateReach/Fire on its own decision, and each emits its own event
+            // (acc-interlock, recovery-hold, stuck-converge). The bridge's settings.set
+            // makes a per-gate epoch a single command, which is what makes shipping
+            // them together affordable in a way it was not before iter-71.
+            //
+            // Note what none of them can do: accLateralInterlockV2 only ever REMOVES
+            // throttle, recoveryHoldV2 only ever makes the assist MORE passive, and
+            // stuckConvergeV2 only ever makes the ladder try LESS. None can drive the
+            // car somewhere it would not otherwise have gone.
+            "accLateralInterlockV2", "recoveryHoldV2", "stuckConvergeV2",
+            // ...and the arm switch that stands all three down, default 1 = they are on.
+            "iter71Experimental",
             // ---- iter-43: promoted on 07-31 field evidence ----
             // These four fired thousands of times across 53.2 driving minutes and
             // 19 vehicles with no failure attributable to them in the epoch table.
@@ -11700,7 +13067,52 @@ namespace GrandTheftAccessibility
             // settings menu is operable at all without sight, and each only adds
             // information to a row that used to say nothing. phoneRowTextV2 is
             // absent deliberately: it reads unconfirmed script-global offsets.
+            //
+            // iter-53: phoneRowTextV2 STAYS OFF, and this is a deliberate departure from
+            // the iteration plan, which proposed promoting it once PhoneListRows landed.
+            // The plan's premise was that the blind page probe had been replaced by
+            // pinned reads. Half of that is true — the list apps now read Global_9509,
+            // which is provably the buffer feeding SET_DATA_SLOT — but Global_9509's base
+            // has not yet been confirmed against a running game, and phone Settings is
+            // still served by the page probe. The failure mode of an unverified read is a
+            // confident WRONG label, which is the exact bug this iteration exists to fix;
+            // shipping that on by default to every new install would just relocate it.
+            // The dump ships in this build, so one session promotes it in iter-54.
             "menuReaderValueLive", "menuReaderPosition", "menuReaderBindLearn",
+            // iter-53 D7: gunfireAttribV2 is promoted to ON. It is not an experiment on
+            // the driving model — it writes bullet=/proj= onto markers and changes no
+            // behaviour whatsoever. Shipping it OFF made "markers taken under fire:
+            // 0/82" a vacuous line in every digest, and on 08-11-182121 it left the two
+            // largest non-death costs (incidents 12 and 20, engine damage ~5x body at
+            // 2-3 m/s) impossible to separate from driving failures without reading raw
+            // frames by hand. An attribution gate that is off is worse than no gate: it
+            // prints a confident zero.
+            "gunfireAttribV2",
+            // iter-54: the four failure-snapshot gates are promoted to ON. They are
+            // instrumentation, not an experiment on the driving model, and the usual
+            // "ships OFF, one per session" discipline exists to keep a BEHAVIOUR change
+            // attributable — which none of these are.
+            //
+            // Defaulting them ON is free for a normal player because all four are inert
+            // without the drive-assist debug log: EnsureSnapshotWriter returns early
+            // unless driveLogger.IsRunning, TickSnapshotPreroll requires snapshotImage
+            // AND a running writer, and SnapshotFailure returns before doing any work if
+            // the logger is absent. No log, no snapshots, no cost — the nesting contract
+            // the ids[] block already claimed.
+            //
+            // What this actually fixes is the ENABLE ORDER trap. On 08-11-182121 the
+            // gates were toggled on mid-session in the order a person naturally uses
+            // them, snapshotImage was never reached, and the session that produced 82
+            // markers produced no images and no line saying why. iter-53's
+            // EnsureSnapshotWriter fixed the writer-start half of that; this fixes the
+            // half where the answer depended on the player finding four separate rows in
+            // the settings menu without sight, mid-drive, in the right order.
+            "snapshotAllFailures", "snapshotGeometry", "snapshotImage", "snapshotPreroll",
+            // iter-54 D: the menu/phone equivalent, and ON for the same reasons — it is
+            // instrumentation, it is inert unless menuDebugLog is on, and its whole
+            // value is being there the moment a row fails to map rather than being
+            // switched on after the fact when the row has already gone by.
+            "menuSnapshotImage",
         };
 
         private int DefaultForSetting(string id)
@@ -11714,7 +13126,38 @@ namespace GrandTheftAccessibility
             // ran. A new setting whose default changed behaviour would make the
             // 08-11 baseline uncomparable.
             if (id == "unrestPace") return 1;
+            // iter-58: index 2 = 10 results. NOT zero, and this is the one new setting
+            // this iteration that ships with a behaviour-changing default. The naming
+            // repair turns the ped scan from near-silent into a full enumeration, and
+            // the shipped gta11ySettings.json has detectionRadius at index 12 = 1000 m —
+            // uncapped, that scan speaks for minutes with no way to stop it. Index 4 is
+            // "All", i.e. exactly the old behaviour, for anyone who wants it back.
+            if (id == "scanResultCap") return 2;
+            // iter-62. listenerFrame 1 = camera-relative on foot, vehicle-relative when
+            // driving. scanAudioSweep 1 = play the positioned sweep after the spoken summary,
+            // not instead of it — the speech is what a new player relies on while the
+            // soundscape is still being learned.
+            if (id == "listenerFrame") return 1;
+            if (id == "scanAudioSweep") return 1;
+            // hostileDetection 1 is DELIBERATELY not 0: level 1 is precisely the direct-combat
+            // detection this mod already ran for every player with bodyguards off. Defaulting
+            // to 0 would silently remove a warning someone is relying on.
+            if (id == "hostileDetection") return 1;
+            // iter-70: this behaviour-changing bodyguard experiment ships OFF. Keep the
+            // default explicit so it cannot accidentally join a future default-on batch.
+            if (id == "animalDirectMelee") return 0;
             return 0;
+        }
+
+        /// <summary>How many results a nearest-X scan reads out. int.MaxValue = all.</summary>
+        private int[] scanResultCapOptions = { 3, 5, 10, 25, int.MaxValue };
+
+        private int ScanResultCap()
+        {
+            int index = getSetting("scanResultCap");
+            if (index < 0 || index >= scanResultCapOptions.Length)
+                index = 2;                       // 10, matching DefaultForSetting
+            return scanResultCapOptions[index];
         }
 
         void setupSettings(int attempt = 0)
@@ -11727,7 +13170,7 @@ namespace GrandTheftAccessibility
             // arrows through them as a group. Old navAssistBeeps values are
             // migrated below, then the key drops out of the menu (and of the
             // json on the next save).
-            string[] ids = { "announceHeadings", "announceZones", "announceTime", "altitudeIndicator", "targetPitchIndicator", "navigationAssist", "navAssistVerbosity", "navAssistFootRange", "shapeCasting", "pickupDetection", "coverDetection", "waterHazardDetection", "vehicleHealthFeedback", "staminaFeedback", "interactableDetection", "trafficAwareness", "wantedLevelDetails", "slopeTerrainFeedback", "turnByTurnNavigation", "serviceProximity", "detectionRadius", "radioOff", "warpInsideVehicle", "onscreen", "speed", "godMode", "policeIgnore", "vehicleGodMode", "amphibiousMode", "infiniteAmmo", "neverWanted", "superJump", "runFaster", "swimFaster", "exsplosiveAmmo", "fireAmmo", "explosiveMelee", "aimAutolock", "steeringAssist", "roadTeleport", "waypointDriveAssist", "hapticFeedback", "adaptiveCruise", "bodyguardAutoRespawn", "driveAssistDebugLog", "menuDebugLog", "pauseMenuReader", "butlerValet", "autoResumeCreep", "laneOffsetPolyline", "junctionAssist", "wrongWayAlert", "restrictionAwareWalk", "stuckDamageArm", "standoffThreat", "reverseRearV2", "laneStability", "shapeTestV2", "accStandstillRelease", "steerFreezeAtStop", "distressFloor", "actuationV2", "watchdogV2", "brakePhysicsAssist", "reverseV2", "brakeDeadzoneV2", "graceArbitrationV2", "recoverySuspendV2", "recoveryTargetV2", "stuckLadderV2", "roadModelV2",
+            string[] ids = { "announceHeadings", "announceZones", "announceTime", "altitudeIndicator", "targetPitchIndicator", "navigationAssist", "navAssistVerbosity", "navAssistFootRange", "shapeCasting", "pickupDetection", "coverDetection", "waterHazardDetection", "vehicleHealthFeedback", "staminaFeedback", "interactableDetection", "trafficAwareness", "wantedLevelDetails", "slopeTerrainFeedback", "turnByTurnNavigation", "serviceProximity", "detectionRadius", "radioOff", "warpInsideVehicle", "onscreen", "speed", "godMode", "policeIgnore", "vehicleGodMode", "amphibiousMode", "infiniteAmmo", "neverWanted", "superJump", "runFaster", "swimFaster", "exsplosiveAmmo", "fireAmmo", "explosiveMelee", "aimAutolock", "steeringAssist", "roadTeleport", "waypointDriveAssist", "hapticFeedback", "assistBeeps", "adaptiveCruise", "bodyguardAutoRespawn", "driveAssistDebugLog", "menuDebugLog", "pauseMenuReader", "butlerValet", "animalDirectMelee", "autoResumeCreep", "laneOffsetPolyline", "junctionAssist", "wrongWayAlert", "restrictionAwareWalk", "stuckDamageArm", "standoffThreat", "reverseRearV2", "laneStability", "shapeTestV2", "accStandstillRelease", "steerFreezeAtStop", "distressFloor", "actuationV2", "watchdogV2", "brakePhysicsAssist", "reverseV2", "brakeDeadzoneV2", "graceArbitrationV2", "recoverySuspendV2", "recoveryTargetV2", "stuckLadderV2", "roadModelV2",
                 // iter-41. NOT in defaultOnSettings: every one ships OFF and is
                 // turned on individually in-game, one per epoch, so a session's
                 // result is attributable to exactly one change. iter-40 shipped
@@ -11747,6 +13190,10 @@ namespace GrandTheftAccessibility
                 // overhang, brake distances). Changes the control law, so it gets
                 // its own session and ships OFF.
                 "vehicleGeometryV2",
+                // iter-56: stop redirecting the brake to the ACCELERATOR when an
+                // airborne attitude flip fakes isReversing. Ships OFF and gets its own
+                // epoch — it is the only driving-model change in iter-56.
+                "brakeWriteV2",
                 // iter-44: Civil Unrest + consumables/intoxication. unrestScope is
                 // 0-3, unrestNarration is 0-2, the rest are booleans. Weapon
                 // handouts ship OFF so the first riot session tests the
@@ -11782,6 +13229,18 @@ namespace GrandTheftAccessibility
                 // ---- iter-51: drive-assist ----
                 // Both ship OFF and are enabled one per session, same discipline.
                 "roadSpeedGovernorV2", "polyDistrustV2",
+                // ---- iter-57: the recovery chain. All three ship ON. ----
+                // Ordered so the one a player is most likely to want to turn off — the
+                // one that changes what the assist SAYS at a handover — comes last.
+                "reverseEmergCorroborateV2", "stuckEscalationV2", "giveupHazardV2",
+                // ---- iter-59: lane targeting. Ships OFF (it moves the car). ----
+                "laneTargetV2",
+                // ---- iter-61: menu stand-down. Ships OFF (it takes the assist away). ----
+                "frontendSuspendV2",
+                // ---- iter-64: ACC lateral interlock. ----
+                "accLateralInterlockV2",
+                // ---- iter-71: the convergence pair. ----
+                "recoveryHoldV2", "stuckConvergeV2",
                 // ---- iter-50: Menu Reader v1.5 ----
                 // Kept adjacent to pauseMenuReader's cluster in spirit but appended
                 // here so no existing index shifts. The first three ship ON: they
@@ -11793,6 +13252,10 @@ namespace GrandTheftAccessibility
                 // session says the offsets are right.
                 "menuReaderValueLive", "menuReaderPosition", "menuReaderBindLearn",
                 "phoneRowTextV2",
+                // iter-54 D: menu/phone failure screenshots, nested under menuDebugLog
+                // exactly as the four drive-assist snapshot gates are nested under
+                // driveAssistDebugLog. Inert without the menu log.
+                "menuSnapshotImage",
                 // ---- iter-52: world data (tools/build-worlddata.py -> WorldDataDb) ----
                 // Everything harvested from Rockstar's own decompiled scripts. All ship
                 // OFF per the iter-41 one-gate-per-epoch discipline. None writes a
@@ -11808,6 +13271,14 @@ namespace GrandTheftAccessibility
                 "collectibleNav", "placesDirectory",
                 // Speech / text enrichment only; also safe together.
                 "restrictedAreaWarn", "interactionCatalogue",
+                // ---- iter-58: the nearest-X scans ----
+                // detailedScans is the one new behaviour gate this iteration and ships
+                // OFF. scanResultCap is not a second gate — it is a parameter of the same
+                // feature and of the naming repair that made a cap necessary at all, the
+                // same relationship menuSnapshotImage has to menuDebugLog. It is placed
+                // immediately after so a blind user arrows straight from the switch to
+                // the knob that controls how long its output runs.
+                "detailedScans", "scanResultCap",
                 // randomEventAlerts only READS the active-event global and suppresses,
                 // so it is safe anywhere. emergencyDispatch SPAWNS units, so it gets
                 // its own session.
@@ -11819,7 +13290,56 @@ namespace GrandTheftAccessibility
                 // Instrumentation, not gameplay. All four are nested under
                 // driveAssistDebugLog: no log, no snapshots.
                 "snapshotAllFailures", "snapshotGeometry", "snapshotImage",
-                "snapshotPreroll" };
+                "snapshotPreroll",
+                // ---- iter-53: the bisect switch ----
+                // One row that stands the whole experimental gate set down, so a
+                // controlled session is one keypress instead of eleven menu visits.
+                // Every previous "which gate did this" question died on the fact that
+                // nobody is going to arrow through eleven settings mid-drive, least of
+                // all without sight — so sessions were run with everything on at once
+                // and nothing could be attributed. See BASELINE_EXPERIMENTAL.
+                "driveAssistBaseline",
+                // iter-71: the same idea, scoped to this iteration's three gates.
+                // Ships at 1 (the experimental arm) because the three ship ON; turning
+                // the row OFF gives the baseline arm.
+                "iter71Experimental",
+                // ---- iter-62: the non-drive-assist sweep ----
+                // None of these writes a vehicle control, so none joins GATE_SETTINGS.
+                //
+                // The three that ship ON replace an existing cue rather than adding one:
+                // listenerFrame and scanAudioSweep are the spatial-audio upgrade (the old
+                // stereo pan is simply gone), and hostileDetection at 1 is exactly the
+                // detection the mod already ran unconditionally — so a player who changes
+                // nothing hears no new feature, only a better-located version of what they
+                // already had.
+                "listenerFrame", "scanAudioSweep", "spatialElevationCue",
+                "hostileDetection",
+                // Aviation. Each ships OFF and gets its own flight, because a landing is not
+                // a thing you get to re-run mid-session.
+                "planeGearControl", "planeTaxiAssist", "heliLandModeV2", "autodriveStyleV2",
+                // Recovered backlog. pathFindRuntimeV2 is telemetry-only on purpose: it reads
+                // through SHVDN.NativeMemory, which is pattern-scanned and build-tied, and a
+                // memory accessor that silently returns zero is far worse for this mod than
+                // one that throws. It logs agreement against the bundled graph and drives
+                // nothing until a session says the agreement is real.
+                // guardPatrol and guardWeaponFile were planned here and DROPPED — both
+                // already ship. Auto-Patrol is bodyguard-menu item 17 (30 s stationary, 50 m
+                // on foot, 100 m mounted, butler never pulled from the driver's seat), and
+                // per-guard weapons already read ModSettings/guardWeapons.json with keys
+                // butler and guard1..guard6, failing closed on an unrecognised weapon name.
+                "pathFindRuntimeV2",
+                // Both change a NUMBER the player has already learned to trust, which is why
+                // neither rides along with anything else and both log the old value beside
+                // the new one.
+                "xyDistanceFix", "groundHeightV2",
+                // San Andreas Wildfires, folded in from the standalone script (see
+                // Wildfires.cs). Ships OFF: it spawns fire the player cannot see.
+                // Replaces the standalone's hold-Q hotkey, which is the game's cover key.
+                "sanAndreasWildfires",
+                // Drive assist treats a burning road as a hazard: a brake floor toward a
+                // crawl plus one spoken warning. It moves the car, so it is its own gate,
+                // ships OFF, and sits in GATE_SETTINGS. Inert unless wildfires are on.
+                "wildfireDriveHazard" };
             System.IO.StreamWriter fileOut;
 
             if (!System.IO.Directory.Exists(@Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments) + "/Rockstar Games/GTA V/ModSettings"))
@@ -12902,6 +14422,9 @@ namespace GrandTheftAccessibility
             UpdateNodeHazards(playerVeh);
             // iter-49 B3: the Assistive-mode Pull Over governor.
             UpdatePullOverGovernor(playerVeh);
+            // San Andreas Wildfires: fire on the path ahead. After BuildPathPolyline.
+            try { UpdateWildfireHazard(playerVeh); }
+            catch (Exception ex) { wildfireBrakeRequest = 0f; ReportSubsystemError("wildfire hazard", ex); }
 
             // iter-32: road-graph enrichment detectors. All run every scan for
             // telemetry; control/speech output is individually setting-gated
@@ -13263,12 +14786,45 @@ namespace GrandTheftAccessibility
             // surface orientation. Below 0.3 m we still reject (road surface,
             // manhole, low rumble strip). Above 2.0 m we still reject
             // (overpass, overhead sign — we drive under those).
+            // ---- iter-57 I: MEASURE THE DATUM, DO NOT YET MOVE IT ----
+            // staticRelZ is measured from Vehicle.Position, which is the entity ORIGIN
+            // (roughly mid-chassis, ~0.5-0.9 m up depending on model), NOT the bumper.
+            // So `relZ >= 0.30` is about the HOOD line, and a real bumper face sits at
+            // relZ ~ -0.3..-0.1. That would explain why 99.9% of 08-14's 6607 static
+            // rejects were classified `belowBumper` — including, on the evidence of the
+            // low-obstacle cache (`dist=0.7 relZ=-0.16 normalZ=1.00` on a stationary
+            // wedged car), things the car was physically touching.
+            //
+            // The threshold is deliberately NOT changed here. Moving it would alter the
+            // brake path — a channel that currently measures 1.5% dead commands and
+            // works — on the strength of an inference. Instead: record the height above
+            // the ROAD as well, record which gate actually rejected, and sample the
+            // dominant bucket, so the next session settles it as a measurement.
             float staticRelZ = staticDist > 0f
                 ? staticHitPos.Z - playerVeh.Position.Z : 0f;
+            float staticHitFloorZ = 0f;
+            bool staticHaveFloor = staticDist > 0f
+                && TryGetApproxFloorZ(staticHitPos, out staticHitFloorZ);
+            // Height of the hit above the road under it, and of the car's own origin
+            // above the road under the car. The difference between these two numbers is
+            // the datum error, stated per-hit instead of argued about.
+            float staticRelRoad = staticHaveFloor ? staticHitPos.Z - staticHitFloorZ : -999f;
+            float staticVehFloorZ;
+            float staticVehAboveRoad =
+                TryGetApproxFloorZ(playerVeh.Position, out staticVehFloorZ)
+                    ? playerVeh.Position.Z - staticVehFloorZ : -999f;
             bool staticIsVerticalSurface = Math.Abs(staticHitNorm.Z) <= 0.60f;
             bool staticIsBumperHeightHit = staticRelZ >= 0.30f && staticRelZ <= 2.0f;
             bool staticHitValid = staticDist > 0f
                 && (staticIsVerticalSurface || staticIsBumperHeightHit);
+            // iter-57 I: which gate ACTUALLY rejected this hit. The old code re-derived
+            // the reason from relZ in a branch reached by *any* rejection, so a vertical
+            // wall killed by the CONE test was still counted as `belowBumper` purely
+            // because it happened to be low. That is three causes in one bucket.
+            string staticRejGate = "none";
+            if (staticDist > 0f && !staticHitValid)
+                staticRejGate = staticRelZ < 0.30f ? "elevation-low"
+                    : staticRelZ > 2.0f ? "elevation-high" : "normal";
             if (staticHitValid)
             {
                 // Wall facing us head-on? swerve-clearance check.
@@ -13292,7 +14848,10 @@ namespace GrandTheftAccessibility
                 // imminent dead-ahead wall is a true emergency.
                 const float STATIC_HEADON_RANGE = 8f;
                 if (!staticInCone && !(staticWallFacesUs && staticDist <= STATIC_HEADON_RANGE))
+                {
                     staticHitValid = false;
+                    staticRejGate = "cone";   // iter-57 I: NOT a below-bumper reject
+                }
             }
             // iter-28 B-2: ground-graze corroboration. A below-bumper static hit is
             // normally the road (correctly rejected). But in the grind regime (slow +
@@ -13362,8 +14921,16 @@ namespace GrandTheftAccessibility
                 // below is a BEHAVIOR input (blockedAhead/strandedHold) and must
                 // populate with logging off. All writes below stay logger-guarded.
                 bool rejLogging = driveLogger != null && driveLogger.IsRunning;
-                string rejReason = staticRelZ < 0.30f ? "below-bumper"
-                    : staticRelZ > 2.0f ? "above-overhead" : "out-of-cone";
+                // iter-57 I: the reason is now the gate that ACTUALLY fired, not a
+                // re-derivation from relZ. `cone` maps to out-of-cone; the elevation
+                // gates map to their own buckets. This is what stops a vertical wall
+                // killed by the cone test from being tallied as `below-bumper`.
+                string rejReason = staticRejGate == "cone" ? "out-of-cone"
+                    : staticRejGate == "elevation-high" ? "above-overhead"
+                    : staticRejGate == "elevation-low" ? "below-bumper"
+                    : staticRejGate == "normal" ? "normal-orientation"
+                    : (staticRelZ < 0.30f ? "below-bumper"
+                        : staticRelZ > 2.0f ? "above-overhead" : "out-of-cone");
                 // iter-36 B5: a close below-bumper hit while (nearly) stopped is the
                 // sub-bumper wedge signature — cache it for blockedAhead/strandedHold
                 // corroboration (stuck machinery only; the brake path never reads it).
@@ -13402,11 +14969,33 @@ namespace GrandTheftAccessibility
                 // iter-29 C3: per-hit line only for actionable near hits (out-of-cone /
                 // overhead within braking range). below-bumper ground-graze (~99% of
                 // rejects, the 1482-line flood) is counted in the summary only.
-                if (staticDist < BRAKE_MIN_USEFUL_DIST && rejReason != "below-bumper")
+                // iter-57 I: the de-flooding decision was right about VOLUME and wrong
+                // about which bucket to silence — it silenced the dominant, least
+                // understood one, and `STATIC-REJECTED` appeared 0 times in 08-14's
+                // 6607 rejects. Sample it instead: every below-bumper reject inside 4 m
+                // (where a wedge lives), and 1 in 64 beyond that. Bounded, and the
+                // dominant category finally gets a distribution rather than a count.
+                staticRejectSeq++;
+                bool sampleBelow = rejReason == "below-bumper"
+                    && (staticDist < 4f || (staticRejectSeq & 63) == 0);
+                if ((staticDist < BRAKE_MIN_USEFUL_DIST && rejReason != "below-bumper")
+                    || sampleBelow)
                     driveLogger.Write("[F" + driveLogFrameCount
                         + "] shapecast: STATIC-REJECTED dist=" + staticDist.ToString("F1")
                         + " normalZ=" + staticHitNorm.Z.ToString("F2")
                         + " relZ=" + staticRelZ.ToString("F2")
+                        // iter-57 I: the two fields that settle whether the 0.30 datum is
+                        // measured from the right place. relRoad is the hit's height above
+                        // the road under it; vehAboveRoad is the car origin's height above
+                        // the road under the car. If relRoad clusters at 0.0-0.1 the
+                        // threshold is fine and these really are road grazes; if it
+                        // clusters at 0.3-0.6 the mod is rejecting kerbs it can see.
+                        + " relRoad=" + (staticRelRoad > -900f
+                            ? staticRelRoad.ToString("F2") : "n/a")
+                        + " vehAboveRoad=" + (staticVehAboveRoad > -900f
+                            ? staticVehAboveRoad.ToString("F2") : "n/a")
+                        + " gate=" + staticRejGate
+                        + " sampled=" + sampleBelow
                         + " reason=" + rejReason
                         + " hitPos=" + FmtV(staticHitPos)
                         + " lift=" + Math.Max(0f, (staticRadius + CAST_BOTTOM_CLEARANCE_M) - 0.5f).ToString("F2"));
@@ -13710,15 +15299,34 @@ namespace GrandTheftAccessibility
             // with GET_WATER_HEIGHT; water near/above car level = stop. Brake-only
             // response (no surprise swerve for a blind driver) lives in
             // ApplyCachedSteeringInputs next to the skew-emergency.
+            // ---- iter-57 D: THE CRAWL CASE. UNGATED. ----
+            // 08-14 ended with the car sitting IN the water at a river mouth, 0 MPH,
+            // after four recovery give-ups at that spot over two minutes
+            // (sheet-0082-RECOVERY-GIVEUP). The session contains no `water-ahead` line
+            // at all — not because the event is missing (it is right below) but because
+            // the probe was armed only above 8 m/s. A car rolling down a shore at 2 m/s
+            // was never checked, and neither was one being reversed into a river by a
+            // native task at low speed.
+            //
+            // Arming now goes down to a crawl. The FALSE-POSITIVE risk goes up as it
+            // does — slow driving near water is ordinary (marinas, shoreline roads, the
+            // Del Perro pier) — so the low-speed path is deliberately STRICTER, not
+            // looser: it wants water essentially at car level, off-road, and directly
+            // along the direction of travel. High-speed behaviour is unchanged.
             waterAheadDetected = false;
             waterAheadDist = -1f;
-            if (vehicleSpeed > 8f)
+            bool waterArmed = vehicleSpeed > WATER_PROBE_MIN_SPEED;
+            if (waterArmed)
             {
                 GTA.Math.Vector3 waterVelDir = playerVeh.Velocity;
                 waterVelDir.Z = 0f;
-                if (waterVelDir.LengthSquared() > 1f)
+                // At a crawl the velocity vector is short but still the honest heading
+                // of travel; 0.04 m/s of planar motion is enough to say which way the
+                // car is going. Below that it is not moving and there is nothing to hit.
+                if (waterVelDir.LengthSquared() > 0.0016f)
                 {
                     waterVelDir.Normalize();
+                    bool waterSlow = vehicleSpeed <= 8f;
                     // iter-23 K3: BOTH probes must agree, or a single hit must be
                     // at a point that is NOT a road. The 192838 session's two
                     // false alarms were shoreline roads ~1 m above lake level
@@ -13726,10 +15334,18 @@ namespace GrandTheftAccessibility
                     // tightened to carZ-1.
                     int waterHitCount = 0;
                     bool anyOffRoadHit = false;
+                    int waterProbeCount = 0;
                     float firstHitDist = -1f, firstHitWz = 0f;
+                    // iter-57 D: at a crawl, probe the bumper and just past it — the
+                    // far probes are meaningless at 2 m/s and are what a shoreline road
+                    // trips on. At speed, the original 1 s / 2 s lookahead is unchanged.
+                    float waterHalfLen = GetVehicleHalfLengthForClearance(playerVeh);
                     for (int wp = 1; wp <= 2; wp++)
                     {
-                        float probeDist = Math.Min(50f, Math.Max(8f, vehicleSpeed * wp));
+                        float probeDist = waterSlow
+                            ? waterHalfLen + (wp == 1 ? 0.5f : 2.5f)
+                            : Math.Min(50f, Math.Max(8f, vehicleSpeed * wp));
+                        waterProbeCount++;
                         GTA.Math.Vector3 waterProbe = playerPos + waterVelDir * probeDist;
                         OutputArgument oWaterZ = new OutputArgument();
                         // GET_WATER_HEIGHT: 0xF6829842C06AE524
@@ -13738,13 +15354,21 @@ namespace GrandTheftAccessibility
                         if (!hasWater) continue;
                         float waterZ = oWaterZ.GetResult<float>();
                         // Bridges stay quiet: their deck is far ABOVE the water
-                        // surface, so waterZ << car Z.
-                        if (waterZ <= playerPos.Z - 1f) continue;
+                        // surface, so waterZ << car Z. At a crawl the bar is TIGHTER
+                        // (carZ-0.5): we want water at the wheels, not water visible
+                        // from an embankment we are driving along.
+                        if (waterZ <= playerPos.Z - (waterSlow ? 0.5f : 1f)) continue;
                         waterHitCount++;
                         if (firstHitDist < 0f) { firstHitDist = probeDist; firstHitWz = waterZ; }
                         if (!IsPositionOnRoad(waterProbe)) anyOffRoadHit = true;
                     }
-                    if (waterHitCount == 2 || (waterHitCount == 1 && anyOffRoadHit))
+                    // At a crawl BOTH conditions are required — every probe wet AND the
+                    // water off the road network. A marina apron or a pier stays quiet
+                    // because it is road; a river shore does not because it is not.
+                    bool waterTrip = waterSlow
+                        ? (waterHitCount == 2 && anyOffRoadHit)
+                        : (waterHitCount == 2 || (waterHitCount == 1 && anyOffRoadHit));
+                    if (waterTrip)
                     {
                         waterAheadDetected = true;
                         waterAheadDist = firstHitDist;
@@ -13758,14 +15382,38 @@ namespace GrandTheftAccessibility
                         {
                             lastWaterLogTicks = DateTime.Now.Ticks;
                             driveLogger.Write("[F" + driveLogFrameCount
-                                + "] EVENT water-ahead: dist=" + firstHitDist.ToString("F0")
+                                + "] EVENT water-ahead: dist=" + firstHitDist.ToString("F1")
                                 + " wz=" + firstHitWz.ToString("F1")
                                 + " carZ=" + playerPos.Z.ToString("F1")
                                 + " hits=" + waterHitCount
-                                + " offRoad=" + anyOffRoadHit);
+                                + " probes=" + waterProbeCount
+                                + " offRoad=" + anyOffRoadHit
+                                // iter-57 D: the fields that say whether the guard could
+                                // have acted, not just that it fired. A detection that
+                                // fires into a dead brake channel looks identical to a
+                                // working one unless these are on the line.
+                                + " slow=" + waterSlow
+                                + " spd=" + vehicleSpeed.ToString("F2")
+                                + " tempAction=" + (TempActionLive()
+                                    ? tempActionCurrent.ToString() : "0")
+                                + " fullMode=" + cachedIsFullMode);
+                            SnapshotFailure("WATER-AHEAD", null);
                         }
                     }
                 }
+            }
+            // iter-57 D: ARMED-AND-QUIET heartbeat. 08-14 contained no water line at
+            // all, and there was no way to tell "the probe ran and found nothing" from
+            // "the probe never ran" — which is the difference between a guard that
+            // works and one that is not installed. Cheap: once per 30 s while moving.
+            if (driveLogger != null && driveLogger.IsRunning && !waterAheadDetected
+                && ModClock.Ticks - lastWaterArmedLogTicks > 300000000L)
+            {
+                lastWaterArmedLogTicks = ModClock.Ticks;
+                driveLogger.Write("[F" + driveLogFrameCount + "] EVENT water-probe:"
+                    + " armed=" + waterArmed
+                    + " spd=" + vehicleSpeed.ToString("F2")
+                    + " minSpd=" + WATER_PROBE_MIN_SPEED.ToString("F2"));
             }
 
             // Store for reference - use steer TTC for general threat tracking
@@ -14023,12 +15671,32 @@ namespace GrandTheftAccessibility
             // BIG_Z_CHANGE in the log is the same signal we want to react to.
             // Skip the check on the first frame (lastDriveAssistVehiclePosValid)
             // and when the vehicle just changed (handled below).
+            // ---- iter-57 H: TELEPORT-JUMP, measured against a STAMPED baseline ----
+            // 08-14 produced 3 of 3 false positives and 1 of 1 false negative.
+            //
+            // False positives: lastDriveAssistVehiclePos was updated only when this
+            // assist block ran, so after a suspension or grace the baseline was seconds
+            // old and `planar` measured DISTANCE TRAVELLED, not displacement. All three
+            // markers fired right after `assist-resume` with scanAgeMs 2939-4252, and
+            // the FRAME line on the very same frame read planar = 0.26 / 0.04 / 0.25 m.
+            // A fixed 10 m threshold cannot separate "teleported" from "drove for three
+            // seconds while I wasn't looking".
+            //
+            // False negative: the check was gated on sameVehicle, so the session's one
+            // real 1313 m jump — which came WITH a vehicle change, as fast travel and
+            // save loads always do — was skipped entirely.
+            //
+            // Test implied speed instead. No car covers ground at 80 m/s under its own
+            // power; anything that does, moved without driving.
             bool teleported = false;
-            if (sameVehicle && lastDriveAssistVehiclePosValid)
+            if (lastDriveAssistVehiclePosValid && lastDriveAssistVehiclePosTicks > 0)
             {
                 GTA.Math.Vector3 dp = playerVeh.Position - lastDriveAssistVehiclePos;
                 float planar = (float)Math.Sqrt(dp.X * dp.X + dp.Y * dp.Y);
-                if (planar > TELEPORT_JUMP_M)
+                long baselineAgeTicks = ModClock.Ticks - lastDriveAssistVehiclePosTicks;
+                float baselineAgeSec = baselineAgeTicks / 10000000f;
+                float impliedSpd = baselineAgeSec > 0.001f ? planar / baselineAgeSec : 0f;
+                if (planar > TELEPORT_JUMP_M && impliedSpd > TELEPORT_IMPLIED_SPEED_MS)
                 {
                     teleported = true;
                     // iter-29 C4: log the teleport delta so post-teleport health drops
@@ -14039,19 +15707,45 @@ namespace GrandTheftAccessibility
                             + " from=" + FmtV(lastDriveAssistVehiclePos)
                             + " to=" + FmtV(playerVeh.Position)
                             + " jumpDist=" + planar.ToString("F1")
+                            + " impliedSpd=" + impliedSpd.ToString("F1")
+                            + " baselineAgeMs=" + (baselineAgeTicks / 10000L)
+                            + " vehChanged=" + (!sameVehicle)
                             + " speed=" + playerVeh.Speed.ToString("F1"));
-                        SnapshotFailure("TELEPORT-JUMP", null);
+                    // Deliberately outside the logger check — SnapshotFailure does its own
+                    // gating. Indented to match, because the D1 bug was born of exactly this
+                    // shape being indented as if it were guarded.
+                    SnapshotFailure("TELEPORT-JUMP", null);
                 }
             }
             lastDriveAssistVehiclePos = playerVeh.Position;
             lastDriveAssistVehiclePosValid = true;
+            lastDriveAssistVehiclePosTicks = ModClock.Ticks;
 
             if (!sameVehicle || teleported)
             {
                 lastDriveAssistVehicleHandle = playerVeh.Handle;
-                vehicleEntryTicks = DateTime.Now.Ticks;
+                // iter-71 A5: ModClock, not the wall clock. This is a duration-critical
+                // age read beside lastTeleportTicks (also ModClock) to decide whether a
+                // drawdown is a spawn artifact, and a pause must not age a spawn. Until
+                // now the field was stamped and read by nothing, so the mismatch was
+                // invisible; consuming it makes the clock domain matter.
+                vehicleEntryTicks = ModClock.Ticks;
+                // iter-57 K: run-up frames belong to the car and the place they were
+                // taken in. A new vehicle or a teleport makes every frame in the ring a
+                // picture of somewhere else — exactly the splice in sheet-0020.
+                try { ClearPrerollRing(); } catch { }
+                // iter-53 D9: perception ages belong to the vehicle that was scanned.
+                // A new car (or a teleport) means there IS no reading yet — carrying the
+                // old stamps is what let a marker claim nine-minute-old sensor data.
+                lastScanCompletedTicks = 0;
+                lastLaneLateralErrorTicks = 0;
                 // Reset alignment state so prior vehicle / location can't bleed in.
                 currentDriveMode = DriveMode.LaneKeeping;
+                // iter-71 A1: four of the seven mode assignments never set the reason,
+                // so EVENT mode-change printed whatever the lane-decision block had
+                // left behind — a why= belonging to a different transition entirely.
+                // Any why= histogram built before this fix is counting stale values.
+                driveModeWhy = "vehicle-change";
                 alignmentEngageReverse = false;
                 // Drop rolling history — prior snapshots are stale.
                 historyHead = 0;
@@ -14426,7 +16120,7 @@ namespace GrandTheftAccessibility
             // threshold, allow the rate-clamped steering to release in one
             // frame. Past the righten threshold, snap the vehicle upright on
             // the road. Comfort doesn't matter when we're 50+ deg off-axis.
-            bool inSkewedRecovery = currentDriveMode != DriveMode.LaneKeeping
+            bool inSkewedRecovery = !IsLaneKeepingMode()
                 && Math.Abs(roadHeadingDelta) > PERSISTENT_SKEW_ANGLE;
             long skewNow = ModClock.Ticks; // pause-proof: persistent-skew duration (pairs with persistentSkewStartTicks)
             bypassSteerRateClampThisFrame = false;
@@ -14468,6 +16162,11 @@ namespace GrandTheftAccessibility
             // 20 and never drop back below LANEKEEP_FAILURE_HYSTERESIS once
             // saturated — every failure event in driveassist-2026-05-25-012227
             // shows laneKeepFailStreak=20.
+            // iter-71 A4: laneKeepOk is a local, and ComputeACC is a different method
+            // that needs it to say whether an interlock veto agreed with the lane
+            // model or contradicted it. Publish the settled value here, after every
+            // gate above has had its say and before the streak consumes it.
+            lastLaneKeepOk = laneKeepOk;
             if (laneKeepOk && laneKeepFailureStreak > 0) laneKeepFailureStreak -= 3;
             else if (!laneKeepOk)
             {
@@ -14504,9 +16203,10 @@ namespace GrandTheftAccessibility
             {
                 // Recently flipped — hold whatever mode we're in. Prevents the
                 // sub-second ping-pong the audit identified.
-                useLaneKeep = (currentDriveMode == DriveMode.LaneKeeping);
+                useLaneKeep = (IsLaneKeepingMode());
+                driveModeWhy = "hysteresis-hold";
             }
-            else if (currentDriveMode == DriveMode.LaneKeeping)
+            else if (IsLaneKeepingMode())
             {
                 // STAY in LaneKeeping unless sustained failure. Legacy
                 // hysteresis still applies as a fallback for the warmup window.
@@ -14531,6 +16231,13 @@ namespace GrandTheftAccessibility
                 bool streakSaturated = laneKeepFailureStreak >= LANEKEEP_FAILURE_STREAK_CAP;
                 useLaneKeep = (laneKeepOk && !streakSaturated)
                     || !(sustainedFailure || legacyFallback || streakSaturated);
+                // iter-61: name the rule that ENTERED recovery, so a session can tell
+                // "the lane model is noisy" (sustained-failure) from "the streak has
+                // been pinned at the cap for a minute" (streak-saturated).
+                driveModeWhy = useLaneKeep
+                    ? (laneKeepOk ? "lanekeep-ok" : "no-sustained-failure")
+                    : (streakSaturated ? "streak-saturated"
+                       : sustainedFailure ? "sustained-failure" : "legacy-fallback");
             }
             else
             {
@@ -14540,8 +16247,15 @@ namespace GrandTheftAccessibility
                 // look-ahead skew), not merely sitting over a road node. WasOnValidRoadForLastMs
                 // is skew-blind, so at 99 deg over a junction node it returned true and
                 // ping-ponged RecoveringToRoad<->LaneKeeping (021734 F3010-F3556).
-                useLaneKeep = WasOnValidRoadForLastMs(LANEKEEP_CONFIRM_MS)
-                    && Math.Abs(lastLookaheadHeadingDelta) < RECOVERY_EXIT_SKEW_MAX;
+                bool onRoadHeld = WasOnValidRoadForLastMs(LANEKEEP_CONFIRM_MS);
+                bool skewOk = Math.Abs(lastLookaheadHeadingDelta) < RECOVERY_EXIT_SKEW_MAX;
+                useLaneKeep = onRoadHeld && skewOk;
+                // iter-61: "realigned" is the ONLY healthy way out of recovery. It is
+                // decided on the confirm WINDOW, so it can (and on 08-17 did) read true
+                // while the instantaneous laneKeepOk on the same line reads false —
+                // recording both is what separates a real recovery from a window artefact.
+                driveModeWhy = useLaneKeep ? "realigned"
+                    : (!onRoadHeld ? "still-off-road" : "skew-too-high");
             }
 
             // iter-19 G2: during the watchdog grace window the player is sovereign —
@@ -14550,7 +16264,7 @@ namespace GrandTheftAccessibility
             // exactly what kills the 204938 reverse-pulse re-arm. Failure streaks
             // keep accumulating, so a still-stuck car re-enters recovery on the
             // first scan after grace expires (or via the stuck-arm grace cancel).
-            if (InWatchdogGrace()) useLaneKeep = true;
+            if (InWatchdogGrace()) { useLaneKeep = true; driveModeWhy = "watchdog-grace"; }
 
             DriveMode prevMode = currentDriveMode;
 
@@ -14560,7 +16274,7 @@ namespace GrandTheftAccessibility
                 // the failure streak so a saturated cap (20) from a prior
                 // recovery cycle doesn't keep us pinned in the legacy-fallback
                 // sustained-failure branch on the very next bad frame.
-                if (currentDriveMode != DriveMode.LaneKeeping)
+                if (!IsLaneKeepingMode())
                     laneKeepFailureStreak = 0;
                 currentDriveMode = DriveMode.LaneKeeping;
                 // Re-flag as on-road so downstream gates pass even during a brief
@@ -14587,6 +16301,11 @@ namespace GrandTheftAccessibility
                 recoveryTargetHeading = 0f;
                 recoveryTargetDistance = 999f;
                 recoveryHeadingDelta = 0f;
+                // iter-61: 999 is a SENTINEL written by two different paths — this one
+                // (lane-keeping resumed, target deliberately discarded) and the empty
+                // FindBestRecoveryNode below. They mean opposite things, so record which
+                // one produced the number the transition line is about to print.
+                recoveryDistWhy = "lanekeep-resumed";
                 offroadModeStartTicks = 0; // back on the road; clear timeout
             }
             else
@@ -14619,6 +16338,7 @@ namespace GrandTheftAccessibility
                     // Refresh distance / heading error against the SAME node as
                     // the car moves.
                     recoveryTargetDistance = (recoveryTargetPos - playerVeh.Position).Length(); // iter-18 D3
+                    recoveryDistWhy = "latched-refresh"; // iter-61
                     float hd = recoveryTargetHeading - playerVeh.Heading;
                     while (hd > 180f) hd -= 360f;
                     while (hd < -180f) hd += 360f;
@@ -14692,6 +16412,11 @@ namespace GrandTheftAccessibility
                         out recoveryTargetPos, out recoveryTargetHeading,
                         out recoveryTargetDistance, out recoveryHeadingDelta);
                     recoveryTargetLatched = hasRecoveryTarget;
+                    // iter-61: "search-empty" is the one that matters — it is the input
+                    // to the no-recovery-node fallback, and it carries the reason the
+                    // search ran at all.
+                    recoveryDistWhy = (hasRecoveryTarget ? "search-found:" : "search-empty:")
+                        + reResolveReason;
 
                     if (driveLogger != null && driveLogger.IsRunning)
                         driveLogger.Write("[F" + driveLogFrameCount + "] EVENT recovery-search:"
@@ -14713,6 +16438,19 @@ namespace GrandTheftAccessibility
                             + " targetBlocked=" + (closestThreatPosition != GTA.Math.Vector3.Zero
                                   && playerVeh.Position.DistanceTo(closestThreatPosition) < recoveryTargetDistance)
                             + " speedFlipReject=" + lastRecoverySpeedFlipReject // iter-24 R2
+                            // iter-71 A2: the reason counters. On a found=False row
+                            // these are the whole diagnosis: scanned=0 with
+                            // unloaded=True is a streaming gap and not a road-model
+                            // fault; scanned>0 with rej= all zero means the native
+                            // answered and every candidate lost on soft score; and
+                            // primaryHit=False with rejPerp>0 is the junction phantom.
+                            + " scanned=" + recoverySearchScanned
+                            + " rej=perp:" + recoverySearchRejPerp
+                            + ",flip:" + recoverySearchRejFlip
+                            + ",z:" + recoverySearchRejZ
+                            + ",uturn:" + (recoverySearchUturnReject ? 1 : 0)
+                            + " unloaded=" + recoverySearchUnloaded
+                            + " primaryHit=" + recoverySearchPrimaryHit
                             + " why=" + reResolveReason); // iter-40: which rule forced this search
                     RecordDriveDecision("recovery-search: found=" + hasRecoveryTarget
                         + " dist=" + recoveryTargetDistance.ToString("F1"));
@@ -14734,14 +16472,72 @@ namespace GrandTheftAccessibility
                 else
                 {
                     // No nodes at all — leave the assist passive.
-                    currentDriveMode = DriveMode.LaneKeeping;
+                    //
+                    // iter-61: this is the 08-17 thrash, and it is NOT a recovery.
+                    // FindBestRecoveryNode came back empty, so the mod declares
+                    // LaneKeeping while laneKeepOk is still false; the next scan
+                    // re-enters recovery, finds nothing again, and the pair repeats at
+                    // ~22/min (40 of the session's 82 mode-changes, every one of them
+                    // logged as "-> LaneKeeping ... recoveryDist=999.0"). Say so on the
+                    // transition line rather than letting it read like a success.
+                    //
+                    // ---- iter-71 B2 (recoveryHoldV2): and now stop doing it. ----
+                    // Declaring LaneKeeping here is a statement the mod knows to be
+                    // false: laneKeepOk is false, that is WHY the search ran. The next
+                    // scan reads the same false and re-enters recovery, so the pair is
+                    // not hysteresis noise to be damped - it is the machine asserting
+                    // and denying the same fact once per scan, forever.
+                    //
+                    // HoldingNoTarget says the true thing instead. It is passive: no
+                    // recovery steer (no target to steer at), no forward crawl, no
+                    // input takeover, and it does not claim the lane is good. What it
+                    // DOES do is count as not-lane-keeping everywhere the stuck ladder
+                    // looks, so a car parked in this state arms no-progress and
+                    // escalates through the rungs that already exist rather than
+                    // round-tripping until something else notices.
+                    if (getSetting("recoveryHoldV2") == 1)
+                    {
+                        GateReach("recoveryHoldV2");
+                        if (currentDriveMode != DriveMode.HoldingNoTarget)
+                        {
+                            GateFire("recoveryHoldV2");
+                            holdNoTargetSinceTicks = ModClock.Ticks;
+                            holdNoTargetSpoken = false;
+                            if (driveLogger != null && driveLogger.IsRunning)
+                                driveLogger.Write("[F" + driveLogFrameCount + "] EVENT recovery-hold:"
+                                    + " enter from=" + currentDriveMode
+                                    + " laneKeepOk=" + laneKeepOk
+                                    + " failStreak=" + laneKeepFailureStreak
+                                    + " scanned=" + recoverySearchScanned
+                                    + " unloaded=" + recoverySearchUnloaded
+                                    + " spd=" + playerVeh.Speed.ToString("F1")
+                                    + " street=" + World.GetStreetName(playerVeh.Position));
+                        }
+                        currentDriveMode = DriveMode.HoldingNoTarget;
+
+                        // Say it. The assist has stopped steering and there is no
+                        // visual cue that it has - the driver has to be told, once,
+                        // and then left alone rather than nagged.
+                        long heldMs = (ModClock.Ticks - holdNoTargetSinceTicks) / 10000L;
+                        if (!holdNoTargetSpoken && heldMs > HOLD_NO_TARGET_SPEAK_MS)
+                        {
+                            holdNoTargetSpoken = true;
+                            Speech.Critical("Drive assist cannot find the road. Take the wheel.");
+                            if (driveLogger != null && driveLogger.IsRunning)
+                                driveLogger.Write("[F" + driveLogFrameCount + "] EVENT recovery-hold:"
+                                    + " spoke heldMs=" + heldMs);
+                            SnapshotFailure("RECOVERY-HOLD", "heldMs=" + heldMs);
+                        }
+                    }
+                    else currentDriveMode = DriveMode.LaneKeeping;
+                    driveModeWhy = "no-recovery-node";
                     recoveryTargetLatched = false;
                     recoveryBrakeRequest = 0f;
                     recoveryUturnDir = 0;
                     alignmentEngageReverse = false;
                 }
 
-                if (currentDriveMode != DriveMode.LaneKeeping)
+                if (IsRecoveryManeuverMode())
                 {
                     GetAlignmentRecoverySteer(playerVeh, recoveryTargetPos, recoveryTargetHeading,
                         recoveryTargetDistance, recoveryHeadingDelta,
@@ -14982,11 +16778,34 @@ namespace GrandTheftAccessibility
                     + " laneKeepOk=" + laneKeepOk
                     + " failStreak=" + laneKeepFailureStreak
                     + " hasRecovery=" + hasRecoveryTarget
-                    + " recoveryDist=" + recoveryTargetDistance.ToString("F1"));
+                    + " recoveryDist=" + recoveryTargetDistance.ToString("F1")
+                    // iter-61: the two fields this line needed. `why` names the rule
+                    // that decided the mode; `distWhy` disambiguates the 999 sentinel.
+                    // A transition out of recovery is a SUCCESS only at why=realigned.
+                    + " why=" + driveModeWhy
+                    + " distWhy=" + recoveryDistWhy
+                    // How long the mode we are LEAVING was held. Not derivable from
+                    // lastModeChangeTicks — that is stamped ~15 lines above this write,
+                    // so it would read 0 every time. A thrash is a run of small heldMs.
+                    + " heldMs=" + (driveLogLastModeTicks > 0
+                        ? ((DateTime.Now.Ticks - driveLogLastModeTicks) / 10000L) : -1L));
+                driveLogLastModeTicks = DateTime.Now.Ticks;
                 RecordDriveDecision("mode-change: " + driveLogLastMode + " -> " + currentDriveMode
                     + " failStreak=" + laneKeepFailureStreak);
                 driveLogLastMode = currentDriveMode;
             }
+
+            // iter-57 A(c): re-evaluate any RUNNING native temp action BEFORE the
+            // ladder gets a chance to issue another one. A task whose authorising
+            // condition has lapsed must be cancelled on the same tick it lapses, not
+            // left to run out its duration — that gap is what 08-14 drove through.
+            MonitorTempAction(playerVeh);
+
+            // iter-57 B: and notice if we have stopped steering at all. Reads the
+            // previous frame's readback, which is exactly right — the question is
+            // whether a SUSTAINED command produced sustained motion, and the
+            // thresholds are 200 ms / 1 s, so one frame of lag is immaterial.
+            MonitorAuthorityBlackout(playerVeh);
 
             // STUCK RECOVERY: detect a recovery mode that is commanding the
             // car but making no physical progress, and escalate. Runs after
@@ -15334,7 +17153,7 @@ namespace GrandTheftAccessibility
             if (hasThreat
                 || (isOnValidRoad && Math.Abs(roadSteerCorrection) > 0.05f)
                 || needsHandbrakeTurn
-                || currentDriveMode != DriveMode.LaneKeeping
+                || !IsLaneKeepingMode()
                 || (isFullMode && playerVeh.Speed > 15f && curveBrakeRequest > 0.05f))
             {
                 steeringAssistActive = true;
@@ -15784,6 +17603,10 @@ namespace GrandTheftAccessibility
         // native.
         private bool  roadEdgeValid = false;
         private float roadEdgeLeftM = 0f, roadEdgeRightM = 0f, roadWidthMeasM = 0f;
+        // iter-53 D9: why the last boundary sample produced no reading — ok, refusedL,
+        // refusedR, refusedLR, implausible:<w>, or off. Written to the FRAME road: line
+        // so a refusal rate is a diagnosis instead of an inference from silence.
+        private string roadEdgeStat = "off";
         private bool  groundNormValid = false;
         private float groundGradeDeg = 0f;     // + = uphill along heading
         private float groundCamberDeg = 0f;    // + = ground rises to the right
@@ -16554,6 +18377,16 @@ namespace GrandTheftAccessibility
                 GTA.Math.Vector3 eL, eR;
                 bool okL = TryRoadBoundary(p, h + 90f, out eL);
                 bool okR = TryRoadBoundary(p, h - 90f, out eR);
+                // iter-53 D9: record WHICH of the three failures happened. All three
+                // used to produce the same silence — no edgeL/edgeR on the FRAME line —
+                // so triage could only infer "58.5% refusal rate" from an absence, and
+                // "the native refused", "only one kerb answered", "the width was
+                // implausible" and "not on a road at all" were indistinguishable. That
+                // is a 58.5% hole in the measurement this gate exists to produce.
+                if (!okL && !okR) roadEdgeStat = "refusedLR";
+                else if (!okL) roadEdgeStat = "refusedL";
+                else if (!okR) roadEdgeStat = "refusedR";
+                else roadEdgeStat = "ok";
                 if (okL && okR)
                 {
                     roadEdgeLeftM = Dist2D(p, eL);
@@ -16567,8 +18400,35 @@ namespace GrandTheftAccessibility
                         roadEdgeValid = true;
                         GateFire("roadBoundaryV2");
                     }
+                    else
+                    {
+                        // ---- iter-59 C6: name the failure, and keep the evidence ----
+                        //
+                        // The digest reported this as a "63.5% refusal rate", which is
+                        // wrong twice over. Nothing refused — `edgeStat=refused` occurred
+                        // ZERO times in driveassist-2026-08-15 — and the 33,128 discards
+                        // are not a spread of bad widths: every single one is exactly
+                        // `implausible:0.0`. Both calls returned true and returned the
+                        // SAME POINT, so the native answered h+90 and h-90 identically.
+                        // That is one reproducible native-usage fault (the heading
+                        // argument is the leading suspect), not noisy data — but the
+                        // shape of the old label hid it as statistics.
+                        //
+                        // Sub-classify it, and stop throwing away eL/eR: they are
+                        // computed two lines above and were discarded purely because
+                        // roadEdgeValid stays false. They are the diagnostic.
+                        roadEdgeStat = (roadWidthMeasM <= 0.001f
+                                ? "degenerate:samepoint"
+                                : roadWidthMeasM <= 0.5f
+                                    ? "implausible-narrow:" + roadWidthMeasM.ToString("F1")
+                                    : "implausible-wide:" + roadWidthMeasM.ToString("F1"))
+                            + " eL=" + roadEdgeLeftM.ToString("F1")
+                            + " eR=" + roadEdgeRightM.ToString("F1")
+                            + " sep=" + Dist2D(eL, eR).ToString("F2");
+                    }
                 }
             }
+            else roadEdgeStat = "off";
 
             if (getSetting("groundNormalV2") == 1)
             {
@@ -16651,6 +18511,31 @@ namespace GrandTheftAccessibility
         private float whlSlip = 0f;        // WheelSpeed - Speed: + spin, - lockup
         private float whlMinTyre = -1f;
         private bool  whlAnyBurst = false;
+        // iter-64: mechanical degradation, distinct from TireHealth. whlMinSteerLimit is
+        // VehicleWheel.SteeringLimitMultiplier - the direct link between wheel damage and
+        // how much steering the car will actually give back.
+        private float whlMinHealth = -1f;
+        private float whlMinSteerLimit = -1f;
+
+        // ---- iter-64: airborne / road-departure episodes ----
+        //
+        // 08-19 incident 38 was 55% of the session's cost and opens with the car leaving a
+        // structure at z=59.6 and reaching z=13.0 in 1.99 s - a 46 m fall - and the string
+        // "airborne" appears ZERO times in the entire 67.6 MB log. The existing annotation
+        // is appended only when IsInAir is true AT THE FRAME AN AUTO-COLLISION IS EMITTED,
+        // and a collision fires on LANDING, which is the one instant IsInAir is false. So
+        // the detector could never have fired. BIG_Z_CHANGE did not catch it either: it is
+        // a per-frame delta, and a smooth high-speed fall never trips one.
+        //
+        // This tracks the episode instead: armed on losing all wheel contact, closed on
+        // regaining it, and reported with the cumulative descent rather than a frame delta.
+        // The mod wrote full brake and full-lock steer for the whole of that fall.
+        private bool  airEpiActive = false;
+        private long  airEpiStartTicks = 0;
+        private float airEpiStartZ = 0f, airEpiMinZ = 0f, airEpiStartSpd = 0f;
+        private int   airEpiFrames = 0;
+        private const long AIR_EPI_MIN_MS = 350L;   // below this is a kerb hop, not a fall
+        private const float AIR_EPI_MIN_DROP_M = 2.0f;
         private bool  whlPlaneValid = false;
         private float whlPitchDeg = 0f, whlCamberDeg = 0f;
         private long  lastWheelHeartbeatTicks = 0;
@@ -16792,6 +18677,8 @@ namespace GrandTheftAccessibility
                         whlCount = ws.Length > 16 ? 16 : ws.Length;
                         whlContactMask = 0;
                         whlMinTyre = -1f;
+                        whlMinHealth = -1f;
+                        whlMinSteerLimit = -1f;
                         whlAnyBurst = false;
 
                         GTA.Math.Vector3 vp = veh.Position;
@@ -16812,6 +18699,22 @@ namespace GrandTheftAccessibility
                             bool touching = w.IsTouchingSurface;
                             if (touching) whlContactMask |= (1 << i);
                             if (w.IsBursted) whlAnyBurst = true;
+                            // iter-64: wrapped individually - a wheel read on a wrecked
+                            // car is exactly when a property throws, and losing the whole
+                            // wheels: block to one bad member is how a session goes dark.
+                            try
+                            {
+                                float wh = w.Health;
+                                if (whlMinHealth < 0f || wh < whlMinHealth) whlMinHealth = wh;
+                            }
+                            catch { }
+                            try
+                            {
+                                float sl = w.SteeringLimitMultiplier;
+                                if (whlMinSteerLimit < 0f || sl < whlMinSteerLimit)
+                                    whlMinSteerLimit = sl;
+                            }
+                            catch { }
                             float th = w.TireHealth;
                             if (whlMinTyre < 0f || th < whlMinTyre) whlMinTyre = th;
 
@@ -16900,6 +18803,8 @@ namespace GrandTheftAccessibility
                  // lane-depart.
                  : (giveWayBrakeRequest > 0.05f
                     && giveWayBrakeRequest + 0.001f >= curveBrakeRequest) ? "giveway"
+                 : (wildfireBrakeRequest > 0.05f
+                    && wildfireBrakeRequest + 0.001f >= curveBrakeRequest) ? "wildfire"
                  // iter-33: lane-depart also flows through curveBrakeRequest;
                  // on 07-02 the session's dominant brake mode printed as
                  // owner=curve and was invisible in the owner field.
@@ -16958,7 +18863,12 @@ namespace GrandTheftAccessibility
                         + " ctrlRet=" + (controlWriteLog.Length > 0 ? controlWriteLog.ToString() : "-")
                         + " wheels=" + (whlValid ? Convert.ToString(whlContactMask, 2) : "-")
                         + " spd=" + (Game.Player.Character.IsInVehicle()
-                            ? Game.Player.Character.CurrentVehicle.Speed.ToString("F1") : "-"));
+                            ? Game.Player.Character.CurrentVehicle.Speed.ToString("F1") : "-")
+                        // iter-64: see HealthTag. A dead brake channel and a wrecked car
+                        // produced identical lines before this.
+                        + HealthTag(Game.Player.Character.IsInVehicle()
+                            ? Game.Player.Character.CurrentVehicle : null)
+                        + WheelDamageTag());
                 }
             }
             else actDivBrakeSinceTicks = 0;
@@ -17005,7 +18915,13 @@ namespace GrandTheftAccessibility
                         + " lockObsDeg=" + observedSteerLockDeg.ToString("F1")
                         + " limitDeg=" + (SteerNormLimitRad(geometryV2Cached) * 180f / (float)Math.PI).ToString("F1")
                         + " heldMs=" + ((now - actDivSteerSinceTicks) / 10000)
-                        + " written=" + lastSteerWritten);
+                        + " written=" + lastSteerWritten
+                        // iter-64: steerLim in particular - a damaged wheel lowers its own
+                        // steering limit, which is the leading candidate for the LOCK
+                        // SUSPECT rows where achDeg ran to 2x the reported lock.
+                        + HealthTag(Game.Player.Character.IsInVehicle()
+                            ? Game.Player.Character.CurrentVehicle : null)
+                        + WheelDamageTag());
                 }
             }
             else actDivSteerSinceTicks = 0;
@@ -17323,6 +19239,31 @@ namespace GrandTheftAccessibility
             float nodeHeading;
             float distance;
 
+            // iter-71 B3: honour the cooldown this method has always ignored.
+            // ROAD_TELEPORT_COOLDOWN_TICKS is checked only inside the roadTeleport
+            // monitor; every LADDER teleport calls straight in here and skips it, and
+            // none of them stamped lastTeleportTicks either — so the cooldown could not
+            // have worked even if it had been checked. A blind driver being relocated
+            // twice in three seconds has no way to build a picture of where they are.
+            // The ladder gets a longer gap than the drift monitor's 3 s, because a
+            // repeat here means the previous teleport did not solve anything.
+            if (getSetting("stuckConvergeV2") == 1)
+            {
+                GateReach("stuckConvergeV2");
+                long tpNow = ModClock.Ticks;
+                if (lastTeleportTicks > 0
+                    && tpNow - lastTeleportTicks < STUCK_CONVERGE_TELEPORT_COOLDOWN)
+                {
+                    if (driveLogger != null && driveLogger.IsRunning)
+                        driveLogger.Write("[F" + driveLogFrameCount + "] EVENT stuck-converge:"
+                            + " veto=teleport-cooldown"
+                            + " sinceLastMs=" + ((tpNow - lastTeleportTicks) / 10000L)
+                            + " needMs=" + (STUCK_CONVERGE_TELEPORT_COOLDOWN / 10000L));
+                    GateVeto("stuckConvergeV2");
+                    return false;
+                }
+            }
+
             if (FindNearestSameDirectionRoadNode(playerVeh, out nodePos, out nodeHeading, out distance))
             {
                 // Add slight Z offset to prevent clipping (0.5m above road)
@@ -17341,6 +19282,9 @@ namespace GrandTheftAccessibility
                 wasCloseToRoad = true;
                 offRoadStartTicks = 0;
                 lastValidRoadDistance = 0f;
+                // iter-71 B3: stamp it. Without this the cooldown above — and the
+                // sinceTpMs field on every damage emitter — measure nothing.
+                lastTeleportTicks = ModClock.Ticks;
 
                 Speech.Info("Teleported to road");
                 return true;
@@ -17366,6 +19310,14 @@ namespace GrandTheftAccessibility
             distance = 999f;
             headingDelta = 0f;
             lastRecoverySpeedFlipReject = false; // iter-24 R2
+            // iter-71 A2: reset the reason counters per search, not per session.
+            recoverySearchScanned = 0;
+            recoverySearchRejPerp = 0;
+            recoverySearchRejFlip = 0;
+            recoverySearchRejZ = 0;
+            recoverySearchUnloaded = false;
+            recoverySearchPrimaryHit = false;
+            recoverySearchUturnReject = false;
 
             GTA.Math.Vector3 playerPos = playerVeh.Position;
             float vehicleHeading = playerVeh.Heading;
@@ -17436,13 +19388,20 @@ namespace GrandTheftAccessibility
                     // Reject it regardless of speed; the scored FALLBACK (graduated
                     // flipPenalty) picks a reachable node or the car brakes straight.
                     bool flipReject = Math.Abs(hd) > RECOVERY_FLIP_ANGLE;
-                    if (Math.Abs(p.Z - playerPos.Z) <= PATH_NODE_MAX_Z_DELTA * 2f
-                        && !perpReject && !flipReject)
+                    bool zReject = Math.Abs(p.Z - playerPos.Z) > PATH_NODE_MAX_Z_DELTA * 2f;
+                    // iter-71 A2: count which guard turned the primary node away.
+                    // These three fall through to the scored fallback rather than
+                    // failing the search, so before now they left no trace at all.
+                    if (zReject) recoverySearchRejZ++;
+                    if (perpReject) recoverySearchRejPerp++;
+                    if (flipReject) recoverySearchRejFlip++;
+                    if (!zReject && !perpReject && !flipReject)
                     {
                         nodePos = p;
                         nodeHeading = derivedHeading;
                         distance = d;
                         headingDelta = hd;
+                        recoverySearchPrimaryHit = true;
                         return true;
                     }
                 }
@@ -17457,6 +19416,7 @@ namespace GrandTheftAccessibility
             if (!ArePathNodesLoadedAt(playerPos, "recoveryFallback"))
             {
                 lastNodeQueryNodesUnloaded = true;
+                recoverySearchUnloaded = true;
                 return false;
             }
             float bestScore = float.MaxValue;
@@ -17470,6 +19430,7 @@ namespace GrandTheftAccessibility
                     playerPos.X, playerPos.Y, playerPos.Z,
                     n, outP, outH, 1, 3.0f, 0f);
                 if (!ok) continue;
+                recoverySearchScanned++;   // iter-71 A2
 
                 GTA.Math.Vector3 p = outP.GetResult<GTA.Math.Vector3>();
                 float h = outH.GetResult<float>();
@@ -17512,7 +19473,23 @@ namespace GrandTheftAccessibility
                 && Math.Abs(headingDelta) > RECOVERY_FLIP_ANGLE)
             {
                 lastRecoverySpeedFlipReject = true;
+                recoverySearchUturnReject = true;   // iter-71 A2
                 found = false;
+            }
+
+            // iter-71 A3: a false return must leave NOTHING behind in the out
+            // parameters. This path used to keep the rejected candidate's position,
+            // distance and heading delta, and EVENT recovery-search prints all of
+            // them — so a `found=False` row carried a real-looking target, and
+            // flipAvoided / perpBand / targetBlocked were computed from a node the
+            // search had just thrown away. That is a row that reads like a successful
+            // search, on the exact diagnosis this iteration exists to make readable.
+            if (!found)
+            {
+                nodePos = GTA.Math.Vector3.Zero;
+                nodeHeading = 0f;
+                distance = 999f;
+                headingDelta = 0f;
             }
 
             return found;
@@ -17923,7 +19900,7 @@ namespace GrandTheftAccessibility
 
             long now = DateTime.Now.Ticks;
             float speed = playerVeh.Speed;
-            bool inRecovery = currentDriveMode != DriveMode.LaneKeeping;
+            bool inRecovery = !IsLaneKeepingMode();
             float skewMag = Math.Abs(roadHeadingDelta);
 
             // iter-13 Patch S: mode-agnostic no-progress arm. Independent of the
@@ -18308,7 +20285,7 @@ namespace GrandTheftAccessibility
             // Track LaneKeeping<->recovery flips in a rolling window. Runs every call so
             // the LaneKeeping half of an oscillation can't reset the count (that is the
             // flaw R2 hit on the 06-18 ~90-frame flip-flop).
-            bool involvesRecovery = currentDriveMode != DriveMode.LaneKeeping
+            bool involvesRecovery = !IsLaneKeepingMode()
                 || recoveryGiveupLastMode != DriveMode.LaneKeeping;
             if (currentDriveMode != recoveryGiveupLastMode)
             {
@@ -18341,6 +20318,9 @@ namespace GrandTheftAccessibility
             else
             {
                 recoveryGiveupSinceTicks = 0;
+                // iter-57 C: recovery is no longer engaged, so the next give-up (if any)
+                // is a fresh episode and gets its own deferral budget.
+                recoveryGiveupTempDeferrals = 0;
             }
             // The flip-cycle trigger only counts if the thrashing made NO net progress
             // (a working recovery that briefly flickers modes while driving clear must
@@ -18360,8 +20340,79 @@ namespace GrandTheftAccessibility
                 ? RECOVERY_GIVEUP_DAMAGE_TICKS : RECOVERY_GIVEUP_TICKS;
             bool recoveryStalledTooLong = recoveryEngaged && recoveryGiveupSinceTicks != 0
                 && now - recoveryGiveupSinceTicks > giveupWindow;
+            // ---- iter-57 F: DO NOT GIVE UP WHILE THE LADDER IS STILL CLIMBING ----
+            // Reaching layer 3 costs >=10 s of layer-2 (STUCK_LAYER2_TICKS) on top of
+            // layer-1 time, and this give-up fires at 12 s. On 08-14 that raced out the
+            // top two rungs entirely: 9 of 10 escalations stopped at layer 2, layer 3
+            // was reached once (by the cumulative bypass, not by time), layer 4 never.
+            // Six give-ups, and not one automatic teleport in the whole session.
+            //
+            // So: while the ladder has rungs left to try, let it try them. The
+            // damage-accruing path (RECOVERY_GIVEUP_DAMAGE_TICKS, 2.5 s) is deliberately
+            // NOT held back — a car being ground down must still hand back fast — and
+            // neither is the flip-cycle trigger, which means something else is wrong.
+            if (recoveryStalledTooLong && getSetting("stuckEscalationV2") == 1
+                && !DamageWhileWedged(speed))
+            {
+                GateReach("stuckEscalationV2");
+                bool ladderHasRungsLeft = !stuckAutodriveEngaged && stuckLayer < 4;
+                // Only worth waiting for if escalation is actually reachable from here:
+                // the cumulative clock must be running and still short of the teleport.
+                bool escalationLive = stuckLocusValid
+                    && stuckLocusCumTicks < STUCK_LOCUS_TELEPORT_V2_TICKS;
+                // Hard ceiling so this can never strand: twice the give-up window.
+                bool withinDeferCeiling =
+                    now - recoveryGiveupSinceTicks < giveupWindow * 2L;
+                if (ladderHasRungsLeft && escalationLive && withinDeferCeiling)
+                {
+                    GateFire("stuckEscalationV2");
+                    recoveryStalledTooLong = false;
+                    if (driveLogger != null && driveLogger.IsRunning
+                        && now - lastGiveupHeldLogTicks > 30000000L)
+                    {
+                        lastGiveupHeldLogTicks = now;
+                        driveLogger.Write("[F" + driveLogFrameCount
+                            + "] EVENT giveup-held-for-ladder:"
+                            + " heldMs=" + ((now - recoveryGiveupSinceTicks) / 10000L)
+                            + " windowMs=" + (giveupWindow / 10000L)
+                            + " layer=" + stuckLayer
+                            + " autodrive=" + stuckAutodriveEngaged
+                            + " locusCumMs=" + (stuckLocusCumTicks / 10000L)
+                            + " teleportAtMs=" + (STUCK_LOCUS_TELEPORT_V2_TICKS / 10000L));
+                    }
+                }
+                else GateVeto("stuckEscalationV2");
+            }
             if (flipCycle || recoveryStalledTooLong)
             {
+                // ---- iter-57 C: NEVER HAND BACK A CAR YOU ARE NOT HOLDING ----
+                // On 08-14 the mod said "Drive assist can't free the car. You have
+                // control." while a native TA_GO_IN_REVERSE was still driving the car
+                // backwards: thrAch stayed at -0.50 for a further 1.4 s with the
+                // player's own throttle reading 1.00 and doing nothing. A blind driver
+                // was told they were in charge of a car that was driving itself.
+                //
+                // Cancel first, then hand over on a later evaluation once the cancel
+                // has been verified. Bounded to two deferrals so a native that refuses
+                // to cancel can never trap the handover — after that we hand over
+                // anyway and SAY that the car may still be moving itself, because the
+                // player being uninformed is worse than the player being warned.
+                if (TempActionLive() && recoveryGiveupTempDeferrals < 2)
+                {
+                    recoveryGiveupTempDeferrals++;
+                    ClearTempAction("giveup-pre");
+                    if (driveLogger != null && driveLogger.IsRunning)
+                        driveLogger.Write("[F" + driveLogFrameCount
+                            + "] EVENT giveup-deferred:"
+                            + " reason=tempActionLive"
+                            + " was=" + tempActionCancelWas
+                            + " deferral=" + recoveryGiveupTempDeferrals
+                            + " spd=" + playerVeh.Speed.ToString("F2"));
+                    return;
+                }
+                bool handoverUnclean = TempActionLive();
+                recoveryGiveupTempDeferrals = 0;
+
                 long heldMs = recoveryGiveupSinceTicks != 0 ? (now - recoveryGiveupSinceTicks) / 10000 : 0;
                 int flips = recoveryFlipCount;
                 // Drop every recovery maneuver and return to plain LaneKeeping.
@@ -18369,6 +20420,7 @@ namespace GrandTheftAccessibility
                 pivotEscapeActive = false;
                 alignmentEngageReverse = false;
                 currentDriveMode = DriveMode.LaneKeeping;
+                driveModeWhy = "recovery-giveup";   // iter-71 A1
                 recoveryGiveupSinceTicks = 0;
                 recoveryFlipCount = 0;
                 recoveryGiveupLastMode = DriveMode.LaneKeeping;
@@ -18386,6 +20438,41 @@ namespace GrandTheftAccessibility
                 float giveupFwdClear = navAssistDistCenter;
                 bool giveupHazardClose = suspendV2
                     && giveupFwdClear < GIVEUP_HAZARD_CLEAR_M;
+                // ---- iter-57 G (giveupHazardV2): ASK THE CHANNEL THAT CAN SEE IT ----
+                // Across all six give-ups on 08-14 this read 13.5, 13.3, 16.2, 17.1,
+                // none, none — so recoverySuspendV2 censused eval:5/fire:0 and every
+                // handover was the bare "You have control" with no direction, no
+                // throttle hold. The images show what was actually in front of the car:
+                // a corrugated fence with a bush under the bumper, and a river.
+                //
+                // navAssistDistCenter cannot see any of that. 99.9% of the 6607
+                // static-cast rejects were `belowBumper` — fences, kerbs, tyre stacks,
+                // bushes and shorelines are all below bumper height. cachedLowObstaclePos
+                // already carries exactly this geometry for `blockedAhead`; it simply
+                // never reached the give-up.
+                string giveupHazardSrc = "nav";
+                if (getSetting("giveupHazardV2") == 1)
+                {
+                    GateReach("giveupHazardV2");
+                    // `none` (>=900) is NOT clearance. It is no reading, and it must
+                    // never satisfy a safety test — two of the six give-ups took the
+                    // "not hazardous" branch on exactly that value.
+                    if (giveupFwdClear >= 900f)
+                    {
+                        giveupFwdClear = -1f;           // unknown, rendered as such below
+                        giveupHazardClose = true;       // fail closed
+                        giveupHazardSrc = "unknown";
+                    }
+                    float lowDist = LowObstacleDistanceAhead(playerVeh);
+                    if (lowDist >= 0f && (giveupFwdClear < 0f || lowDist < giveupFwdClear))
+                    {
+                        giveupFwdClear = lowDist;
+                        giveupHazardSrc = "lowObstacle";
+                        giveupHazardClose = lowDist < GIVEUP_HAZARD_CLEAR_M;
+                    }
+                    if (giveupHazardClose) GateFire("giveupHazardV2");
+                    else GateVeto("giveupHazardV2");
+                }
                 assistSuspended = true;
                 assistSuspendedSinceTicks = ModClock.Ticks; // ModClock pair: K4 auto-resume reads ModClock
                 assistGraceUntilTicks = 0;
@@ -18402,7 +20489,9 @@ namespace GrandTheftAccessibility
                 {
                     if (suspendV2) GateFire("recoverySuspendV2");
                     giveupThrottleHoldUntilTicks = ModClock.Ticks + GIVEUP_THROTTLE_HOLD_TICKS;
-                    giveupHazardDist = giveupFwdClear;
+                    // iter-57 G: -1 means "no reading", not "zero metres away". Do not
+                    // let an unknown become a confident distance downstream.
+                    giveupHazardDist = giveupFwdClear >= 0f ? giveupFwdClear : 999f;
                 }
                 if (now - lastRecoveryGiveupSpeechTicks > 100000000L) // 10 s debounce
                 {
@@ -18410,7 +20499,15 @@ namespace GrandTheftAccessibility
                     // iter-40: name the hazard and its side. "You have control" with no
                     // direction is useless to a blind driver pointed at a wall — the
                     // whole point of the handover is that they now need to steer.
-                    if (suspendV2 && giveupHazardClose)
+                    //
+                    // iter-57 C: and if the cancel did not take, do NOT claim they have
+                    // control. Saying so when the car is still driving itself is worse
+                    // than saying nothing, because it tells them to act on a wheel that
+                    // is not connected.
+                    if (handoverUnclean)
+                        Speech.Critical("Drive assist can't free the car. "
+                            + "The car may still be moving on its own. Brake now.");
+                    else if (suspendV2 && giveupHazardClose)
                         Speech.Critical("Drive assist can't free the car. You have control. "
                             + DescribeNearestHazard() + ".");
                     else
@@ -18422,9 +20519,14 @@ namespace GrandTheftAccessibility
                         + " reason=" + (flipCycle ? "flipcycle" : "noprogress")
                         + " flips=" + flips
                         + " heldMs=" + heldMs
-                        + " fwdClear=" + (giveupFwdClear < 900f
-                            ? giveupFwdClear.ToString("F1") : "none")
+                        // iter-57 G: "none" used to mean BOTH ">=900, i.e. no reading"
+                        // and was then treated as clear. Say unknown when it is unknown,
+                        // and name which channel the number came from.
+                        + " fwdClear=" + (giveupFwdClear < 0f ? "unknown"
+                            : giveupFwdClear < 900f ? giveupFwdClear.ToString("F1") : "none")
+                        + " hazardSrc=" + giveupHazardSrc
                         + " hazardClose=" + giveupHazardClose
+                        + " handoverUnclean=" + handoverUnclean   // iter-57 C
                         + " pos=(" + playerVeh.Position.X.ToString("F1") + ","
                         + playerVeh.Position.Y.ToString("F1") + ")");
                     SnapshotFailure("RECOVERY-GIVEUP", null);
@@ -18438,8 +20540,8 @@ namespace GrandTheftAccessibility
                         + " trueSpd=" + trueSpeed.ToString("F2")
                         + " bh=" + playerVeh.BodyHealth.ToString("F0")
                         + " eh=" + playerVeh.EngineHealth.ToString("F0")
-                        + " fwdClear=" + (giveupFwdClear < 900f
-                            ? giveupFwdClear.ToString("F1") : "none")
+                        + " fwdClear=" + (giveupFwdClear < 0f ? "unknown"   // iter-57 G
+                            : giveupFwdClear < 900f ? giveupFwdClear.ToString("F1") : "none")
                         + " throttleHeld=" + giveupHazardClose
                         + " pos=(" + playerVeh.Position.X.ToString("F1") + ","
                         + playerVeh.Position.Y.ToString("F1") + ")");
@@ -18645,13 +20747,40 @@ namespace GrandTheftAccessibility
                         {
                             // iter-36 P1-1: the invalidation was silent — this is
                             // the event that explains every later cumMs=0.
+                            // iter-57 F: decay, do not discard. On 08-14 this threw away
+                            // 32798 ms — the largest accrual of the whole session, and
+                            // already past the autodrive threshold — because the car
+                            // briefly moved fast. If it re-wedges at the same spot the
+                            // countdown restarts from zero and never completes again.
+                            bool decayV2 = getSetting("stuckEscalationV2") == 1;
+                            long cumWas = stuckLocusCumTicks;
+                            long cumKept = decayV2
+                                ? (long)(stuckLocusCumTicks * STUCK_LOCUS_FAST_DECAY) : 0L;
                             if (driveLogger != null && driveLogger.IsRunning)
                                 driveLogger.Write("[F" + driveLogFrameCount + "] EVENT stuck-locus-clear:"
                                     + " reason=fast"
-                                    + " cumMsLost=" + (stuckLocusCumTicks / 10000)
+                                    + " cumMsLost=" + ((cumWas - cumKept) / 10000)
+                                    + " cumMsKept=" + (cumKept / 10000)
+                                    + " decay=" + decayV2
                                     + " pos=" + FmtV(stuckLocusPos));
-                            stuckLocusValid = false;
-                            stuckLocusCumTicks = 0;
+                            // Keep the locus VALID when decaying, so the decayed clock
+                            // survives. Invalidating it would send the next arm down the
+                            // reset="first" path, which zeroes cumMs and would discard
+                            // the carry we just computed. If the car has genuinely left,
+                            // the next arm is >STUCK_LOCUS_RADIUS away and takes the
+                            // reset="moved" path, which zeroes it correctly.
+                            stuckLocusValid = decayV2;
+                            stuckLocusCumTicks = cumKept;
+                            // Re-arm the window so decay is geometric per 10 s of
+                            // sustained healthy driving (half, then quarter, ...) rather
+                            // than firing every frame. Sustained escape still erases the
+                            // clock; a brief lurch no longer does.
+                            stuckLocusFastSinceTicks = decayV2 ? now : 0;
+                            if (decayV2 && stuckLocusCumTicks < 10000000L)
+                            {
+                                stuckLocusCumTicks = 0;
+                                stuckLocusValid = false;
+                            }
                         }
                     }
                     else stuckLocusFastSinceTicks = 0;
@@ -18698,7 +20827,7 @@ namespace GrandTheftAccessibility
                     if (driveLogger != null && driveLogger.IsRunning)
                         driveLogger.Write("[F" + driveLogFrameCount + "] EVENT stuck-layer:"
                             + " layer=2 reason=reverse skew=" + roadHeadingDelta.ToString("F1"));
-                        SnapshotFailure("STUCK-LAYER", null);
+                    SnapshotFailure("STUCK-LAYER", null);   // self-gating; see D1 note at :7991
                 }
                 stuckLayer = 2;
                 stuckLayerSinceTicks = now;
@@ -18724,6 +20853,24 @@ namespace GrandTheftAccessibility
                 // somewhere it is safe to be slow.
                 long escAutodriveTicks = STUCK_LOCUS_AUTODRIVE_TICKS;
                 long escTeleportTicks = STUCK_LOCUS_TELEPORT_TICKS;
+                // ---- iter-57 F (stuckEscalationV2): thresholds a real wedge reaches ----
+                // 08-14 proved both escalation routes unreachable. The per-episode route
+                // stopped at layer 2 in 9 of 10 escalations, because reaching layer 3
+                // needs 10 s of layer-2 while the give-up fires at 12 s. The cumulative
+                // route is the designed answer to that — and its 30 s/60 s thresholds
+                // are above what a wedge actually accrues: the river strand ran ~2 min
+                // of wall clock and four give-ups and reached cumMs=17516 (autodrive
+                // still 12 s away, teleport never in sight). The single highest total
+                // all session was 32798 ms, and stuck-locus-clear discarded it.
+                //
+                // 60 s of ACCRUED distress is not a wedge, it is an abandoned session.
+                if (getSetting("stuckEscalationV2") == 1)
+                {
+                    GateReach("stuckEscalationV2");
+                    escAutodriveTicks = STUCK_LOCUS_AUTODRIVE_V2_TICKS;
+                    escTeleportTicks = STUCK_LOCUS_TELEPORT_V2_TICKS;
+                    GateFire("stuckEscalationV2");
+                }
                 bool onRoadway = false;
                 if (getSetting("stuckLadderV2") == 1 && speed < 1.5f)
                 {
@@ -18750,7 +20897,16 @@ namespace GrandTheftAccessibility
                             + " onRoadway=" + onRoadway
                             + " cumMs=" + (stuckLocusCumTicks / 10000)
                             + " thresholdMs=" + (escTeleportTicks / 10000));
-                        SnapshotFailure("STUCK-LAYER", null);
+                    SnapshotFailure("STUCK-LAYER", null);   // self-gating; see D1 note at :7991
+                    // iter-71 B3: the other way into a layer-4 teleport. Counted the
+                    // same way, and refused the same way, or the cooldown and the
+                    // attempt cap would both be reachable only via autodrive.
+                    if (!StuckConvergeAllowEscalation(playerVeh, "locus-cum"))
+                    {
+                        ResetStuckRecovery();
+                        ForceReleaseAssistHold(playerVeh);
+                        return;
+                    }
                     // Announce BEFORE moving — a blind passenger must never be
                     // relocated without warning.
                     Speech.Critical(onRoadway
@@ -18758,8 +20914,32 @@ namespace GrandTheftAccessibility
                         : "Still stuck here. Teleporting to nearest road.");
                     TeleportToNearestRoad(playerVeh);
                     ResetStuckRecovery();
-                    stuckLocusValid = false;
-                    stuckLocusCumTicks = 0;
+                    // iter-71 B3: do NOT zero the locus clock here.
+                    //
+                    // This is the loop. Teleporting and then clearing the accrual means
+                    // escalation restarts from zero at the new location, so the car can
+                    // fall to the floor and climb back to a teleport every ~20.5 s
+                    // indefinitely. iter-57 already made exactly this fix for the
+                    // fast-move path ("decay, do not discard") and this branch was
+                    // missed. Carry the same decayed value across so a car that keeps
+                    // re-wedging escalates FASTER each time rather than resetting.
+                    if (getSetting("stuckConvergeV2") == 1)
+                    {
+                        long cumCarried = (long)(stuckLocusCumTicks * STUCK_LOCUS_FAST_DECAY);
+                        if (driveLogger != null && driveLogger.IsRunning)
+                            driveLogger.Write("[F" + driveLogFrameCount + "] EVENT stuck-converge:"
+                                + " carry=post-teleport"
+                                + " cumMsWas=" + (stuckLocusCumTicks / 10000)
+                                + " cumMsKept=" + (cumCarried / 10000)
+                                + " attempts=" + stuckEscalationAttempts);
+                        stuckLocusValid = false;
+                        stuckLocusCumTicks = cumCarried;
+                    }
+                    else
+                    {
+                        stuckLocusValid = false;
+                        stuckLocusCumTicks = 0;
+                    }
                     return;
                 }
                 if (stuckLocusCumTicks > escAutodriveTicks)
@@ -18770,7 +20950,7 @@ namespace GrandTheftAccessibility
                             + " onRoadway=" + onRoadway
                             + " cumMs=" + (stuckLocusCumTicks / 10000)
                             + " thresholdMs=" + (escAutodriveTicks / 10000));
-                        SnapshotFailure("STUCK-LAYER", null);
+                    SnapshotFailure("STUCK-LAYER", null);   // self-gating; see D1 note at :7991
                     if (onRoadway)
                         Speech.Critical("Stopped in traffic. Driving clear.");
                     EngageStuckAutodrive(playerVeh);
@@ -18834,6 +21014,7 @@ namespace GrandTheftAccessibility
                     // currentDriveMode != LaneKeeping). Does not re-stamp
                     // lastModeChangeTicks (already stamped earlier this pass).
                     currentDriveMode = DriveMode.AligningHeading;
+                    driveModeWhy = "pivot-forced";   // iter-71 A1
                     isOnValidRoad = true;
                     alignmentEngageReverse = !pivotPhaseForward;
                     roadSteerCorrection = pivotPhaseForward ? pivotTurnSign : -pivotTurnSign;
@@ -18885,15 +21066,22 @@ namespace GrandTheftAccessibility
                     // wedged, which is why it can look like it worked in the log
                     // and not have moved. TA_GO_IN_REVERSE asks the engine to drive
                     // the car backwards instead, wheels and all.
+                    //
+                    // iter-57 A: this used to pass STUCK_LAYER2_TICKS/10000 = 10 000 ms
+                    // — the LADDER RUNG's whole duration — as the task duration, so one
+                    // call bought the engine ten uninterruptible seconds of full reverse.
+                    // Ask for one scan's worth instead and re-ask each tick; every
+                    // re-ask re-runs the rear-clearance guard. TryTempAction caps this
+                    // regardless, but the caller should not be lying about what it wants.
                     TryTempAction(playerVeh, TA_GO_IN_REVERSE,
-                        (int)(STUCK_LAYER2_TICKS / 10000L), "layer2-reverse");
+                        TEMP_ACTION_MAX_MS, "layer2-reverse");
 
                     if (now - stuckLayerSinceTicks > STUCK_LAYER2_TICKS)
                     {
                         if (driveLogger != null && driveLogger.IsRunning)
                             driveLogger.Write("[F" + driveLogFrameCount + "] EVENT stuck-layer:"
                                 + " layer=3 reason=reverse-timeout");
-                            SnapshotFailure("STUCK-LAYER", null);
+                        SnapshotFailure("STUCK-LAYER", null);   // self-gating; see D1 note at :7991
                         EngageStuckAutodrive(playerVeh);
                     }
                 }
@@ -18911,12 +21099,97 @@ namespace GrandTheftAccessibility
         /// <summary>Layer 3 entry: engage the auto-drive wander task so the game
         /// AI drives the car out. Disables the assist (see the !isAutodriving
         /// gate in onTick); MonitorStuckAutodrive watches for recovery.</summary>
+        /// <summary>
+        /// iter-71 B3: may the ladder escalate again, here, now?
+        ///
+        /// This is the counter the ladder never had. It deliberately survives
+        /// ResetStuckRecovery — which is called from five sites, three of them ordinary
+        /// mode transitions — because a counter that any mode change can erase is not a
+        /// counter, it is the reason the loop exists.
+        ///
+        /// The series is anchored to a POSITION rather than to a clock alone, so
+        /// genuinely escaping resets it while being teleported fifty metres along the
+        /// same blocked road does not. That distinction is the whole point: the ladder
+        /// was never wrong to try, it was wrong to try identically forever.
+        /// </summary>
+        private bool StuckConvergeAllowEscalation(Vehicle playerVeh, string site)
+        {
+            if (getSetting("stuckConvergeV2") != 1) return true;
+            GateReach("stuckConvergeV2");
+
+            long now = ModClock.Ticks;
+            GTA.Math.Vector3 here = playerVeh != null && playerVeh.Exists()
+                ? playerVeh.Position : GTA.Math.Vector3.Zero;
+
+            bool movedClear = stuckEscalationAnchorPos != GTA.Math.Vector3.Zero
+                && PlanarDist(here, stuckEscalationAnchorPos) > STUCK_CONVERGE_ESCAPE_M;
+            bool seriesStale = stuckEscalationLastTicks > 0
+                && now - stuckEscalationLastTicks > STUCK_CONVERGE_SERIES_TICKS;
+
+            if (stuckEscalationAnchorPos == GTA.Math.Vector3.Zero || movedClear || seriesStale)
+            {
+                if (stuckEscalationAttempts > 0 && driveLogger != null && driveLogger.IsRunning)
+                    driveLogger.Write("[F" + driveLogFrameCount + "] EVENT stuck-converge:"
+                        + " series=reset"
+                        + " why=" + (movedClear ? "moved-clear" : seriesStale ? "stale" : "first")
+                        + " attemptsWere=" + stuckEscalationAttempts);
+                stuckEscalationAttempts = 0;
+                stuckEscalationAnchorPos = here;
+                stuckConvergeHandedBack = false;
+            }
+
+            stuckEscalationLastTicks = now;
+            if (stuckEscalationAttempts >= STUCK_CONVERGE_MAX_ATTEMPTS)
+            {
+                if (driveLogger != null && driveLogger.IsRunning)
+                    driveLogger.Write("[F" + driveLogFrameCount + "] EVENT stuck-converge:"
+                        + " veto=attempts-exhausted"
+                        + " site=" + site
+                        + " attempts=" + stuckEscalationAttempts
+                        + " anchor=" + FmtV(stuckEscalationAnchorPos)
+                        + " movedM=" + PlanarDist(here, stuckEscalationAnchorPos).ToString("F1"));
+                GateVeto("stuckConvergeV2");
+                if (!stuckConvergeHandedBack)
+                {
+                    stuckConvergeHandedBack = true;
+                    // Hand the car back OUT LOUD. The alternative is a silent loop,
+                    // and a blind driver cannot see that the rescue has given up.
+                    Speech.Critical("Drive assist cannot free the car here. It is yours.");
+                    SnapshotFailure("STUCK-CONVERGE-GIVEUP",
+                        "attempts=" + stuckEscalationAttempts);
+                }
+                return false;
+            }
+
+            stuckEscalationAttempts++;
+            GateFire("stuckConvergeV2");
+            if (driveLogger != null && driveLogger.IsRunning)
+                driveLogger.Write("[F" + driveLogFrameCount + "] EVENT stuck-converge:"
+                    + " escalate site=" + site
+                    + " attempt=" + stuckEscalationAttempts
+                    + "/" + STUCK_CONVERGE_MAX_ATTEMPTS
+                    + " anchor=" + FmtV(stuckEscalationAnchorPos)
+                    + " movedM=" + PlanarDist(here, stuckEscalationAnchorPos).ToString("F1")
+                    + " locusCumMs=" + (stuckLocusCumTicks / 10000L));
+            return true;
+        }
+
         private void EngageStuckAutodrive(Vehicle playerVeh)
         {
+            // iter-71 B3: the single funnel for layer-3 entry, so this is where the
+            // series is counted. Refusing here also removes the layer-4 teleports,
+            // which are only ever reached from layer 3 or the locus-cum bypass below.
+            if (!StuckConvergeAllowEscalation(playerVeh, "autodrive"))
+            {
+                ResetStuckRecovery();
+                ForceReleaseAssistHold(playerVeh);
+                return;
+            }
+
             Ped driver = (guardDriverActive && bodyguards.Count > 0
                             && bodyguards[0] != null && bodyguards[0].IsAlive)
                 ? bodyguards[0] : Game.Player.Character;
-            int drivingStyle = GetDrivingStyleFromFlags();
+            int drivingStyle = AutodriveStyle();
             Function.Call(Hash.SET_DRIVER_ABILITY, driver, 1.0f);
             Function.Call(Hash.SET_DRIVER_AGGRESSIVENESS, driver, 0.5f);
             Function.Call(Hash.TASK_VEHICLE_DRIVE_WANDER, driver, playerVeh,
@@ -18935,6 +21208,18 @@ namespace GrandTheftAccessibility
             // stuckPosition stays anchored so MonitorStuckAutodrive can measure
             // progress against where the car was wedged.
             Speech.Info("Drive assist still stuck. Auto-drive taking over.");
+            // iter-57 N: layer-3 entry was visible ONLY as a Speech line — the rung the
+            // whole ladder exists to reach had no event of its own, so "did we ever get
+            // to autodrive?" could only be answered by grepping speech text.
+            if (driveLogger != null && driveLogger.IsRunning)
+                driveLogger.Write("[F" + driveLogFrameCount + "] EVENT stuck-autodrive-engage:"
+                    + " layer=3"
+                    + " anchor=" + FmtV(stuckPosition)
+                    + " freedAt=" + STUCK_FREED_DISTANCE.ToString("F1")
+                    + " teleportAfterMs=" + (STUCK_LAYER3_TICKS / 10000L)
+                    + " locusCumMs=" + (stuckLocusCumTicks / 10000L)
+                    + " pos=" + (playerVeh != null && playerVeh.Exists()
+                        ? FmtV(playerVeh.Position) : "-"));
         }
 
         /// <summary>Layers 3-4: runs every tick from onTick while a stuck-recovery
@@ -18973,6 +21258,35 @@ namespace GrandTheftAccessibility
                 && movedDist < STUCK_FREED_DISTANCE)
             {
                 Speech.Info("Auto-drive stuck. Teleporting to nearest road.");
+                if (driveLogger != null && driveLogger.IsRunning)
+                    driveLogger.Write("[F" + driveLogFrameCount + "] EVENT stuck-layer:"
+                        + " layer=4 reason=autodrive-noprogress"
+                        + " movedM=" + movedDist.ToString("F1")
+                        + " heldMs=" + ((now - stuckLayerSinceTicks) / 10000L));
+                TeleportToNearestRoad(veh);
+                DisengageStuckAutodrive("You have control.");
+                return;
+            }
+
+            // ---- iter-57 N: THE THIRD BRANCH ----
+            // Success needs movedDist > FREED **and** a same-direction node within 8 m;
+            // the layer-4 teleport needs movedDist < FREED. A car that auto-drives more
+            // than 8 m into open desert without finding a node satisfies NEITHER, and
+            // wanders under AI control indefinitely with the assist disabled — which for
+            // a blind player is the mod having silently handed the car to the game.
+            //
+            // Give that state the same deadline as the no-progress case, measured from
+            // engagement, and resolve it the same way: put the car back on a road.
+            if (now - stuckLayerSinceTicks > STUCK_LAYER3_TICKS * 2L)
+            {
+                if (driveLogger != null && driveLogger.IsRunning)
+                    driveLogger.Write("[F" + driveLogFrameCount + "] EVENT stuck-layer:"
+                        + " layer=4 reason=autodrive-nonode"
+                        + " movedM=" + movedDist.ToString("F1")
+                        + " heldMs=" + ((now - stuckLayerSinceTicks) / 10000L)
+                        + " pos=" + FmtV(veh.Position));
+                SnapshotFailure("STUCK-LAYER", null);
+                Speech.Info("Auto-drive could not find a road. Moving to the nearest one.");
                 TeleportToNearestRoad(veh);
                 DisengageStuckAutodrive("You have control.");
             }
@@ -19044,6 +21358,42 @@ namespace GrandTheftAccessibility
         private long tempActionUntilTicks = 0;       // ModClock
         private string tempActionSite = null;
 
+        // ---- iter-57 A: CONTAINMENT ----
+        // 08-14 traced ~81% of the session's damage to this path. The layer-2 caller
+        // asked for TA_GO_IN_REVERSE with ms=10000 (STUCK_LAYER2_TICKS/10000); the
+        // engine then drove the car BACKWARDS from 0.04 to 16.7 m/s into a derelict
+        // forecourt for three impacts (F9059-F9249, ~591 units), and put a second car
+        // backwards down an 8 m river embankment at 11.6 m/s (F23685 window).
+        //
+        // Three independent defects made that possible, and all three are fixed here:
+        //   (a) TryTempAction had NO rear-clearance check, while the control-path
+        //       reverse it replaced has clearNeeded=3.5/hardFloor=4.0/abortDist=6.5.
+        //       At F10112 the mod aborted its own reverse four times on rearDist=2.1,
+        //       then handed the engine a ten-second full-reverse into that same wall.
+        //   (b) ClearTempAction did not cancel — after temp-action-clear at F9161 the
+        //       car kept accelerating backwards for the full remaining ms.
+        //   (c) Nothing re-evaluated the guard once the task was running.
+        //
+        // The CAP is the load-bearing fix: it bounds exposure to ~1.5 s whether or not
+        // the cancel works. A caller that still wants a long action re-issues per scan,
+        // which re-runs every guard below. Fail closed — the duration a wrong decision
+        // can persist is the only thing we can guarantee without trusting the native.
+        private const int  TEMP_ACTION_MAX_MS = 1500;
+        private const long TEMP_ACTION_SCAN_MAX_AGE_TICKS = 10000000L; // 1.0 s
+        // Actions that move the car backwards. These are the ones that need the rear
+        // to be verified clear before the engine is allowed to take the wheel.
+        private static bool TempActionIsReverse(int action)
+        {
+            return action == TA_GO_IN_REVERSE || action == TA_BRAKE_REVERSE;
+        }
+        private long tempActionStartedTicks = 0;     // ModClock
+        private long tempActionCancelAtTicks = 0;    // ModClock; 0 = no cancel pending
+        private int  tempActionCancelWas = 0;
+        private long lastTempActionVetoLogTicks = 0;
+        private long lastEmergBehindOverruleLogTicks = 0;   // iter-57 E
+        private long lastGiveupHeldLogTicks = 0;            // iter-57 F
+        private int  staticRejectSeq = 0;                   // iter-57 I: reservoir counter
+
         /// <summary>
         /// Issue a temp action, if and only if the mod legitimately owns the wheel.
         /// Returns true when the engine took it. Idempotent for a repeated request
@@ -19065,6 +21415,49 @@ namespace GrandTheftAccessibility
                 return false;
             }
             long now = ModClock.Ticks;
+
+            // iter-57 A(a): REAR CLEARANCE, on the same terms the control path uses.
+            // Handing the engine a reverse into geometry the mod has already measured
+            // as 2 m away is how 08-14 wrecked two cars. A stale scan is NOT clearance:
+            // `refused` and `clear` are not the same reading, and neither is `unknown`.
+            if (TempActionIsReverse(action))
+            {
+                float rearHalfLen = GetVehicleHalfLengthForClearance(veh);
+                long scanAge = lastScanCompletedTicks > 0
+                    ? ModClock.Ticks - lastScanCompletedTicks : long.MaxValue;
+                bool scanFresh = scanAge <= TEMP_ACTION_SCAN_MAX_AGE_TICKS;
+                float rearNeeded = REVERSE_REAR_HARD_STOP + rearHalfLen;
+                bool rearClear = scanFresh && navAssistDistBehind >= rearNeeded;
+                if (!rearClear)
+                {
+                    GateVeto("tempActionV2");
+                    if (driveLogger != null && driveLogger.IsRunning
+                        && now - lastTempActionVetoLogTicks > 20000000L)
+                    {
+                        lastTempActionVetoLogTicks = now;
+                        driveLogger.Write("[F" + driveLogFrameCount
+                            + "] EVENT temp-action-veto:"
+                            + " action=" + action + " site=" + site
+                            + " why=" + (!scanFresh ? "scanStale" : "rearBlocked")
+                            + " rearDist=" + (navAssistDistBehind < 900f
+                                ? navAssistDistBehind.ToString("F1") : "none")
+                            + " rearType=" + (navAssistTypeBehind ?? "none")
+                            + " needed=" + rearNeeded.ToString("F1")
+                            + " scanAgeMs=" + (scanAge == long.MaxValue
+                                ? -1L : scanAge / 10000L)
+                            + " layer=" + stuckLayer
+                            + " spd=" + veh.Speed.ToString("F2"));
+                    }
+                    return false;
+                }
+            }
+
+            // iter-57 A: CAP THE DURATION. Callers may ask for 10 s; they get 1.5 s and
+            // must re-ask, which re-runs every guard above. This is what bounds the
+            // damage when the cancel below does not take.
+            int askedMs = ms;
+            if (ms > TEMP_ACTION_MAX_MS) ms = TEMP_ACTION_MAX_MS;
+
             if (tempActionCurrent == action && now < tempActionUntilTicks) return true;
             try
             {
@@ -19073,15 +21466,86 @@ namespace GrandTheftAccessibility
             catch { return false; }
             tempActionCurrent = action;
             tempActionUntilTicks = now + (long)ms * 10000L;
+            tempActionStartedTicks = now;
             tempActionSite = site;
             GateFire("tempActionV2");
             if (driveLogger != null && driveLogger.IsRunning)
                 driveLogger.Write("[F" + driveLogFrameCount + "] EVENT temp-action:"
-                    + " action=" + action + " ms=" + ms + " site=" + site
+                    + " action=" + action + " ms=" + ms
+                    + " askedMs=" + askedMs
+                    + " capped=" + (askedMs > TEMP_ACTION_MAX_MS)
+                    + " site=" + site
                     + " layer=" + stuckLayer
+                    + " rearDist=" + (navAssistDistBehind < 900f
+                        ? navAssistDistBehind.ToString("F1") : "none")
                     + " spd=" + veh.Speed.ToString("F2")
                     + " pos=" + FmtV(veh.Position));
             return true;
+        }
+
+        /// <summary>
+        /// iter-57 A(c): re-evaluate a RUNNING temp action every tick, and verify that
+        /// a cancel actually took. Nothing did either before; the whole mechanism was
+        /// fire-and-forget, which is why a ten-second reverse survived its own clear.
+        /// Call from the drive tick, before the recovery ladder.
+        /// </summary>
+        private void MonitorTempAction(Vehicle playerVeh)
+        {
+            long now = ModClock.Ticks;
+
+            // Verify a pending cancel. If the car is still moving under the cancelled
+            // action ~400 ms later, the native did not honour it — say so in the log
+            // rather than assuming. This is the evidence the next session needs.
+            if (tempActionCancelAtTicks != 0 && now - tempActionCancelAtTicks > 4000000L)
+            {
+                bool stillReversing = playerVeh != null && playerVeh.Exists()
+                    && TempActionIsReverse(tempActionCancelWas)
+                    && GTA.Math.Vector3.Dot(playerVeh.Velocity, playerVeh.ForwardVector) < -1.0f;
+                if (driveLogger != null && driveLogger.IsRunning)
+                    driveLogger.Write("[F" + driveLogFrameCount
+                        + "] EVENT temp-action-cancel-check:"
+                        + " was=" + tempActionCancelWas
+                        + " honoured=" + (!stillReversing)
+                        + " spd=" + (playerVeh != null && playerVeh.Exists()
+                            ? playerVeh.Speed.ToString("F2") : "-")
+                        + " sinceCancelMs=" + ((now - tempActionCancelAtTicks) / 10000L));
+                tempActionCancelAtTicks = 0;
+                tempActionCancelWas = 0;
+            }
+
+            if (tempActionCurrent == 0) return;
+
+            // Expired by its own duration — drop the bookkeeping so `tempActionActive`
+            // on the FRAME line does not read as live when it is not.
+            if (now >= tempActionUntilTicks)
+            {
+                tempActionCurrent = 0;
+                tempActionUntilTicks = 0;
+                tempActionStartedTicks = 0;
+                tempActionSite = null;
+                return;
+            }
+
+            // Hard cap backstop: never let bookkeeping claim a task older than the cap.
+            if (tempActionStartedTicks > 0
+                && now - tempActionStartedTicks > (long)TEMP_ACTION_MAX_MS * 10000L * 2L)
+            {
+                ClearTempAction("cap");
+                return;
+            }
+
+            // The guard that authorised it must still hold.
+            if (!cachedIsFullMode) { ClearTempAction("notFull"); return; }
+            if (TempActionIsReverse(tempActionCurrent))
+            {
+                float rearHalfLen = playerVeh != null && playerVeh.Exists()
+                    ? GetVehicleHalfLengthForClearance(playerVeh) : 2.5f;
+                if (navAssistDistBehind < REVERSE_REAR_HARD_STOP + rearHalfLen)
+                {
+                    ClearTempAction("rearClosed");
+                    return;
+                }
+            }
         }
 
         /// <summary>Cancel any running temp action. Called on every recovery exit —
@@ -19094,18 +21558,149 @@ namespace GrandTheftAccessibility
             int was = tempActionCurrent;
             tempActionCurrent = 0;
             tempActionUntilTicks = 0;
+            tempActionStartedTicks = 0;
             tempActionSite = null;
+            // iter-57 A(b): TA_NONE with ms=1 provably does NOT cancel — on 08-14 the
+            // car kept accelerating backwards for the full remaining duration after
+            // temp-action-clear at F9161. Overwrite the running task with a bounded
+            // STOP instead: a 1 ms TA_BRAKE_ACTION replaces it in the same task slot
+            // and expires immediately, which is the behaviour vanilla relies on when
+            // it swaps one temp action for another. Whether that is sufficient is
+            // then VERIFIED by MonitorTempAction rather than assumed.
             try
             {
                 Ped p = Game.Player.Character;
                 Vehicle v = (p != null && p.IsInVehicle()) ? p.CurrentVehicle : null;
                 if (v != null && v.Exists() && v.Driver != null && v.Driver.Exists())
+                {
+                    Function.Call(Hash.TASK_VEHICLE_TEMP_ACTION, v.Driver, v, TA_BRAKE_ACTION, 1);
                     Function.Call(Hash.TASK_VEHICLE_TEMP_ACTION, v.Driver, v, 0 /* TA_NONE */, 1);
+                }
             }
             catch { }
+            tempActionCancelAtTicks = ModClock.Ticks;
+            tempActionCancelWas = was;
             if (driveLogger != null && driveLogger.IsRunning)
                 driveLogger.Write("[F" + driveLogFrameCount + "] EVENT temp-action-clear:"
                     + " was=" + was + " why=" + why);
+        }
+
+        /// <summary>iter-57 A: is a native task holding the wheel right now? Consumers:
+        /// the FRAME line, the authority-blackout detector, and the recovery give-up —
+        /// which must never tell a blind driver they have control while this is true.</summary>
+        private bool TempActionLive()
+        {
+            return tempActionCurrent != 0 && ModClock.Ticks < tempActionUntilTicks;
+        }
+
+        // ====================================================================
+        // iter-57 B: AUTHORITY BLACKOUT — the mod must know when it is not driving
+        // ====================================================================
+        // On 08-14 the steering channel was completely dead for 182 and 229 CONSECUTIVE
+        // frames (100% of frames with |liveSteer|>0.3 in two separate windows) while the
+        // mod went on computing, writing, logging and speaking as though it were driving.
+        // Windows with no native task running were 0-6% dead, so this is a real,
+        // separable state and not sensor noise.
+        //
+        // UNGATED. A mod for blind players that has silently stopped steering is exactly
+        // the failure CLAUDE.md names as the worst one available: indistinguishable from
+        // not being installed. Detect it, log it, and say it out loud.
+        private const float BLACKOUT_CMD_MIN      = 0.30f;   // only judge real commands
+        private const float BLACKOUT_ACH_EPS      = 0.02f;   // |ach| below this = nothing
+        private const long  BLACKOUT_LOG_TICKS    = 2000000L;   // 200 ms sustained -> log
+        private const long  BLACKOUT_SPEAK_TICKS  = 10000000L;  // 1.0 s sustained -> speak
+        private long blackoutSinceTicks = 0;
+        private long lastBlackoutLogTicks = 0;
+        private long lastBlackoutSpeechTicks = 0;
+        private bool blackoutAnnounced = false;
+
+        private void MonitorAuthorityBlackout(Vehicle playerVeh)
+        {
+            long now = ModClock.Ticks;
+            if (playerVeh == null || !playerVeh.Exists() || !cachedIsFullMode)
+            {
+                blackoutSinceTicks = 0; blackoutAnnounced = false; return;
+            }
+
+            // Only a WRITTEN, non-trivial command with a VALID readback can be judged.
+            // achValid false means we could not read the wheel at all — unknown is not
+            // the same as dead, and must never be reported as dead.
+            bool judgeable = lastSteerWritten && achValid
+                && Math.Abs(lastLiveSteer) > BLACKOUT_CMD_MIN;
+            if (!judgeable)
+            {
+                blackoutSinceTicks = 0; blackoutAnnounced = false; return;
+            }
+
+            bool dead = Math.Abs(achSteerNorm) < BLACKOUT_ACH_EPS;
+            if (!dead)
+            {
+                blackoutSinceTicks = 0; blackoutAnnounced = false; return;
+            }
+
+            if (blackoutSinceTicks == 0) { blackoutSinceTicks = now; return; }
+            long heldTicks = now - blackoutSinceTicks;
+            if (heldTicks < BLACKOUT_LOG_TICKS) return;
+
+            if (driveLogger != null && driveLogger.IsRunning
+                && now - lastBlackoutLogTicks > 20000000L)   // 2 s
+            {
+                lastBlackoutLogTicks = now;
+                driveLogger.Write("[F" + driveLogFrameCount + "] EVENT authority-blackout:"
+                    + " heldMs=" + (heldTicks / 10000L)
+                    + " cmd=" + lastLiveSteer.ToString("F3")
+                    + " ach=" + achSteerNorm.ToString("F3")
+                    + " tempAction=" + (TempActionLive() ? tempActionCurrent.ToString() : "0")
+                    + " tempSite=" + (tempActionSite ?? "-")
+                    + " mode=" + currentDriveMode
+                    + " layer=" + stuckLayer
+                    + " spd=" + playerVeh.Speed.ToString("F2")
+                    + " wheels=" + (whlValid ? Convert.ToString(whlContactMask, 2) : "-")
+                    // iter-59 A5: the two fields that let the next session separate a
+                    // real blackout from the two-wheeler false positive below.
+                    + " class=" + playerVeh.ClassType
+                    + " wheelCount=" + (whlValid ? whlCount.ToString() : "-")
+                    + " pos=" + FmtV(playerVeh.Position)
+                    // iter-64: this detector SPEAKS "Drive assist has lost steering. Take
+                    // the wheel." at a blind driver. It already suppresses the cue on
+                    // two-wheelers because a wrong label is worse than no label; a wrecked
+                    // car is the same class of false positive and was neither suppressed
+                    // nor recorded. Record it first, then a session can decide.
+                    + HealthTag(playerVeh)
+                    + WheelDamageTag());
+                SnapshotFailure("AUTHORITY-BLACKOUT", null);
+            }
+
+            // ---- iter-59 A5: never speak this on a two-wheeler ----
+            // The "dead steering" test is |achSteerNorm| < 0.02, and achSteerDeg is
+            // -veh.SteeringAngle (:17416) — a FRONT-WHEEL angle. A GTA V motorcycle
+            // turns by lean, so that reading does not track a commanded steer the way
+            // a car's does. In driveassist-2026-08-15, two of the three fires were on
+            // a CLIFFHANGER at 16.4 and 5.6 m/s, in LaneKeeping, layer=0, with
+            // tempAction=0 — no native task running and nothing actually wrong. Only
+            // the third (a car, mid layer-2 reverse) was the failure this detects.
+            //
+            // Nothing was spoken that session only because all three held ~200 ms,
+            // under the 1 s speak threshold. One longer episode and a blind rider is
+            // told to take the wheel while the bike is steering perfectly well — and
+            // a wrong label is worse than no label. Keep LOGGING and snapshotting on
+            // bikes (that data is exactly what a real threshold would be built from);
+            // suppress only the spoken alarm, until there is bike data to set a
+            // lean-aware threshold from.
+            bool twoWheeler = playerVeh.ClassType == VehicleClass.Motorcycles
+                || playerVeh.ClassType == VehicleClass.Cycles
+                || (whlValid && whlCount == 2);
+
+            // Speak only once per episode, and only after a full second — a brief
+            // transient during a kerb strike is not worth interrupting a blind driver
+            // for, but a second of dead steering is something they must be told.
+            if (!blackoutAnnounced && !twoWheeler && heldTicks >= BLACKOUT_SPEAK_TICKS
+                && now - lastBlackoutSpeechTicks > 200000000L)  // 20 s between episodes
+            {
+                blackoutAnnounced = true;
+                lastBlackoutSpeechTicks = now;
+                Speech.Critical("Drive assist has lost steering. Take the wheel.");
+            }
         }
 
         // ====================================================================
@@ -19258,6 +21853,7 @@ namespace GrandTheftAccessibility
             if (stuckLayer > 0 || pivotEscapeActive || stuckAutodriveEngaged)
                 ResetStuckRecovery();
             currentDriveMode = DriveMode.LaneKeeping;
+            driveModeWhy = "assist-released";   // iter-71 A1
 
             // iter-19 G2: GRACE + SUSPEND ESCALATION. Clearing the latches is not
             // enough — in 204938 recovery re-set alignmentEngageReverse within ~1 s
@@ -19428,7 +22024,7 @@ namespace GrandTheftAccessibility
             {
                 float roadStrength;
                 float roadSmoothFactor;
-                if (currentDriveMode != DriveMode.LaneKeeping)
+                if (IsRecoveryManeuverMode())
                 {
                     roadStrength = isFullMode ? 1.0f : 0.75f;
                     roadSmoothFactor = Math.Min(1.0f, STEER_SMOOTHING_RATE * 1.5f * deltaTime);
@@ -19678,22 +22274,33 @@ namespace GrandTheftAccessibility
                     + " mode=" + currentDriveMode + " fullMode=" + isFullMode);
 
             // Audio/speech feedback (only for threats, not lane keeping)
+            //
+            // iter-59 A1: the cue and the speech used to share one gate that tested
+            // lastThreatCueTicks and never wrote it back. The gate was therefore
+            // always open: the beep fired every frame, and "Handbrake turn" — the one
+            // callout with no throttle of its own — was spoken 55 times in
+            // driveassist-2026-08-15. Each channel now owns its own rate limit, so a
+            // change to one can never silently re-rate the other.
             bool hasThreat = hasSteerThreat || hasBrakeThreat;
-            if ((hasThreat || needsHandbrakeTurn) && DateTime.Now.Ticks - lastThreatCueTicks > 20000000)
+            if (hasThreat || needsHandbrakeTurn)
             {
                 lastAssistAnnounceTicks = DateTime.Now.Ticks;
 
-                float steerUrgency = Math.Max(0f, 1f - (steerTTC / steerThreshold));
-                outSteerAssist.Stop();
-                steerAssistBeep.Frequency = 400 + (int)(steerUrgency * 600);
-                var sample = steerAssistBeep.Take(TimeSpan.FromSeconds(0.08));
-                outSteerAssist.Init(sample);
-                outSteerAssist.Play();
+                PlaySteerCue(steerTTC, steerThreshold);
 
+                // The throttle sits INSIDE the branch, not in its condition: a
+                // handbrake turn must still swallow the "Braking"/"Slowing" arms
+                // below even on the ticks when the callout itself is rate-limited.
+                // Putting it in the condition would let a throttled handbrake turn
+                // fall through and announce "Braking, vehicle ahead" mid-pivot.
                 if (handbrakeMag > 0.5f)
                 {
-                    string turnDir = handbrakeSteerDir > 0 ? "right" : "left";
-                    Speech.Info("Handbrake turn " + turnDir);
+                    if (DateTime.Now.Ticks - lastHandbrakeCueSpeechTicks > HANDBRAKE_CUE_SPEECH_TICKS)
+                    {
+                        lastHandbrakeCueSpeechTicks = DateTime.Now.Ticks;
+                        string turnDir = handbrakeSteerDir > 0 ? "right" : "left";
+                        Speech.Info("Handbrake turn " + turnDir);
+                    }
                 }
                 // iter-19 G6: SEVERITY-GATED speech. The old gate (brakeMag>0.5 OR
                 // |steer|>0.3) spoke "Braking, obstacle ahead" ~1x/s during normal
@@ -19802,6 +22409,92 @@ namespace GrandTheftAccessibility
 
             // Speed cap: never accelerate past the configured cruise speed.
             if (speed >= autodriveSpeed) accThrottleOut = 0f;
+
+            // ---- iter-64: accLateralInterlockV2 - do not accelerate out of the lane ----
+            //
+            // 08-19 incident 29. ACC took throttle ownership at lat=4.28 against a 5.3 m
+            // half-carriageway and held thr=1.00 while the mod's OWN lateral estimate
+            // crossed the entire road, +4.3 m -> -7.3 m, accelerating 15.4 -> 32.4 m/s in
+            // 2.1 s. Achieved steering never exceeded 0.22 and the brake arrived one frame
+            // before a 28.6 m/s impact. The wedge that followed is what sent the recovery
+            // controller out onto the OPPOSING carriageway, which is where the session's
+            // "dominoes" actually came from - so this is the first link in the cascade,
+            // not a late symptom of it.
+            //
+            // Nothing anywhere stopped ACC opening throttle while the car was leaving its
+            // lane. This is that interlock. Note what it does NOT touch: accBrakeOut is
+            // untouched, so a genuine headway threat still brakes. It only ever REMOVES
+            // acceleration, which is why it cannot strand a car that is already moving.
+            //
+            // Fails closed on a stale lane model. If we cannot say where we are, we do not
+            // accelerate - an unexpected refusal to speed up is recoverable for a blind
+            // driver, an unexpected acceleration into a barrier is what 08-19 cost. The
+            // three reasons are logged separately (why=) precisely so a session can tell
+            // "the model went dark" from "the car really was out of its lane".
+            //
+            // The half-width formula deliberately matches EVENT offroad-risk's so the
+            // interlock and the early-warning line can never disagree about where the road
+            // ends. lat-distrust clamps only below 3 m/s, so at ACC speeds
+            // lastLaneLateralError is the unclamped reading.
+            if (getSetting("accLateralInterlockV2") == 1
+                && accThrottleOut > 0.01f && speed > ACC_INTERLOCK_MIN_SPD)
+            {
+                GateReach("accLateralInterlockV2");
+                int ilLanes = lastLaneOffsetFwd + lastLaneOffsetBwd;
+                float ilHalfW = (ilLanes > 0 ? ilLanes : 2) * LANE_WIDTH_M * 0.5f
+                    + lastLaneWidthExtraM;
+                long ilAgeMs = lastLaneLateralErrorTicks > 0
+                    ? (ModClock.Ticks - lastLaneLateralErrorTicks) / 10000L : -1L;
+                bool ilStale = ilAgeMs < 0 || ilAgeMs > ACC_INTERLOCK_LAT_STALE_MS;
+                bool ilWide = Math.Abs(lastLaneLateralError)
+                    > ilHalfW + ACC_INTERLOCK_LAT_MARGIN_M;
+                // iter-71 A4: skew gets the same freshness rule as the lateral error.
+                // vehicleSkewAngle is refreshed on the STEER path only, and iter-35
+                // added vehicleSkewStampTicks precisely because a stale skew once
+                // faked a diagnosis. Reading it unguarded here meant the interlock
+                // failed closed on a stale lat and then trusted an arbitrarily old
+                // skew in the very next line — so a veto could be justified by a
+                // number measured seconds ago, or a real one missed because the
+                // sample never refreshed.
+                long ilSkewAgeMs = vehicleSkewStampTicks > 0
+                    ? (DateTime.Now.Ticks - vehicleSkewStampTicks) / 10000L : -1L;
+                bool ilSkewStale = ilSkewAgeMs < 0 || ilSkewAgeMs > ACC_INTERLOCK_LAT_STALE_MS;
+                bool ilSkew = !ilSkewStale && Math.Abs(vehicleSkewAngle) > ACC_INTERLOCK_SKEW_DEG;
+                if (ilStale || ilSkewStale || ilWide || ilSkew)
+                {
+                    string ilWhy = ilStale ? "stale"
+                        : (ilSkewStale ? "stale-skew" : (ilWide ? "lat" : "skew"));
+                    float ilWas = accThrottleOut;
+                    accThrottleOut = 0f;
+                    GateFire("accLateralInterlockV2");
+                    if (driveLogger != null && driveLogger.IsRunning
+                        && now - lastAccInterlockLogTicks > 20000000L)   // 2 s
+                    {
+                        lastAccInterlockLogTicks = now;
+                        driveLogger.Write("[F" + driveLogFrameCount + "] EVENT acc-interlock:"
+                            + " why=" + ilWhy
+                            + " thrWas=" + ilWas.ToString("F2")
+                            + " lat=" + lastLaneLateralError.ToString("F1")
+                            + " halfW=" + ilHalfW.ToString("F1")
+                            + " lanes=" + ilLanes
+                            + " skew=" + vehicleSkewAngle.ToString("F1")
+                            + " latAgeMs=" + ilAgeMs
+                            + " skewAgeMs=" + ilSkewAgeMs
+                            + " spd=" + speed.ToString("F1")
+                            + " gap=" + navAssistDistCenter.ToString("F1")
+                            // iter-71 A4: without these the veto cannot be judged.
+                            // A large lateral error is only evidence the car left its
+                            // lane if the mod TRUSTS the polyline it measured against —
+                            // polyDistrustV2 exists because sometimes it does not, and
+                            // an interlock firing all session on a distrusted line is a
+                            // road-model fault wearing an ACC fault's clothes.
+                            + " polyDistrust=" + polyDistrustV2Cached
+                            + " polyDivergM=" + rfPolyDivergenceM.ToString("F1")
+                            + " laneKeepOk=" + lastLaneKeepOk
+                            + " mode=" + currentDriveMode);
+                    }
+                }
+            }
 
             // ---- iter-43 B2: honour a latched standstill release ----
             // Cleared by the lead genuinely moving off, or by the player lifting —
@@ -20003,7 +22696,85 @@ namespace GrandTheftAccessibility
             // reversing and this is NOT a commanded reverse maneuver, every
             // brake request must instead arrest the backward roll via control
             // 71 (accelerate) + the direction-agnostic handbrake (76).
-            bool brakingAReversingCar = isReversing && !alignmentEngageReverse;
+            //
+            // ---- iter-56 brakeWriteV2 (OFF by default, A/B in its own epoch) ----
+            // isReversing is `dot(normalize(velocity), forwardVec) < -0.3` (:13128) with
+            // no wheel-contact guard. An AIRBORNE car has an attitude unrelated to its
+            // flight path, so that dot flips while the car is genuinely travelling
+            // forward — and the redirect below then sends every brake request to control
+            // 71, the ACCELERATOR.
+            //
+            // That is incident 09 of 08-12-214825, 478 of the session's 667 drawdown and
+            // 72% of its cost. F4100: speed=20.77m/s reversing=True wheels contact=0000
+            // mode=lockup, rampedBrake=1.000, and `ctrlRet=71:1,76:1 ctrlT=1.00
+            // ctrlHb=1.00 ctrlB=0.00` — the mod held the accelerator at full for 2.25 s
+            // while its own brake demand was pinned at 1.00, off an embankment at 46 mph.
+            // The car landed pitched 40 / rolled 61 and lost 312 engine in one frame.
+            //
+            // The redirect itself is correct for a car ROLLING backward on its wheels;
+            // it is only the airborne case that is wrong. `hbWheelsOk` two blocks down
+            // (:22012) already applies exactly this reasoning to the handbrake, so this
+            // is that guard extended to the control the brake actually lands on.
+            bool brakeWriteV2 = getSetting("brakeWriteV2") == 1;
+            if (brakeWriteV2) GateReach("brakeWriteV2");
+            bool reverseRedirectOk = true;
+            string brakeWriteVeto = "airborne-reverse";
+            if (brakeWriteV2)
+            {
+                // iter-71 B4: IsInAir alone was never the whole guard.
+                //
+                // The proven incident logged `wheels contact=0000` — no wheel touching
+                // anything — and IsInAir is a weaker claim than that: a car balanced on
+                // a kerb, a barrier or its own roof has every wheel clear of the road
+                // and is not "in air" by the native's reckoning. UpdateAirborneEpisode
+                // already reached this conclusion in the other direction and prefers the
+                // contact mask for exactly this reason ("it also catches the case
+                // IsInAir misses: a car high-centred with all four wheels clear").
+                //
+                // The redirect is only ever correct for a car rolling backward ON ITS
+                // WHEELS, so require that positively rather than merely ruling out one
+                // way of not having them. The mask is the primary test and IsInAir the
+                // fallback, so an unsampled mask degrades to the iter-56 behaviour
+                // rather than switching the guard off.
+                try
+                {
+                    if (whlValid)
+                    {
+                        reverseRedirectOk = whlContactMask != 0;
+                        if (!reverseRedirectOk) brakeWriteVeto = "no-wheel-contact";
+                    }
+                    else
+                    {
+                        reverseRedirectOk = !playerVeh.IsInAir;
+                        if (!reverseRedirectOk) brakeWriteVeto = "airborne-reverse";
+                    }
+                }
+                catch { reverseRedirectOk = true; }   // unknown attitude: keep legacy behaviour
+            }
+            bool brakingAReversingCar = isReversing && !alignmentEngageReverse && reverseRedirectOk;
+            if (brakeWriteV2 && !reverseRedirectOk && isReversing && !alignmentEngageReverse)
+            {
+                GateFire("brakeWriteV2");
+                if (driveLogger != null && driveLogger.IsRunning
+                    && ModClock.Ticks - brakeWriteAirborneLastTicks > 10000000L) // 1 Hz
+                {
+                    brakeWriteAirborneLastTicks = ModClock.Ticks;
+                    driveLogger.Write("[F" + driveLogFrameCount + "] EVENT brake-write:"
+                        + " veto=" + brakeWriteVeto
+                        + " ramped=" + rampedBrakeInput.ToString("F2")
+                        + " spd=" + playerVeh.Speed.ToString("F1")
+                        + " trueSpd=" + trueSpeed.ToString("F1")
+                        // iter-71 B4: which test spoke, and what the other one said.
+                        // If contact=0000 vetoes while inAir=False all session, the
+                        // mask is the guard that was missing; if they always agree,
+                        // the iter-56 test was sufficient and this can be simplified.
+                        + " src=" + (whlValid ? "mask" : "isInAir")
+                        + " contact=" + (whlValid
+                            ? Convert.ToString(whlContactMask, 2).PadLeft(4, '0') : "-")
+                        + " inAir=" + playerVeh.IsInAir
+                        + " wouldWrite=71+76 nowWrites=72");
+                }
+            }
 
             // ---- PER-FRAME BRAKE RECOMPUTE ----
             // If we have a recent brake threat, recompute its TTC against the LIVE
@@ -20079,7 +22850,7 @@ namespace GrandTheftAccessibility
                     driveLogger.Write("[F" + driveLogFrameCount + "] EVENT grace-brake-allow:"
                         + " dist=" + (cachedBrakeThreatPos - playerVeh.Position).Length().ToString("F1")
                         + " speed=" + liveSpeed.ToString("F1")
-                        + " ttc=" + liveTtc.ToString("F2"));
+                        + " ttc=" + FmtF(liveTtc));
                 }
             }
             else if (graceActive && !(liveTtc > 0f && liveTtc < 0.4f)) brakeArmed = false;
@@ -20264,11 +23035,22 @@ namespace GrandTheftAccessibility
             // ---- iter-22 J3: WATER-AHEAD EMERGENCY BRAKE ----
             // Uncapped full brake while water is detected ahead at speed. Brake
             // only — no auto-swerve. Detection set per-scan in ProcessSteeringAssist.
-            if (cachedIsFullMode && waterAheadDetected
-                && !graceActive && !alignmentEngageReverse
-                && playerVeh.Speed > 4f)
+            // iter-57 D: the >4 m/s floor is gone. The 08-14 river entry ended at 0 MPH
+            // with the car in the water; a brake that only exists above 9 mph does not
+            // cover the case that actually drowns the car. `alignmentEngageReverse` is
+            // NOT excused any more either — a commanded reverse into water is still a
+            // reverse into water, and on 08-14 the reverse was exactly the thing driving
+            // the car in. Only the watchdog grace still yields, because during grace the
+            // player is sovereign by design.
+            if (cachedIsFullMode && waterAheadDetected && !graceActive)
             {
                 liveBrakeTarget = 1.0f;
+                // A commanded reverse must be abandoned, not merely braked against.
+                if (alignmentEngageReverse || TempActionLive())
+                {
+                    alignmentEngageReverse = false;
+                    ClearTempAction("water");
+                }
             }
 
             // ---- ACC BRAKING ----
@@ -20372,11 +23154,31 @@ namespace GrandTheftAccessibility
                         brakeEpiPeakV0 = epSpeed;
                         brakeEpiPeakVEnd = epSpeed;
                         brakeEpiThrMax = 0f;
+                        // iter-57 M: sample the owner while it still owns the brake.
+                        brakeEpiOwnerAt0 = ComputeBrakeOwner();
+                        brakeEpiThrAchMax = 0f;
+                        brakeEpiBrakeAchMax = 0f;
+                        brakeEpiAirborneFrames = 0;
+                        brakeEpiReverseRedirect = false;
+                        brakeEpiTempAction = 0;
                     }
                 }
                 else
                 {
                     brakeEpiFrames++;
+                    // iter-57 M: accumulate the ACHIEVED pedals and the conditions that
+                    // make an achieved reading mean something other than it appears.
+                    if (achValid)
+                    {
+                        float thrA = Math.Abs(achThrottle);
+                        if (thrA > brakeEpiThrAchMax) brakeEpiThrAchMax = thrA;
+                        if (achBrake > brakeEpiBrakeAchMax) brakeEpiBrakeAchMax = achBrake;
+                    }
+                    if (playerVeh.IsInAir) brakeEpiAirborneFrames++;
+                    if (GTA.Math.Vector3.Dot(playerVeh.Velocity, playerVeh.ForwardVector) < -0.3f)
+                        brakeEpiReverseRedirect = true;
+                    if (TempActionLive() && brakeEpiTempAction == 0)
+                        brakeEpiTempAction = tempActionCurrent;
                     if (rampedBrakeInput > brakeEpiPeakCmd)
                     {
                         brakeEpiPeakCmd = rampedBrakeInput;
@@ -20423,18 +23225,49 @@ namespace GrandTheftAccessibility
                                 + " msAtPeak=" + brakeEpiAtPeakMs
                                 + " endReason=" + (cmdDrop ? "cmd-drop" : stopped ? "stopped" : "cap")
                                 + " playerThrMax=" + brakeEpiThrMax.ToString("F2")
-                                + " owner=" + ComputeBrakeOwner()
+                                // ---- iter-57 M: OWNER AT THE RIGHT INSTANT ----
+                                // owner= was sampled HERE, at episode end — and the
+                                // episode ends *because* rampedBrakeInput fell below 0.1,
+                                // so the owner has released by construction. That is why
+                                // 44% of 08-14's episodes reported owner=none, and why
+                                // the digest's own advice to filter on owner could not be
+                                // taken. Record it at the START and keep the end value as
+                                // a separate, clearly-named field.
+                                + " ownerAt0=" + (brakeEpiOwnerAt0 ?? "none")
+                                + " ownerAtEnd=" + ComputeBrakeOwner()
+                                // iter-57 M: ACHIEVED throttle, not the player's pedal.
+                                // The mod zeroes that pedal on ~25% of frames, so
+                                // playerThrMax=1.00 does NOT establish that throttle
+                                // reached the engine — and all ten of 08-14's negative
+                                // episodes carried exactly that value. This is the field
+                                // that separates "player overrode the brake" from "the
+                                // brake channel failed".
+                                + " thrAchMax=" + brakeEpiThrAchMax.ToString("F2")
+                                + " brakeAchMax=" + brakeEpiBrakeAchMax.ToString("F2")
+                                // iter-57 M: a reversing car has its brake redirected to
+                                // controls 71+76 by design, which makes ctrlB=0.00 look
+                                // like a dead channel when it is a working one.
+                                + " reverseRedirect=" + brakeEpiReverseRedirect
+                                + " tempAction=" + brakeEpiTempAction
+                                + " framesAirborne=" + brakeEpiAirborneFrames
                                 + (aAch < 0f ? " note=accelerated" : "")
                                 + " peakCmd=" + brakeEpiPeakCmd.ToString("F2")
                                 + " ms=" + epMs
-                                + " epMs=" + epMs
                                 + " frames=" + brakeEpiFrames
                                 + " actuationV2=" + (actuationV2 ? 1 : 0)
                                 + " physicsAssist=" + (getSetting("brakePhysicsAssist") == 1 ? 1 : 0)
                                 + " ctrlB=" + Function.Call<float>(Hash.GET_CONTROL_NORMAL, 0, 72).ToString("F2")
                                 + " ctrlBd=" + Function.Call<float>(Hash.GET_DISABLED_CONTROL_NORMAL, 0, 72).ToString("F2")
                                 + " wheelsDown=" + Function.Call<bool>(Hash.IS_VEHICLE_ON_ALL_WHEELS, playerVeh)
-                                + " grace=" + graceActive);
+                                + " grace=" + graceActive
+                                // iter-64: this line is the source of aPeak and of the
+                                // whole Brake authority block. Without health, "aPeak
+                                // degraded late-session" is unattributable - and 08-19's
+                                // epoch aPeak ran 11.7 / 8.1 / 9.7 / 10.2 / 11.2 / 10.0
+                                // against epoch drawdowns of 134 / 4 / 99 / 72 / 469 / 1334
+                                // with no way to relate the two.
+                                + HealthTag(playerVeh)
+                                + WheelDamageTag());
                         }
                         brakeEpiActive = false;
                     }
@@ -20579,7 +23412,7 @@ namespace GrandTheftAccessibility
                 cachedHandbrakeMagnitude > 0.1f
                 || alignmentEngageReverse
                 || stuckAutodriveEngaged);
-            bool inRecoveryMode = cachedIsFullMode && currentDriveMode != DriveMode.LaneKeeping;
+            bool inRecoveryMode = cachedIsFullMode && IsRecoveryManeuverMode();
 
             // iter-19 G1+G2: master gate on ALL input disables. While the scan is
             // stale (dead pipeline) or a watchdog grace is active (player sovereign)
@@ -20605,14 +23438,33 @@ namespace GrandTheftAccessibility
             bool brakePhysicsAssist = getSetting("brakePhysicsAssist") == 1;
 
             // Steering: any time the mod is owning the wheel.
-            if (!actuationV2 && inputDisablesAllowed && (brakeIntervening || totalTakeover || inRecoveryMode))
-                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 59, true); // VEH_MOVE_LEFT_RIGHT
+            //
+            // iter-53 D8: the GateFire calls below are the whole point of the gate and
+            // were missing. actuationV2 has a GateReach at :20138 and NO fire site
+            // anywhere in the file, so the census reported "ON-NEVER-FIRED" on 14380
+            // reaches for what the evidence says is the best-performing change in the
+            // mod (brake dead-frames 1.4%/1.6% in the trustworthy speed bands, aPeak
+            // median 11.60 against 5.96). A gate whose effect is invisible cannot be
+            // defended in a bisect, and this one is load-bearing.
+            //
+            // The gate's effect IS the skipped disable, so that is what gets counted:
+            // fire = "a frame on which the legacy build would have disabled the control
+            // out from under its own write, and this build did not".
+            if (inputDisablesAllowed && (brakeIntervening || totalTakeover || inRecoveryMode))
+            {
+                if (actuationV2) GateFire("actuationV2");
+                else Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 59, true); // VEH_MOVE_LEFT_RIGHT
+            }
 
             // Brake / handbrake: only when the mod is actively braking.
-            if (!actuationV2 && inputDisablesAllowed && (brakeIntervening || totalTakeover))
+            if (inputDisablesAllowed && (brakeIntervening || totalTakeover))
             {
-                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 72, true); // VEH_BRAKE
-                Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 76, true); // VEH_HANDBRAKE
+                if (actuationV2) GateFire("actuationV2");
+                else
+                {
+                    Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 72, true); // VEH_BRAKE
+                    Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 76, true); // VEH_HANDBRAKE
+                }
             }
 
             // Throttle: when actively braking or total-takeover. Plain recovery
@@ -20767,7 +23619,7 @@ namespace GrandTheftAccessibility
                             + " resolved=" + (imminent ? "cap-throttle" : "yield-brake")
                             + " playerThr=" + gracePlayerThr.ToString("F2")
                             + " ramped=" + rampedBrakeInput.ToString("F2")
-                            + " ttc=" + liveTtc.ToString("F2")
+                            + " ttc=" + FmtF(liveTtc)
                             + " emerg=" + emergencyBrakeActive
                             + " spd=" + playerVeh.Speed.ToString("F1")
                             + " trueSpd=" + trueSpeed.ToString("F1"));
@@ -21172,7 +24024,7 @@ namespace GrandTheftAccessibility
             // target instead of sitting dead. Gated hard: no brake request, no
             // live brake threat, not reversing, not a commanded reverse.
             if (cachedIsFullMode
-                && currentDriveMode != DriveMode.LaneKeeping
+                && IsRecoveryManeuverMode()
                 && !isReversing && !brakingAReversingCar && !alignmentEngageReverse
                 && rampedBrakeInput < 0.05f && cachedHandbrakeMagnitude < 0.1f
                 && !hasLiveBrakeThreat
@@ -21229,7 +24081,7 @@ namespace GrandTheftAccessibility
                 // gate refused 1909 times. A veto is not a fire.
                 if (creepClearV2 && creepNoCast) GateVeto("creepClearV2");
                 bool creepContext = cachedIsFullMode
-                    && currentDriveMode == DriveMode.LaneKeeping
+                    && IsLaneKeepingMode()
                     && !isReversing && !brakingAReversingCar && !alignmentEngageReverse
                     && rampedBrakeInput < 0.05f && cachedHandbrakeMagnitude < 0.1f
                     && clearAhead && creepPlayerBrake < 0.1f;
@@ -21308,7 +24160,7 @@ namespace GrandTheftAccessibility
                 {
                     lastHandbrakeReleaseLogTicks = DateTime.Now.Ticks;
                     driveLogger.Write("[F" + driveLogFrameCount + "] EVENT handbrake-release:"
-                        + " reason=threat ttc=" + liveTtc.ToString("F2")
+                        + " reason=threat ttc=" + FmtF(liveTtc)
                         + " hb=" + cachedHandbrakeMagnitude.ToString("F2")
                         + " spd=" + playerVeh.Speed.ToString("F1"));
                 }
@@ -21436,6 +24288,53 @@ namespace GrandTheftAccessibility
                                 && (revNow - cachedBrakeThreatStamp) < REVERSE_EMERG_THREAT_MAX_AGE_TICKS;
                             emergencyBehind = behind && fresh
                                 && rearGap < REVERSE_REAR_HARD_STOP + rearHalfLen;
+
+                            // ---- iter-57 E (reverseEmergCorroborateV2) ----
+                            // All 20 reverse-aborts on 08-14 read `trig=emerg
+                            // emergBehind=True` with rearDist 6.1-11.3 m — i.e. the
+                            // dedicated REAR channel said clear by 6-11 m while this
+                            // veto, derived from the FORWARD scan's brake-threat cache,
+                            // killed the escape anyway. cachedBrakeThreatPos is a
+                            // world-space point up to 300 ms old; once a wedged car
+                            // skews or pivots, the obstacle it is reversing AWAY from
+                            // dots negative and reads as "behind".
+                            //
+                            // Corroboration, not removal: the abort-deadlock cases at
+                            // rearDist=2.0-2.1 were correct and must keep aborting. The
+                            // rear channel only gets to overrule when it is FRESH and
+                            // reports real clearance. `none` (999) is not clearance —
+                            // it is no reading, and it must never satisfy this test.
+                            if (emergencyBehind && getSetting("reverseEmergCorroborateV2") == 1)
+                            {
+                                GateReach("reverseEmergCorroborateV2");
+                                long rearScanAge = lastScanCompletedTicks > 0
+                                    ? ModClock.Ticks - lastScanCompletedTicks : long.MaxValue;
+                                bool rearFresh = rearScanAge <= TEMP_ACTION_SCAN_MAX_AGE_TICKS;
+                                bool rearReads = navAssistDistBehind < 900f;
+                                bool rearSaysClear = rearFresh && rearReads
+                                    && navAssistDistBehind > rearAbortDist;
+                                if (rearSaysClear)
+                                {
+                                    GateFire("reverseEmergCorroborateV2");
+                                    emergencyBehind = false;
+                                    if (driveLogger != null && driveLogger.IsRunning
+                                        && revNow - lastEmergBehindOverruleLogTicks > 20000000L)
+                                    {
+                                        lastEmergBehindOverruleLogTicks = revNow;
+                                        driveLogger.Write("[F" + driveLogFrameCount
+                                            + "] EVENT reverse-emerg-overrule:"
+                                            + " rearDist=" + navAssistDistBehind.ToString("F1")
+                                            + " rearType=" + (navAssistTypeBehind ?? "none")
+                                            + " abortDist=" + rearAbortDist.ToString("F1")
+                                            + " threatGap=" + rearGap.ToString("F1")
+                                            + " scanAgeMs=" + (rearScanAge == long.MaxValue
+                                                ? -1L : rearScanAge / 10000L)
+                                            + " layer=" + stuckLayer
+                                            + " spd=" + playerVeh.Speed.ToString("F1"));
+                                    }
+                                }
+                                else GateVeto("reverseEmergCorroborateV2");
+                            }
                         }
                     }
                     else
@@ -21532,7 +24431,12 @@ namespace GrandTheftAccessibility
                                 + " rearEnt=" + (navAssistVehicleBehind != null
                                     && navAssistVehicleBehind.Exists()
                                     ? navAssistVehicleBehind.Handle : 0)
-                                + " rearStationary=" + rearVehStationary
+                                // iter-57 E: `false` here meant BOTH "a moving vehicle is
+                                // behind you" and "the thing behind you is static world
+                                // geometry, which this flag does not model" — and 20 of
+                                // 20 aborts on 08-14 were the latter. Say which.
+                                + " rearStationary=" + (navAssistTypeBehind == "world"
+                                    ? "world" : rearVehStationary.ToString())
                                 + " scanAgeMs=" + (lastScanCompletedTicks > 0
                                     ? (ModClock.Ticks - lastScanCompletedTicks) / 10000 : -1)
                                 + " grinding=" + grindingNow
@@ -21566,7 +24470,12 @@ namespace GrandTheftAccessibility
                                 + " rearType=" + navAssistTypeBehind
                                 + " hardFloor=" + (REVERSE_REAR_HARD_STOP + rearHalfLen).ToString("F1")
                                 + " signedSpd=" + GTA.Math.Vector3.Dot(playerVeh.Velocity, playerVeh.ForwardVector).ToString("F1")
-                                + " rearStationary=" + rearVehStationary);
+                                // iter-57 E: `false` here meant BOTH "a moving vehicle is
+                                // behind you" and "the thing behind you is static world
+                                // geometry, which this flag does not model" — and 20 of
+                                // 20 aborts on 08-14 were the latter. Say which.
+                                + " rearStationary=" + (navAssistTypeBehind == "world"
+                                    ? "world" : rearVehStationary.ToString()));
                         }
                     }
                     // iter-40 reverseV2 (the single most expensive defect of the
@@ -21697,6 +24606,25 @@ namespace GrandTheftAccessibility
             bool hbTrigger = hbBandV2
                 ? (emergencyBrakeActive && playerVeh.Speed > 8f)
                 : rampedBrakeInput >= 0.95f;
+            // iter-53 D8: say when the redefinition actually suppressed a handbrake.
+            // On 08-11-182121 this gate was ON, its GateFire never ran, and the digest
+            // read that as a missing counter because an unrelated event (brake-episode)
+            // was mapped to it. The truth was a real behaviour change nothing named: the
+            // top-band handbrake was absent for the whole session because the new
+            // trigger never coincided with the old one. This is the difference between
+            // "did nothing" and "did something invisible", which is the whole question a
+            // bisect asks. Rate-limited to 1 Hz; it can only fire while braking hard.
+            if (hbBandV2 && !hbTrigger && rampedBrakeInput >= 0.95f
+                && driveLogger != null && driveLogger.IsRunning
+                && ModClock.Ticks - hbBandSkipLastTicks > 10000000L)
+            {
+                hbBandSkipLastTicks = ModClock.Ticks;
+                driveLogger.Write("[F" + driveLogFrameCount + "] EVENT hb-band-skip:"
+                    + " ramped=" + rampedBrakeInput.ToString("F2")
+                    + " emerg=" + emergencyBrakeActive
+                    + " spd=" + playerVeh.Speed.ToString("F1")
+                    + " wheelsOk=" + hbWheelsOk);
+            }
             if (hbTrigger && !alignmentEngageReverse && hbWheelsOk) // iter-25 M1: don't handbrake a commanded reverse
             {
                 if (hbBandV2) GateFire("handbrakeBandV2");
@@ -21808,12 +24736,51 @@ namespace GrandTheftAccessibility
         }
 
         /// <summary>
+        /// iter-59 A1/A2: the steer-threat cue — a sine tone whose PITCH encodes how
+        /// little time is left to turn (400 Hz far, 1000 Hz imminent) and whose RATE
+        /// rises with the same urgency (900 ms -> 250 ms). This is the mod's primary
+        /// "something ahead, steer around it" channel to a blind driver.
+        ///
+        /// It owns its own throttle. The previous call site tested lastThreatCueTicks
+        /// but stamped lastAssistAnnounceTicks instead, so the gate never closed and
+        /// the tone restarted every frame. Stamping here is what makes pitch audible
+        /// AS pitch. lastThreatCueTicks is still stamped by the emergency-brake path
+        /// (:15958) so a slam-brake keeps suppressing the gentler steer cue.
+        /// </summary>
+        private void PlaySteerCue(float steerTTC, float steerThreshold)
+        {
+            if (getSetting("assistBeeps") != 1) return;
+
+            float urgency = Math.Max(0f, Math.Min(1f,
+                1f - (steerTTC / Math.Max(0.001f, steerThreshold))));
+            long interval = (long)(STEER_CUE_INTERVAL_CALM_TICKS
+                - (STEER_CUE_INTERVAL_CALM_TICKS - STEER_CUE_INTERVAL_URGENT_TICKS) * urgency);
+            long now = DateTime.Now.Ticks;
+            if (now - lastThreatCueTicks < interval) return;
+            lastThreatCueTicks = now;
+
+            try
+            {
+                outSteerAssist.Stop();
+                steerAssistBeep.Frequency = STEER_CUE_FREQ_BASE_HZ + (int)(urgency * STEER_CUE_FREQ_SPAN_HZ);
+                var sample = steerAssistBeep.Take(TimeSpan.FromSeconds(STEER_CUE_DURATION_S));
+                outSteerAssist.Init(sample);
+                outSteerAssist.Play();
+            }
+            catch { /* audio device contention is non-fatal */ }
+        }
+
+        /// <summary>
         /// Pre-impact warning beep. Sawtooth at middle C; gain rises and inter-beep
         /// interval shrinks as TTC drops. The user requested this so they can act
         /// before the autobrake fires — a predictable cue, not a surprise slam.
         /// </summary>
         private void PlayBrakeWarning(float ttc)
         {
+            // iter-59 A3: assistBeeps silences the non-speech drive-assist tones.
+            // Speech is deliberately NOT gated — a silent failure is the worst
+            // outcome this mod has.
+            if (getSetting("assistBeeps") != 1) return;
             // Normalize TTC into [0,1] where 1 = imminent.
             float t = (BRAKE_WARN_TTC_MAX - ttc) / Math.Max(0.001f, BRAKE_WARN_TTC_MAX - BRAKE_WARN_TTC_MIN);
             if (t < 0f) t = 0f; if (t > 1f) t = 1f;
@@ -21881,6 +24848,9 @@ namespace GrandTheftAccessibility
         /// </summary>
         private void PlayBlockedCue()
         {
+            // iter-59 A3: tone only. The accompanying speech at the call site is
+            // deliberately left ungated.
+            if (getSetting("assistBeeps") != 1) return;
             try
             {
                 outAccBlock.Stop();
@@ -21959,10 +24929,30 @@ namespace GrandTheftAccessibility
                     radiusIndex = 1;
                 return "Detection Radius: " + (int)detectionRadiusOptions[radiusIndex] + " meters";
             }
+            // iter-58 — same contract; without this the row announces a blank value when
+            // arrived at via menu entry rather than by cycling onto it.
+            if (s.id == "scanResultCap")
+            {
+                int idx = s.value;
+                if (idx < 0 || idx >= scanResultCapOptions.Length) idx = 2;
+                return "Nearby Scan Length: "
+                     + (scanResultCapOptions[idx] == int.MaxValue
+                        ? "everything in range"
+                        : "nearest " + scanResultCapOptions[idx]);
+            }
             if (s.id == "steeringAssist")
                 return "Steering Assist Mode: " + (s.value == 0 ? "Off" : (s.value == 1 ? "Assistive" : "Full"));
             if (s.id == "navAssistVerbosity")
                 return "Navigation Assist Detail: " + NavVerbosityName(s.value);
+            // iter-62 — same contract as every multi-value row above: without this the row
+            // announces a blank value when arrived at by entering the menu rather than by
+            // cycling onto it.
+            if (s.id == "listenerFrame")
+                return "Sound Direction Reference: " + ListenerFrameName(s.value);
+            if (s.id == "scanAudioSweep")
+                return "Scan Audio Sweep: " + ScanSweepName(s.value);
+            if (s.id == "hostileDetection")
+                return "Hostile Detection: " + HostileDetectionName(s.value);
             if (s.id == "navAssistFootRange")
             {
                 int idx = s.value;
@@ -21991,6 +24981,42 @@ namespace GrandTheftAccessibility
             return s.displayName + (s.value == 0 ? "Off" : "On");
         }
 
+        /// <summary>What "ahead" is measured against. In third-person GTA V the camera is what
+        /// the right stick aims and what the movement stick is relative to, so camera-relative
+        /// is what a player is actually steering by — but it also means the soundscape swings
+        /// when the camera does, which some people find harder to hold a mental map through.
+        /// Both ship so a session can settle it rather than an argument.</summary>
+        private string ListenerFrameName(int v)
+        {
+            switch (v)
+            {
+                case 0:  return "Your body";
+                case 2:  return "The camera, always";
+                default: return "The camera on foot, the vehicle when driving";
+            }
+        }
+
+        private string ScanSweepName(int v)
+        {
+            switch (v)
+            {
+                case 0:  return "Off, speech only";
+                case 2:  return "Sound only, no speech";
+                default: return "Speech, then sound";
+            }
+        }
+
+        private string HostileDetectionName(int v)
+        {
+            switch (v)
+            {
+                case 0:  return "Off";
+                case 2:  return "Add hostile groups and police";
+                case 3:  return "Add armed people nearby";
+                default: return "People already fighting you";
+            }
+        }
+
         private void SpeakCurrentSetting()
         {
             Speech.Ambient(FormatSettingValue(settingsMenu[settingsMenuIndex]));
@@ -22008,6 +25034,8 @@ namespace GrandTheftAccessibility
                 result = "Teleport player inside newly spawned vehicles. ";
             if (id == "butlerValet")
                 result = "Butler Vehicle Delivery. ";
+            if (id == "animalDirectMelee")
+                result = "Animal guard direct melee. ";
             if (id == "onscreen")
                 result = "Announce only visible nearby items. ";
             if (id == "speed")
@@ -22027,6 +25055,33 @@ namespace GrandTheftAccessibility
                 result = "Navigation Assist (Obstacle Detection). ";
             if (id == "navAssistVerbosity")
                 result = "Navigation Assist Detail: ";
+            // ---- iter-62 ----
+            if (id == "listenerFrame")
+                result = "Sound Direction Reference: ";
+            if (id == "scanAudioSweep")
+                result = "Scan Audio Sweep: ";
+            if (id == "spatialElevationCue")
+                result = "Announce sounds above and below with a chirp. ";
+            if (id == "hostileDetection")
+                result = "Hostile Detection: ";
+            if (id == "planeGearControl")
+                result = "Autopilot raises and lowers the landing gear. ";
+            if (id == "planeTaxiAssist")
+                result = "Autopilot taxis to the runway before takeoff. ";
+            if (id == "heliLandModeV2")
+                result = "Use Rockstar's helicopter landing mode. ";
+            if (id == "autodriveStyleV2")
+                result = "Use Rockstar's taxi driving style for auto-drive. ";
+            if (id == "pathFindRuntimeV2")
+                result = "Compare the live road graph against the bundled one (logging only). ";
+            if (id == "xyDistanceFix")
+                result = "Corrected ground distances on slopes. ";
+            if (id == "groundHeightV2")
+                result = "Precise ground detection for kerbs and drops. ";
+            if (id == "sanAndreasWildfires")
+                result = "San Andreas Wildfires, burning cars, people and fires start spreading wildfires. ";
+            if (id == "wildfireDriveHazard")
+                result = "Drive assist slows for wildfire on the road ahead. ";
             if (id == "navAssistFootRange")
                 result = "On-Foot Detection Range: ";
             if (id == "pickupDetection")
@@ -22053,6 +25108,12 @@ namespace GrandTheftAccessibility
                 result = "Service/Building Proximity Announcements. ";
             if (id == "detectionRadius")
                 result = "Detection Radius: ";
+            // iter-58. Both labels say what the row DOES, per the rule above — these are
+            // read aloud, and "Detailed Scans" alone would not tell anyone what changes.
+            if (id == "detailedScans")
+                result = "Say what nearby people and vehicles are doing, not just where they are. ";
+            if (id == "scanResultCap")
+                result = "Nearby Scan Length: ";
             if (id == "infiniteAmmo")
                 result = "Unlimitted Ammo. ";
             if (id == "neverWanted")
@@ -22133,7 +25194,7 @@ namespace GrandTheftAccessibility
             if (id == "intoxAudio")
                 result = "Intoxication audio effects. ";
             if (id == "intoxVanillaOnly")
-                result = "Use the game's own drunkenness, one drink at a time. ";
+                result = "Game's own drunkenness bridge, unavailable safely; uses this mod's intoxication instead. ";
             if (id == "intoxDriveImpair")
                 result = "Impaired driving when intoxicated (Drive Assist). ";
             if (id == "intoxBlackoutDrive")
@@ -22235,8 +25296,29 @@ namespace GrandTheftAccessibility
                 result = "Second steering channel, for when the normal one is not reaching the car (Drive Assist). ";
             if (id == "gunfireAttribV2")
                 result = "Say when damage is gunfire rather than a crash, and stop recovery fighting it (Drive Assist). ";
+            if (id == "reverseEmergCorroborateV2")
+                result = "Stop something in front of the car from cancelling a reverse when the way behind is clear (Drive Assist). ";
+            if (id == "stuckEscalationV2")
+                result = "Keep trying longer before giving up on a stuck car, so it can move itself clear (Drive Assist). ";
+            if (id == "giveupHazardV2")
+                result = "When the assist hands back a stuck car, say what is in front of it, including low things like kerbs and fences (Drive Assist). ";
+            if (id == "laneTargetV2")
+                result = "Aim at the middle of a lane on multi-lane one-way roads, instead of at the line between lanes (Drive Assist, experimental). ";
+            if (id == "accLateralInterlockV2")
+                result = "Stop cruise control accelerating while the car is out of its lane or pointing across the road (Drive Assist, experimental). ";
+            if (id == "frontendSuspendV2")
+                result = "Pause drive assist while the Interaction Menu is open, and say so, instead of steering for you while you are in a menu (Drive Assist, experimental). ";
+            if (id == "recoveryHoldV2")
+                result = "When the assist cannot find any road to recover to, hold still and say so, instead of pretending it is following a lane (Drive Assist). ";
+            if (id == "stuckConvergeV2")
+                result = "Stop the stuck-car rescue repeating forever in the same place. It waits between attempts, counts them, and hands the car back when it has run out (Drive Assist). ";
             if (id == "hapticFeedback")
                 result = "Controller Haptic Feedback. ";
+            if (id == "assistBeeps")
+                result = "Drive assist warning beeps. The rising sine tone means steer around "
+                    + "something ahead; higher pitch is less time. The buzzing tone means brake "
+                    + "now; faster and louder is sooner. The low tone means the road is blocked "
+                    + "and the assist is holding the car. Speech is not affected. ";
             if (id == "adaptiveCruise")
                 result = "Adaptive Cruise Control (Full Mode). ";
             if (id == "bodyguardAutoRespawn")
@@ -22253,6 +25335,8 @@ namespace GrandTheftAccessibility
                 result = "Say how far down a settings list you are, such as 2 of 17 (Menu Reader). ";
             if (id == "menuReaderBindLearn")
                 result = "Learn what each setting row controls the first time you change it, so it can say its value from then on (Menu Reader). ";
+            if (id == "menuSnapshotImage")
+                result = "Debug: save a screenshot when a menu or phone row cannot be named. On by default; needs Menu Debug Logging. ";
             if (id == "phoneRowTextV2")
                 result = "Read the rows inside phone apps such as Settings, Texts and Email (Menu Reader, experimental). ";
 
@@ -22274,17 +25358,33 @@ namespace GrandTheftAccessibility
             if (id == "emergencyDispatch")
                 result = "Allow calling police, ambulance or fire brigade from the Events menu. ";
 
-            // iter-52 failure snapshots. Debug instrumentation; each one says it
-            // needs the drive-assist log, because on its own it does nothing at all
-            // and a user toggling it would otherwise get silence with no explanation.
+            // iter-52 failure snapshots, reworded in iter-54. Each still names its
+            // dependency, because a toggle that does nothing on its own and says so is
+            // the difference between "off" and "broken" for someone who cannot see a
+            // greyed-out row. What changed is the framing: they are ON by default now,
+            // so these read as "already on, turn off to stop" rather than as four
+            // separate things the player has to go and find and enable in order.
             if (id == "snapshotAllFailures")
-                result = "Debug: record a snapshot at every drive-assist failure (needs Drive Assist Debug Log). ";
+                result = "Debug: record a snapshot at every drive-assist failure. On by default; only does anything while Drive Assist Debug Logging is on. ";
             if (id == "snapshotGeometry")
-                result = "Debug: include surroundings in failure snapshots (needs Drive Assist Debug Log). ";
+                result = "Debug: include the surroundings in failure snapshots. On by default; needs Drive Assist Debug Logging. ";
             if (id == "snapshotImage")
-                result = "Debug: save a screenshot at each failure (needs Drive Assist Debug Log, and windowed mode). ";
+                result = "Debug: save a screenshot at each failure. On by default; needs Drive Assist Debug Logging. If it cannot capture, it retries every 30 seconds and says so. ";
+            if (id == "brakeWriteV2")
+                result = "Debug: when the car is in the air, do not treat it as rolling "
+                    + "backwards. Off by default. Without this, a mid-air spin can make the "
+                    + "assist send its braking to the accelerator instead. ";
             if (id == "snapshotPreroll")
-                result = "Debug: include the seconds leading up to a failure (needs Drive Assist Debug Log). ";
+                result = "Debug: include the few seconds leading up to a failure in the screenshots. On by default; needs Drive Assist Debug Logging. ";
+            if (id == "driveAssistBaseline")
+                result = "Debug: turn the eleven experimental drive assist settings off in "
+                    + "one go, so a test drive can be compared against them being on. Turn "
+                    + "it off again to put them back (Drive Assist). ";
+            if (id == "iter71Experimental")
+                result = "Debug: turn iteration 71's three drive assist changes off in one "
+                    + "go - the cruise-control lane interlock, the no-road hold, and the "
+                    + "stuck-rescue limit - so a test drive can be compared against them "
+                    + "being on. Turn it off again to put them back (Drive Assist). ";
             if (id == "announceTime")
                 result = "Time of Day Announcements. ";
             if (id == "announceHeadings")
@@ -22395,7 +25495,8 @@ namespace GrandTheftAccessibility
         /// resets its steady-state counter.
         /// </summary>
         private void UpdateNavZoneState(int zone, float dist, string type, float maxRange,
-            Vehicle veh, Ped ped, bool inVehicle, float vehicleSpeed, float bearing, float scanDtSec)
+            Vehicle veh, Ped ped, bool inVehicle, float vehicleSpeed, float bearing,
+            float scanDtSec, GTA.Math.Vector3 hitWorldPos, bool hasHitPos)
         {
             if (type == "none" || dist >= maxRange)
             {
@@ -22405,6 +25506,7 @@ namespace GrandTheftAccessibility
                 navZonePrevDist[zone] = -1f;
                 navZoneClosing[zone] = 0f;
                 navZoneMovingVehicle[zone] = false;
+                navZoneHasPos[zone] = false;
                 return;
             }
             float norm = Math.Min(1f, Math.Max(0f, dist / maxRange));
@@ -22444,6 +25546,19 @@ namespace GrandTheftAccessibility
             navZoneNormDist[zone] = norm;
             navZoneWeight[zone] = weight;
             navZoneBearing[zone] = bearing;
+            // Prefer the entity's live position over the cast hit point: the hit point is where
+            // the ray met the surface, which for a car is its flank, while the sound should come
+            // from the thing itself. Falls back to the hit point for world geometry.
+            if (ent != null)
+            {
+                try { navZonePos[zone] = ent.Position; navZoneHasPos[zone] = ent.Exists(); }
+                catch { navZonePos[zone] = hitWorldPos; navZoneHasPos[zone] = hasHitPos; }
+            }
+            else
+            {
+                navZonePos[zone] = hitWorldPos;
+                navZoneHasPos[zone] = hasHitPos;
+            }
             if (band != navZoneBand[zone] || type != navZoneLastType[zone])
             {
                 // iter-37 N9: contact haptics on foot — one pulse per entry into
@@ -22594,9 +25709,12 @@ namespace GrandTheftAccessibility
                 int band = navZoneBand[z];
                 string type = navZoneLastType[z];
                 float norm = navZoneNormDist[z];
-                float gain = band >= 4
-                    ? 0.12f
-                    : 0.05f + 0.05f * (1f - Math.Min(1f, Math.Max(0f, norm)));
+                // iter-62: FLAT per-band level. This used to lift the gain as the obstacle
+                // closed, which now double-counts — Spatializer3D applies its own distance
+                // curve, and two multiplied falloffs make near obstacles blare and far ones
+                // vanish. Band still separates contact from everything else, because contact
+                // is a category, not a distance.
+                float gain = band >= 4 ? 0.12f : 0.075f;
                 // iter-37 N7: pitch encodes WHAT (fixed base note per type, with a
                 // closing/receding glide) — distance lives in the pulse rate.
                 // Continuous pan from the actual bearing replaces the old
@@ -22608,7 +25726,8 @@ namespace GrandTheftAccessibility
                     ? 0.03f : 0.06f;
                 if (z == 3) { freq /= 2f; dur = 0.03f; } // octave-down double-tick signature
 
-                EmitNavBeepRaw(z, freq, gain, pan, GetWaveformForType(type), dur);
+                EmitNavBeepRaw(z, freq, gain, pan, GetWaveformForType(type), dur,
+                    navZonePos[z], navZoneHasPos[z]);
                 if (z == 3)
                 {
                     // Second tick of the BEHIND double-tick, 60 ms later.
@@ -22620,7 +25739,9 @@ namespace GrandTheftAccessibility
                         Gain = gain,
                         Pan = pan,
                         DurSec = dur,
-                        Wave = GetWaveformForType(type)
+                        Wave = GetWaveformForType(type),
+                        WorldPos = navZonePos[z],
+                        HasWorldPos = navZoneHasPos[z]
                     });
                 }
                 navLastAnyBeepTicks = now;
@@ -22641,10 +25762,15 @@ namespace GrandTheftAccessibility
             }
         }
 
-        /// <summary>Plays one nav beep on the given zone's dedicated channel,
-        /// with the click-removing attack/release envelope.</summary>
+        /// <summary>Plays one nav beep on the given zone's dedicated channel, with the
+        /// click-removing attack/release envelope and full 3D placement.
+        ///
+        /// hasWorldPos false is not an error: a few cues (menu confirmations, the
+        /// no-waypoint tone) have no position by nature and keep the old constant-power pan.
+        /// A cue that SHOULD have a position and lost it logs spatial-fallback instead.</summary>
         private void EmitNavBeepRaw(int zone, float freq, float gain, float pan,
-            SignalGeneratorType wave, float durSec)
+            SignalGeneratorType wave, float durSec,
+            GTA.Math.Vector3 worldPos = default(GTA.Math.Vector3), bool hasWorldPos = false)
         {
             SignalGenerator gen; WaveOutEvent dev;
             switch (zone)
@@ -22663,9 +25789,16 @@ namespace GrandTheftAccessibility
                 gen.Type = wave;
                 var sample = gen.Take(TimeSpan.FromSeconds(durSec));
                 var shaped = new EnvelopeSampleProvider(sample, durSec);
-                var panned = new PanningSampleProvider(shaped) { Pan = pan };
-                dev.Init(panned);
-                dev.Play();
+                if (hasWorldPos)
+                {
+                    PlaySpatial(dev, shaped, worldPos, pan, true, "nav-z" + zone);
+                }
+                else
+                {
+                    dev.Init(new PanningSampleProvider(shaped)
+                    { Pan = Math.Max(-1f, Math.Min(1f, pan)) });
+                    dev.Play();
+                }
             }
             catch { /* audio-device hiccup must never kill the tick */ }
         }
@@ -22680,9 +25813,314 @@ namespace GrandTheftAccessibility
                 if (now >= navBeepQueue[i].FireAtTicks)
                 {
                     var b = navBeepQueue[i];
-                    EmitNavBeepRaw(b.Zone, b.Freq, b.Gain, b.Pan, b.Wave, b.DurSec);
+                    EmitNavBeepRaw(b.Zone, b.Freq, b.Gain, b.Pan, b.Wave, b.DurSec,
+                        b.WorldPos, b.HasWorldPos);
                     navBeepQueue.RemoveAt(i);
+                    // Second half of a two-tone elevation chirp. Queued rather than played
+                    // inline because the first tone is still sounding on this device and a
+                    // second Play() would cut it off mid-note.
+                    if (b.ChirpTo > 0f)
+                    {
+                        b.FireAtTicks = now + 550000L;   // 55 ms
+                        b.Freq = b.ChirpTo;
+                        b.ChirpTo = 0f;
+                        navBeepQueue.Add(b);
+                    }
                 }
+            }
+        }
+
+
+        // ============================================
+        // iter-62 W1 — SPATIAL AUDIO
+        // ============================================
+        // The listener basis. Every positioned cue is expressed in it, so the whole soundscape
+        // agrees about which way "ahead" points instead of each emitter deciding for itself
+        // (which is how the door/ladder/pickup cues ended up using three different right
+        // vectors). Recomputed at most once per frame and cached.
+        private GTA.Math.Vector3 navListenerPos = GTA.Math.Vector3.Zero;
+        private GTA.Math.Vector3 navListenerFwd = GTA.Math.Vector3.Zero;
+        private GTA.Math.Vector3 navListenerRight = GTA.Math.Vector3.Zero;
+        // Keyed on Game.GameTime, NOT on driveLogFrameCount: that counter only advances
+        // inside the drive-assist logging path, so with the debug log off — or simply while on
+        // foot — it never moves, and the cache would have pinned the listener's forward vector
+        // to whatever it was the first time anything made a sound.
+        private int navListenerBasisTime = -1;
+        private bool navListenerValid = false;
+        private long navSpatialFallbackLogTicks = 0;
+
+        /// <summary>Refreshes the cached listener basis for this frame.
+        ///
+        /// listenerFrame: 0 = the player's body, 1 = the camera on foot and the vehicle when
+        /// driving (default), 2 = the camera always.
+        ///
+        /// Camera-relative is the default because in third-person GTA V the camera is what the
+        /// right stick aims and what the movement stick is measured against — so it is the
+        /// frame the player is actually steering in, and sweeping the stick becomes a way to
+        /// scan a space by ear. It is a setting rather than a decision because it also means
+        /// the soundscape swings when the camera does, and whether that helps or hinders is a
+        /// question for a session, not for an argument.</summary>
+        private void UpdateListenerBasis()
+        {
+            int nowMs = Game.GameTime;
+            if (navListenerBasisTime == nowMs && navListenerValid) return;
+            navListenerBasisTime = nowMs;
+            navListenerValid = false;
+            try
+            {
+                Ped me = Game.Player.Character;
+                if (me == null || !me.Exists()) return;
+                navListenerPos = me.Position + new GTA.Math.Vector3(0f, 0f, 0.6f);
+
+                int mode = getSetting("listenerFrame");
+                bool inVeh = me.IsInVehicle();
+                GTA.Math.Vector3 fwd;
+                if (mode == 0 || (mode == 1 && inVeh))
+                {
+                    Vehicle v = inVeh ? me.CurrentVehicle : null;
+                    fwd = (mode != 0 && v != null && v.Exists()) ? v.ForwardVector : me.ForwardVector;
+                }
+                else
+                {
+                    fwd = GameplayCamera.ForwardVector;
+                }
+
+                // Flatten to the horizontal plane. A camera pitched at the sky would otherwise
+                // rotate the whole soundscape about the player's ears every time they looked up.
+                fwd = new GTA.Math.Vector3(fwd.X, fwd.Y, 0f);
+                float len = fwd.Length();
+                if (len < 0.01f)
+                {
+                    // Looking straight up or down: the horizontal heading is genuinely
+                    // undefined, so fall back to the body rather than to an arbitrary axis.
+                    fwd = new GTA.Math.Vector3(me.ForwardVector.X, me.ForwardVector.Y, 0f);
+                    len = fwd.Length();
+                    if (len < 0.01f) return;
+                }
+                navListenerFwd = fwd / len;
+                // GTA headings are counterclockwise, so right is (fwd.Y, -fwd.X). This is the
+                // same construction RunWhatsAheadFan already uses for its ray fan.
+                navListenerRight = new GTA.Math.Vector3(navListenerFwd.Y, -navListenerFwd.X, 0f);
+                navListenerValid = true;
+            }
+            catch { navListenerValid = false; }
+        }
+
+        /// <summary>World point -> listener-relative (right, forward, up), metres.
+        /// Returns false when no basis could be built this frame.</summary>
+        private bool ToListenerFrame(GTA.Math.Vector3 world,
+            out float right, out float forward, out float up)
+        {
+            right = forward = up = 0f;
+            UpdateListenerBasis();
+            if (!navListenerValid) return false;
+            GTA.Math.Vector3 d = world - navListenerPos;
+            right = GTA.Math.Vector3.Dot(d, navListenerRight);
+            forward = GTA.Math.Vector3.Dot(d, navListenerFwd);
+            up = d.Z;
+            return true;
+        }
+
+        /// <summary>Plays one mono cue at a world position on the given device.
+        ///
+        /// This is the single choke point every positioned cue goes through. If the listener
+        /// basis cannot be built, it falls back to the old constant-power pan and SAYS SO in
+        /// the log — a spatializer that quietly degrades to mono would be indistinguishable
+        /// from one that is working, which is the failure mode this whole mod is built to
+        /// avoid. Rate-limited to one line per 10 s so a sustained outage does not flood.</summary>
+        private void PlaySpatial(WaveOutEvent dev, ISampleProvider mono,
+            GTA.Math.Vector3 worldPos, float fallbackPan, bool applyDistance, string site)
+        {
+            if (dev == null || mono == null) return;
+            float rx, fy, uz;
+            if (ToListenerFrame(worldPos, out rx, out fy, out uz))
+            {
+                var sp = new Spatializer3D(mono, rx, fy, uz, applyDistance);
+                dev.Init(sp);
+                dev.Play();
+                MaybeElevationCue(sp, worldPos, site);
+                return;
+            }
+            long now = DateTime.Now.Ticks;
+            if (driveLogger != null && driveLogger.IsRunning
+                && now - navSpatialFallbackLogTicks > 100000000L)
+            {
+                navSpatialFallbackLogTicks = now;
+                driveLogger.Write("[F" + driveLogFrameCount + "] EVENT spatial-fallback:"
+                    + " site=" + site + " reason=no-listener-basis");
+            }
+            dev.Init(new PanningSampleProvider(mono)
+            { Pan = Math.Max(-1f, Math.Min(1f, fallbackPan)) });
+            dev.Play();
+        }
+
+        // Elevation chirp. Deliberately NOT a spectral notch: the real elevation cue lives at
+        // 7-9 kHz and these tones are 330-620 Hz, so a notch would filter silence and measure
+        // as "implemented" while being perfectly inaudible. A two-tone chirp is symbolic
+        // instead of psychoacoustic, which means it has to be learned — but it can be heard.
+        private const float ELEV_CUE_MIN_DEG = 20f;
+        private long navElevCueTicks = 0;
+        private const long ELEV_CUE_GAP_TICKS = 4000000L;   // 400 ms
+
+        private void MaybeElevationCue(Spatializer3D sp, GTA.Math.Vector3 worldPos, string site)
+        {
+            if (getSetting("spatialElevationCue") != 1) return;
+            if (sp == null) return;
+            float elev = sp.ElevationDegrees;
+            if (Math.Abs(elev) < ELEV_CUE_MIN_DEG) return;
+            long now = DateTime.Now.Ticks;
+            if (now - navElevCueTicks < ELEV_CUE_GAP_TICKS) return;
+            navElevCueTicks = now;
+            bool above = elev > 0f;
+            // Queued rather than played inline: the cue it annotates is still sounding, and two
+            // Play() calls on one device in the same frame cut the first one off.
+            navBeepQueue.Add(new DeferredNavBeep
+            {
+                FireAtTicks = now + 900000L,          // 90 ms after the cue it annotates
+                Zone = 4,                              // the hazard channel, free of zone traffic
+                Freq = above ? 900f : 500f,
+                Gain = 0.07f,
+                WorldPos = worldPos,
+                HasWorldPos = true,
+                Pan = 0f,
+                DurSec = 0.05f,
+                Wave = SignalGeneratorType.Sin,
+                ChirpTo = above ? 1400f : 320f
+            });
+            if (driveLogger != null && driveLogger.IsRunning)
+                driveLogger.Write("[F" + driveLogFrameCount + "] EVENT spatial-elev:"
+                    + " site=" + site + " deg=" + FmtF(elev)
+                    + " dir=" + (above ? "above" : "below"));
+        }
+
+        /// <summary>Ground height at a point, with "no ground found" reported separately from
+        /// "ground at zero".
+        ///
+        /// gate OFF keeps the legacy behaviour EXACTLY, including its ambiguity, so the drop
+        /// probe's tuning is unchanged until a session says otherwise. Gate ON uses the
+        /// nightly's three-argument form, which answers the two questions separately instead
+        /// of encoding one of them as a magic value that happens to also be a real altitude
+        /// along the whole Los Santos shoreline.</summary>
+        private void SampleGround(GTA.Math.Vector3 at, out float height, out bool found)
+        {
+            if (getSetting("groundHeightV2") == 1)
+            {
+                try
+                {
+                    float h;
+                    if (World.GetGroundHeight(at, out h, GetGroundHeightMode.Normal))
+                    {
+                        height = h;
+                        found = true;
+                        return;
+                    }
+                    height = 0f;
+                    found = false;
+                    return;
+                }
+                catch { /* fall through to the legacy path rather than lose the probe */ }
+            }
+#pragma warning disable 618
+            height = World.GetGroundHeight(at);
+#pragma warning restore 618
+            found = height > 0.01f;
+        }
+
+        // ---- iter-62 W4: pathFindRuntimeV2 (telemetry only, drives nothing) ----
+        private long pathFindProbeTicks = 0;
+        private int pathFindSamples = 0, pathFindAgree = 0, pathFindRefused = 0;
+        private int pathFindFlagAgree = 0, pathFindFlagCompared = 0;
+        private long pathFindCensusTicks = 0;
+        private const float PATHFIND_AGREE_M = 5f;   // same node if within 5 m
+
+        /// <summary>Samples the nightly's runtime path graph against the bundled one and logs
+        /// whether they agree. Never feeds a consumer — see the header note in
+        /// tools/../pathfind rationale above this method.</summary>
+        private void TickPathFindProbe()
+        {
+            if (getSetting("pathFindRuntimeV2") != 1) return;
+            long now = DateTime.Now.Ticks;
+            if (now - pathFindProbeTicks < 20000000L) return;   // 2 s
+            pathFindProbeTicks = now;
+
+            GTA.Math.Vector3 pos;
+            try { pos = Game.Player.Character.Position; }
+            catch { return; }
+            if (!NodeGraph.IsLoaded) return;
+
+            int idx = NodeGraph.FindNearestNode(pos, 60f);
+            if (idx < 0) return;
+            GTA.Math.Vector3 bundled = NodeGraph.GetPosition(idx);
+
+            GTA.Math.Vector3 runtime;
+            VehiclePathNodePropertyFlags rtFlags;
+            bool rtOk = false;
+            try
+            {
+                PathNode pn = PathFind.GetClosestVehicleNode(pos, 60f, null);
+                // EVERY memory-backed read is validity-checked before it is believed. IsLoaded
+                // false and a zero MemoryAddress are the two ways this returns a confident
+                // nothing, and both must count as "refused", never as "no junction here".
+                if (pn.IsLoaded && pn.MemoryAddress != IntPtr.Zero)
+                {
+                    runtime = pn.Position;
+                    rtFlags = pn.GetVehicleNodePropertyFlags();
+                    rtOk = runtime != GTA.Math.Vector3.Zero;
+                    if (rtOk)
+                    {
+                        pathFindSamples++;
+                        float sep = GTA.Math.Vector3.Distance(bundled, runtime);
+                        bool same = sep <= PATHFIND_AGREE_M;
+                        if (same) pathFindAgree++;
+
+                        // Flag agreement, only on the concepts both models actually carry.
+                        NodeGraph.NodeFlags bf = NodeGraph.GetFlags(idx);
+                        int agree = 0, compared = 0;
+                        compared++;
+                        if (((bf & NodeGraph.NodeFlags.Junction) != 0)
+                            == ((rtFlags & VehiclePathNodePropertyFlags.Junction) != 0)) agree++;
+                        compared++;
+                        if (((bf & NodeGraph.NodeFlags.TrafficLight) != 0)
+                            == ((rtFlags & VehiclePathNodePropertyFlags.TrafficLight) != 0)) agree++;
+                        compared++;
+                        if (((bf & NodeGraph.NodeFlags.Freeway) != 0)
+                            == ((rtFlags & VehiclePathNodePropertyFlags.Highway) != 0)) agree++;
+                        pathFindFlagAgree += agree;
+                        pathFindFlagCompared += compared;
+
+                        if (driveLogger != null && driveLogger.IsRunning)
+                            driveLogger.Write("[F" + driveLogFrameCount + "] EVENT pathfind-probe:"
+                                + " sep=" + FmtF(sep) + " same=" + same
+                                + " bundledFlags=" + bf
+                                + " runtimeFlags=" + rtFlags
+                                + " density=" + pn.VehicleDensity
+                                + " switchedOff=" + pn.IsSwitchedOff
+                                + " flagAgree=" + agree + "/" + compared);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                // An exception here is the GOOD outcome relative to a silent zero: it is
+                // legible. Counted as a refusal and never as agreement.
+                rtOk = false;
+                if (driveLogger != null && driveLogger.IsRunning && pathFindRefused < 5)
+                    driveLogger.Write("[F" + driveLogFrameCount + "] EVENT pathfind-probe:"
+                        + " refused=exception msg=" + ex.GetType().Name);
+            }
+            if (!rtOk) pathFindRefused++;
+
+            // 60 s census, so a session has one line to read instead of hundreds.
+            if (now - pathFindCensusTicks > 600000000L)
+            {
+                pathFindCensusTicks = now;
+                if (driveLogger != null && driveLogger.IsRunning)
+                    driveLogger.Write("[F" + driveLogFrameCount + "] EVENT pathfind-census:"
+                        + " samples=" + pathFindSamples
+                        + " agreedPos=" + pathFindAgree
+                        + " refused=" + pathFindRefused
+                        + " flagAgree=" + pathFindFlagAgree + "/" + pathFindFlagCompared
+                        + " note=telemetry-only-drives-nothing");
             }
         }
 
@@ -22766,14 +26204,99 @@ namespace GrandTheftAccessibility
                 Speech.Info("Navigation assist is off.");
                 return;
             }
-            string s = "Ahead: " + DescribeZoneForSpeech(1)
-                + ". Right: " + DescribeZoneForSpeech(2)
-                + ". Behind: " + DescribeZoneForSpeech(3)
-                + ". Left: " + DescribeZoneForSpeech(0) + ".";
-            Speech.Info(s);
+            int sweepMode = getSetting("scanAudioSweep");
+            if (sweepMode != 2)
+            {
+                string s = "Ahead: " + DescribeZoneForSpeech(1)
+                    + ". Right: " + DescribeZoneForSpeech(2)
+                    + ". Behind: " + DescribeZoneForSpeech(3)
+                    + ". Left: " + DescribeZoneForSpeech(0) + ".";
+                Speech.Info(s);
+            }
+            if (sweepMode != 0) QueueAroundMeSweep(sweepMode == 2);
             if (driveLogger != null && driveLogger.IsRunning)
                 driveLogger.Write("[F" + driveLogFrameCount
                     + "] EVENT nav-query: kind=around-me");
+        }
+
+        // ---- iter-62: positioned scan sweeps ----
+        // Both sweeps ride the existing deferred-beep queue, so they inherit its device
+        // arbitration and cannot collide with the ambient pulse train mid-note.
+        //
+        // The sweep is deliberately ORDERED and evenly spaced rather than fired all at once.
+        // Eight simultaneous tones is a chord, and a chord carries no layout; eight tones
+        // 90 ms apart, swept left to right, is a shape.
+        private const long SWEEP_AROUND_GAP_TICKS = 1800000L;   // 180 ms between zones
+        private const long SWEEP_FAN_GAP_TICKS = 900000L;       // 90 ms between rays
+        private const long SWEEP_SPEECH_LEAD_TICKS = 3000000L;  // 300 ms behind the speech
+
+        /// <summary>Around Me: one positioned ping per non-clear zone, ahead / right / behind /
+        /// left, each with its own type timbre and at its own real bearing, distance and
+        /// height. Clear zones are SILENT — an absence in the sweep is the information.</summary>
+        private void QueueAroundMeSweep(bool immediate)
+        {
+            long t = DateTime.Now.Ticks + (immediate ? 0L : SWEEP_SPEECH_LEAD_TICKS);
+            int[] order = { 1, 2, 3, 0 };            // ahead, right, behind, left
+            foreach (int z in order)
+            {
+                if (navZoneBand[z] < 0 || !navZoneHasPos[z]) continue;
+                string type = navZoneLastType[z];
+                navBeepQueue.Add(new DeferredNavBeep
+                {
+                    FireAtTicks = t,
+                    Zone = z,
+                    Freq = GetNavPulseFrequency(type, navZoneMovingVehicle[z], 0f),
+                    Gain = 0.11f,
+                    Pan = Math.Max(-1f, Math.Min(1f, navZoneBearing[z] * 1.4f)),
+                    DurSec = 0.07f,
+                    Wave = GetWaveformForType(type),
+                    WorldPos = navZonePos[z],
+                    HasWorldPos = true
+                });
+                t += SWEEP_AROUND_GAP_TICKS;
+            }
+            if (driveLogger != null && driveLogger.IsRunning)
+                driveLogger.Write("[F" + driveLogFrameCount + "] EVENT nav-sweep:"
+                    + " kind=around-me queued=" + navBeepQueue.Count);
+        }
+
+        /// <summary>What's Ahead: eight pings swept left to right along the ray fan, each placed
+        /// at the point its ray actually struck.
+        ///
+        /// This is the one that earns the feature. The prose version reports at most two
+        /// openings and has to name them ("Opening ahead left at 3 meters"); the sweep renders
+        /// every ray, so a doorway is simply a place where the wall is further away — audible
+        /// as a hole in the sweep, at the moment the sweep passes it, without being counted,
+        /// ranked or described first.</summary>
+        private void QueueFanSweep(bool immediate)
+        {
+            long t = DateTime.Now.Ticks + (immediate ? 0L : SWEEP_SPEECH_LEAD_TICKS);
+            for (int i = 0; i < 8; i++)
+            {
+                double rad = navFanAnglesDeg[i] * Math.PI / 180.0;
+                GTA.Math.Vector3 dir = navFanForward * (float)Math.Cos(rad)
+                    + navFanRight * (float)Math.Sin(rad);
+                float d = navFanDist[i];
+                GTA.Math.Vector3 hit = navFanOrigin + dir * d;
+                // Fixed square-wave note: every ray in this fan is scene geometry, and under
+                // the iter-37 doctrine that is one type, so it gets one pitch. What varies
+                // across the sweep is WHERE each tone is and how far — never what it is.
+                navBeepQueue.Add(new DeferredNavBeep
+                {
+                    FireAtTicks = t,
+                    Zone = i < 3 ? 0 : (i > 4 ? 2 : 1),   // spread across the three zone devices
+                    Freq = 330f,
+                    Gain = 0.10f,
+                    Pan = (float)Math.Sin(rad),
+                    DurSec = 0.055f,
+                    Wave = SignalGeneratorType.Square,
+                    WorldPos = hit,
+                    HasWorldPos = true
+                });
+                t += SWEEP_FAN_GAP_TICKS;
+            }
+            if (driveLogger != null && driveLogger.IsRunning)
+                driveLogger.Write("[F" + driveLogFrameCount + "] EVENT nav-sweep: kind=fan rays=8");
         }
 
         private string DescribeZoneForSpeech(int zone)
@@ -22883,7 +26406,9 @@ namespace GrandTheftAccessibility
                     s += ". " + ahead + " ahead";
             }
             catch { }
-            Speech.Info(s + ".");
+            int fanSweep = getSetting("scanAudioSweep");
+            if (fanSweep != 2) Speech.Info(s + ".");
+            if (fanSweep != 0) QueueFanSweep(fanSweep == 2);
             if (driveLogger != null && driveLogger.IsRunning)
             {
                 string fan = "";
@@ -23162,7 +26687,19 @@ namespace GrandTheftAccessibility
                 else shapeTestStatus0Count++;
                 EmitShapeTestStatsIfDue();
 
-                if (status != ShapeTestStatus.Ready || !didHitV2)
+                // iter-53 D9: these are two different answers and must not share a
+                // return. `-1` is "the test ran and there is nothing there"; `-2` is
+                // "the test did not run", which callers already handle by holding the
+                // last reading (see the pool-refusal branch at :6718). Collapsing
+                // NotReady into -1 reports an unanswered cast as OPEN ROAD, which is
+                // precisely the failure mode CLAUDE.md calls out — "refused and clear
+                // are NOT the same, and reading refused as open road is exactly how a
+                // wedge disappears". nonReady was 0 across the whole 08-11-182121
+                // session, so this is a contract repair rather than a behaviour change,
+                // which is the best possible time to make it.
+                if (status != ShapeTestStatus.Ready)
+                    return -2f;
+                if (!didHitV2)
                     return -1f;
 
                 GTA.Math.Vector3 hpV2 = res.HitPosition;
@@ -23416,6 +26953,7 @@ namespace GrandTheftAccessibility
             bodyguardMenu.Add("Configure Guard");                        // 33
             bodyguardMenu.Add("Guard Weapon");                           // 34
             bodyguardMenu.Add("Vehicle Delivery");                       // 35
+            bodyguardMenu.Add("Animal Direct Melee");                     // 36; iter-68, ships off
         }
 
         // Per-guard weapon config UI helpers (menu entries 33/34).
@@ -23470,32 +27008,54 @@ namespace GrandTheftAccessibility
 
         void SetupGuardGroup()
         {
-            if (bodyguardGroupId >= 0)
+            CleanupGuardGroup();
+            int groupCount = Math.Min(3, 1 + bodyguards.Count / 7);
+            for (int i = 0; i < groupCount; i++)
+                bodyguardGroupIds.Add(Function.Call<int>(Hash.CREATE_GROUP, 0));
+            bodyguardGroupId = bodyguardGroupIds[0];
+            Function.Call(Hash.SET_PED_AS_GROUP_LEADER, Game.Player.Character, bodyguardGroupIds[0]);
+            for (int group = 1; group < bodyguardGroupIds.Count; group++)
             {
-                Function.Call(Hash.REMOVE_GROUP, bodyguardGroupId);
+                int leaderIndex = group * 7 - 1;
+                if (leaderIndex < bodyguards.Count && IsGuardValid(bodyguards[leaderIndex]))
+                    Function.Call(Hash.SET_PED_AS_GROUP_LEADER, bodyguards[leaderIndex], bodyguardGroupIds[group]);
             }
-            bodyguardGroupId = Function.Call<int>(Hash.CREATE_GROUP, 0);
-            Function.Call(Hash.SET_PED_AS_GROUP_LEADER, Game.Player.Character, bodyguardGroupId);
-            Function.Call(Hash.SET_GROUP_FORMATION, bodyguardGroupId, FORMATION_TYPES[guardFormationIndex].id >= 0 ? FORMATION_TYPES[guardFormationIndex].id : 0);
             float spacing = FORMATION_SPACING_OPTIONS[guardFormationSpacingIndex];
-            Function.Call(Hash.SET_GROUP_FORMATION_SPACING, bodyguardGroupId, spacing, spacing, spacing);
-
-            foreach (Ped guard in bodyguards)
+            foreach (int groupId in bodyguardGroupIds)
             {
-                if (guard != null && guard.Exists())
-                {
-                    Function.Call(Hash.SET_PED_AS_GROUP_MEMBER, guard, bodyguardGroupId);
-                }
+                Function.Call(Hash.SET_GROUP_FORMATION, groupId, FORMATION_TYPES[guardFormationIndex].id >= 0 ? FORMATION_TYPES[guardFormationIndex].id : 0);
+                Function.Call(Hash.SET_GROUP_FORMATION_SPACING, groupId, spacing, spacing, spacing);
             }
+
+            foreach (Ped guard in bodyguards) AddGuardToChainedGroup(guard);
+        }
+
+        void AddGuardToChainedGroup(Ped guard)
+        {
+            if (!IsGuardValid(guard)) return;
+            int index = bodyguards.IndexOf(guard);
+            if (index < 0) return;
+            int ledGroup = (index + 1) / 7;
+            if ((index == 6 || index == 13) && ledGroup < bodyguardGroupIds.Count)
+            {
+                Function.Call(Hash.SET_PED_AS_GROUP_LEADER, guard, bodyguardGroupIds[ledGroup]);
+                Ped chainTarget = index == 6 ? Game.Player.Character : bodyguards[index - 7];
+                if (IsGuardValid(chainTarget))
+                    Function.Call(Hash.TASK_FOLLOW_TO_OFFSET_OF_ENTITY, guard, chainTarget,
+                        0f, -3f, 0f, 2f, -1, 4f, true);
+                return;
+            }
+            int memberGroup = index / 7;
+            if (memberGroup < bodyguardGroupIds.Count)
+                Function.Call(Hash.SET_PED_AS_GROUP_MEMBER, guard, bodyguardGroupIds[memberGroup]);
         }
 
         void CleanupGuardGroup()
         {
-            if (bodyguardGroupId >= 0)
-            {
-                Function.Call(Hash.REMOVE_GROUP, bodyguardGroupId);
-                bodyguardGroupId = -1;
-            }
+            foreach (int groupId in bodyguardGroupIds)
+                if (groupId >= 0) Function.Call(Hash.REMOVE_GROUP, groupId);
+            bodyguardGroupIds.Clear();
+            bodyguardGroupId = -1;
         }
 
         void SetupGuardRelationship(Ped guard)
@@ -23555,8 +27115,17 @@ namespace GrandTheftAccessibility
                 Function.Call(Hash.SET_PED_ALERTNESS, guard, 3); // Maximum alertness
             }
 
-            // Set weapon
-            if (guardWeaponIndex >= 0 && guardWeaponIndex < GUARD_WEAPONS.Length)
+            // Animal models carry model-defined melee weapons and brawling styles
+            // (mountain lions use WEAPON_COUGAR). Equipping a firearm suppresses that
+            // attack path and can produce malformed gun animations, so animals remain
+            // genuinely unarmed from the script's point of view.
+            bool animalGuard = guard.Model.IsAnimalPed;
+            if (animalGuard)
+            {
+                Function.Call(Hash.REMOVE_ALL_PED_WEAPONS, guard, true);
+                Function.Call(Hash.SET_PED_COMBAT_ATTRIBUTES, guard, 46, true);
+            }
+            else if (guardWeaponIndex >= 0 && guardWeaponIndex < GUARD_WEAPONS.Length)
             {
                 guard.Weapons.Give(GUARD_WEAPONS[guardWeaponIndex].hash, 9999, true, true);
             }
@@ -23607,7 +27176,8 @@ namespace GrandTheftAccessibility
 
             SetupGuardAttributes(guard, 0);
             SetupGuardRelationship(guard);
-            Function.Call(Hash.SET_PED_AS_GROUP_MEMBER, guard, bodyguardGroupId);
+            AddGuardToChainedGroup(guard);
+            WriteBodyguardLog("EVENT spawn slot=0 " + GuardLogPed(guard));
 
             // Reset health tracking for index 0
             guardDeathAnnounced[0] = false;
@@ -23651,7 +27221,8 @@ namespace GrandTheftAccessibility
             bodyguards.Add(guard);
             SetupGuardAttributes(guard, i);
             SetupGuardRelationship(guard);
-            Function.Call(Hash.SET_PED_AS_GROUP_MEMBER, guard, bodyguardGroupId);
+            SetupGuardGroup();
+            WriteBodyguardLog("EVENT spawn slot=" + i + " " + GuardLogPed(guard));
 
             // Reset health tracking
             if (i < MAX_GUARDS)
@@ -23676,6 +27247,164 @@ namespace GrandTheftAccessibility
         private bool IsButlerValid()
         {
             return bodyguards.Count > 0 && IsGuardValid(bodyguards[0]);
+        }
+
+        private bool IsBodyguard(Ped ped)
+        {
+            if (ped == null || !ped.Exists()) return false;
+            foreach (Ped guard in bodyguards)
+                if (guard != null && guard.Exists() && guard.Handle == ped.Handle) return true;
+            return false;
+        }
+
+        private string GuardLogPed(Ped ped)
+        {
+            if (ped == null || !ped.Exists()) return "invalid=1";
+            int group = Function.Call<int>(Hash.GET_PED_RELATIONSHIP_GROUP_HASH, ped);
+            WeaponHash weapon = ped.Weapons.Current.Hash;
+            return "handle=" + ped.Handle
+                + " model=" + unchecked((uint)ped.Model.Hash).ToString("X8")
+                + " animal=" + (ped.Model.IsAnimalPed ? 1 : 0)
+                + " group=" + unchecked((uint)group).ToString("X8")
+                + " weapon=" + unchecked((uint)weapon).ToString("X8")
+                + " health=" + ped.Health;
+        }
+
+        private void EnsureBodyguardLog()
+        {
+            if (bodyguardLog != null) return;
+            try
+            {
+                bodyguardLogPath = "gta11y-bodyguards-" + DateTime.Now.ToString("yyyy-MM-dd-HHmmss") + ".log";
+                bodyguardLog = new StreamWriter(bodyguardLogPath, false, new UTF8Encoding(false));
+                bodyguardLog.AutoFlush = true;
+                WriteBodyguardLog("EVENT iter-version: iter71-bridge-harness-authority-convergence");
+                WriteBodyguardLog("EVENT log-start path=" + bodyguardLogPath);
+            }
+            catch
+            {
+                bodyguardLog = null;
+            }
+        }
+
+        private void WriteBodyguardLog(string message)
+        {
+            EnsureBodyguardLog();
+            if (bodyguardLog == null) return;
+            try { bodyguardLog.WriteLine(DateTime.Now.ToString("O") + " " + message); }
+            catch { try { bodyguardLog.Dispose(); } catch { } bodyguardLog = null; }
+        }
+
+        private bool IssueGuardCombatTask(Ped guard, Ped target, string reason)
+        {
+            if (!IsGuardValid(guard) || target == null || !target.Exists() || target.IsDead)
+                return false;
+            if (IsBodyguard(target))
+            {
+                WriteBodyguardLog("FAILURE rejected-friendly-target guard=" + guard.Handle
+                    + " target=" + target.Handle + " reason=" + reason);
+                return false;
+            }
+
+            guard.Task.ClearAllImmediately();
+            bool directAnimalMelee = guard.Model.IsAnimalPed && getSetting("animalDirectMelee") == 1;
+            if (directAnimalMelee)
+            {
+                // iter-68: TASK_COMBAT_PED can report an animal as in combat without
+                // ever entering its model-native strike. Nightly exposes Rockstar's
+                // dedicated melee task, which also implicitly permits an unarmed AI ped
+                // to fight an armed target. This remains real engine melee and damage.
+                guard.Task.PutDirectlyIntoMelee(target, AnimationBlendDuration.Normal, 0f);
+            }
+            else
+            {
+                // Explicit response flag 16 permits an unarmed creature to fight an armed ped.
+                Function.Call(Hash.TASK_COMBAT_PED, guard, target, 0, 16);
+            }
+            guard.AlwaysKeepTask = true;
+            guard.BlockPermanentEvents = true;
+            guardCurrentTarget[guard.Handle] = target;
+            guardTargetAssignedTicks[guard.Handle] = DateTime.Now.Ticks;
+            guardTargetInitialHealth[guard.Handle] = target.Health;
+            guardTargetMinDistance[guard.Handle] = World.GetDistance(guard.Position, target.Position);
+            WriteBodyguardLog("EVENT assign guard=" + guard.Handle + " target=" + target.Handle
+                + " reason=" + reason + " animal=" + (guard.Model.IsAnimalPed ? 1 : 0)
+                + " task=" + (directAnimalMelee ? "direct-melee" : "combat-ped")
+                + " distance=" + World.GetDistance(guard.Position, target.Position).ToString("F1"));
+            return true;
+        }
+
+        private void TickBodyguardDiagnostics()
+        {
+            long now = DateTime.Now.Ticks;
+            if (now - bodyguardLogTicks < 20000000) return;
+            bodyguardLogTicks = now;
+            EnsureBodyguardLog();
+
+            for (int i = 0; i < bodyguards.Count; i++)
+            {
+                Ped guard = bodyguards[i];
+                if (!IsGuardValid(guard)) continue;
+                Ped target = null;
+                guardCurrentTarget.TryGetValue(guard.Handle, out target);
+                bool targetValid = target != null && target.Exists() && !target.IsDead;
+                bool inCombat = targetValid && Function.Call<bool>(Hash.IS_PED_IN_COMBAT, guard, target);
+                int rel = targetValid ? Function.Call<int>(Hash.GET_RELATIONSHIP_BETWEEN_PEDS, guard, target) : -1;
+                float dist = targetValid ? World.GetDistance(guard.Position, target.Position) : -1f;
+                if (targetValid)
+                {
+                    float priorMin;
+                    if (!guardTargetMinDistance.TryGetValue(guard.Handle, out priorMin) || dist < priorMin)
+                        guardTargetMinDistance[guard.Handle] = dist;
+                }
+                WriteBodyguardLog("STATE slot=" + i + " " + GuardLogPed(guard)
+                    + " mode=" + guardTaskMode + " target=" + (targetValid ? target.Handle : 0)
+                    + " targetRel=" + rel + " inCombat=" + (inCombat ? 1 : 0)
+                    + " distance=" + dist.ToString("F1"));
+
+                long assigned;
+                if (targetValid && !inCombat && guardTargetAssignedTicks.TryGetValue(guard.Handle, out assigned)
+                    && now - assigned >= 50000000)
+                    WriteGuardFailureLimited("stalled-" + guard.Handle, "FAILURE stalled-engagement guard="
+                        + guard.Handle + " target=" + target.Handle + " ageMs=" + ((now - assigned) / 10000)
+                        + " distance=" + dist.ToString("F1") + " targetRel=" + rel
+                        + " animal=" + (guard.Model.IsAnimalPed ? 1 : 0));
+
+                int initialHealth;
+                float initialDistance;
+                if (targetValid && guard.Model.IsAnimalPed
+                    && guardTargetAssignedTicks.TryGetValue(guard.Handle, out assigned)
+                    && now - assigned >= 100000000
+                    && guardTargetInitialHealth.TryGetValue(guard.Handle, out initialHealth)
+                    && guardTargetMinDistance.TryGetValue(guard.Handle, out initialDistance)
+                    && target.Health >= initialHealth && initialDistance > 3.5f)
+                    WriteGuardFailureLimited("no-progress-" + guard.Handle,
+                        "FAILURE animal-no-damage guard=" + guard.Handle + " target=" + target.Handle
+                        + " ageMs=" + ((now - assigned) / 10000) + " targetHealth=" + target.Health
+                        + " closestDistance=" + initialDistance.ToString("F1")
+                        + " inCombat=" + (inCombat ? 1 : 0));
+
+                for (int j = i + 1; j < bodyguards.Count; j++)
+                {
+                    Ped other = bodyguards[j];
+                    if (!IsGuardValid(other)) continue;
+                    if (Function.Call<bool>(Hash.IS_PED_IN_COMBAT, guard, other)
+                        || Function.Call<bool>(Hash.IS_PED_IN_COMBAT, other, guard))
+                        WriteGuardFailureLimited("friendly-" + guard.Handle + "-" + other.Handle,
+                            "FAILURE friendly-combat aSlot=" + i + " a=" + guard.Handle
+                            + " bSlot=" + j + " b=" + other.Handle
+                            + " relation=" + Function.Call<int>(Hash.GET_RELATIONSHIP_BETWEEN_PEDS, guard, other));
+                }
+            }
+        }
+
+        private void WriteGuardFailureLimited(string key, string message)
+        {
+            long now = DateTime.Now.Ticks;
+            long previous;
+            if (guardFailureLogTicks.TryGetValue(key, out previous) && now - previous < 100000000) return;
+            guardFailureLogTicks[key] = now;
+            WriteBodyguardLog(message);
         }
 
         // Cached World.GetNearbyPeds for the bodyguard subsystems (2s TTL). The proactive
@@ -23713,6 +27442,9 @@ namespace GrandTheftAccessibility
             guardLastRepositionTicks.Remove(handle);
             guardAssignedProfile.Remove(handle);
             guardCurrentTarget.Remove(handle);
+            guardTargetAssignedTicks.Remove(handle);
+            guardTargetInitialHealth.Remove(handle);
+            guardTargetMinDistance.Remove(handle);
 
             int enemyHandle;
             if (guardToEnemyHandle.TryGetValue(handle, out enemyHandle))
@@ -23760,6 +27492,7 @@ namespace GrandTheftAccessibility
                 guard.Delete();
             }
             bodyguards.RemoveAt(index);
+            if (bodyguards.Count > 0) SetupGuardGroup();
 
             if (index < MAX_GUARDS)
             {
@@ -23806,6 +27539,10 @@ namespace GrandTheftAccessibility
             // Clear every per-guard combat/assignment map so handles from this batch can't
             // leak into the next set of guards (handles get reused by the engine).
             guardCurrentTarget.Clear();
+            guardTargetAssignedTicks.Clear();
+            guardTargetInitialHealth.Clear();
+            guardTargetMinDistance.Clear();
+            guardFailureLogTicks.Clear();
             guardCombatState.Clear();
             guardLastRepositionTicks.Clear();
             guardToEnemyHandle.Clear();
@@ -23875,7 +27612,7 @@ namespace GrandTheftAccessibility
                 Ped guard = bodyguards[i];
                 if (guard == null || !guard.Exists() || guard.IsDead) continue;
                 if (bodyguardGroupId >= 0)
-                    Function.Call(Hash.SET_PED_AS_GROUP_MEMBER, guard, bodyguardGroupId);
+                    AddGuardToChainedGroup(guard);
                 guard.AlwaysKeepTask = true;
                 guard.BlockPermanentEvents = true;
             }
@@ -24091,18 +27828,20 @@ namespace GrandTheftAccessibility
                     if (i == 0 && (guardDriverActive || extractionInProgress))
                         continue;
 
-                    guard.Task.ClearAllImmediately();
+                    bool issued = false;
                     if (target is Ped targetPed)
                     {
-                        guard.Task.FightAgainst(targetPed);
+                        issued = IssueGuardCombatTask(guard, targetPed, "manual-attack");
                     }
                     else
                     {
+                        guard.Task.ClearAllImmediately();
                         guard.Task.ShootAt(target.Position, 30000);
+                        issued = true;
                     }
                     guard.AlwaysKeepTask = true;
                     guard.BlockPermanentEvents = true;
-                    attackCount++;
+                    if (issued) attackCount++;
                 }
             }
             Speech.Ambient(attackCount + " guards attacking!");
@@ -24122,7 +27861,7 @@ namespace GrandTheftAccessibility
                         continue;
 
                     guard.Task.ClearAll();
-                    Function.Call(Hash.SET_PED_AS_GROUP_MEMBER, guard, bodyguardGroupId);
+                    AddGuardToChainedGroup(guard);
                 }
             }
             guardCurrentTarget.Clear();
@@ -24138,7 +27877,7 @@ namespace GrandTheftAccessibility
                 if (guard != null && guard.Exists() && guard.IsAlive)
                 {
                     guard.Task.ClearAll();
-                    Function.Call(Hash.SET_PED_AS_GROUP_MEMBER, guard, bodyguardGroupId);
+                    AddGuardToChainedGroup(guard);
                 }
             }
             Speech.Ambient("Guards following.");
@@ -24291,6 +28030,185 @@ namespace GrandTheftAccessibility
             return "Standing";
         }
 
+        /// <summary>True for Michael, Franklin, Trevor or a network player.
+        ///
+        /// iter-58: replaces three `hashes[...] != "player_one"` string compares that
+        /// could not work — two of the three protagonist hashes are negative, and the
+        /// lookup key was a sign-extended UInt64, so only Michael was ever excluded.</summary>
+        private bool IsProtagonist(Ped p)
+        {
+            if (p == null) return false;
+            try
+            {
+                if (p.IsPlayer) return true;
+                var t = p.PedType;
+                return t == PedType.Player0 || t == PedType.Player1
+                    || t == PedType.Player2 || t == PedType.NetworkPlayer;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>The game's own localized weapon name, or null.
+        ///
+        /// iter-58: the weapon readout used to look the hash up in hashes.txt keyed by
+        /// `wep.Hash.ToString()` — the ENUM name, "Pistol", against a table of numeric
+        /// keys that held no weapon rows anyway. Two independent reasons it never
+        /// resolved, and the symptom was the enum name leaking into speech
+        /// ("CarbineRifle"). GET_WEAPON_NAME_FROM_HASH covers every DLC weapon.</summary>
+        private string WeaponDisplayName(WeaponHash hash)
+        {
+            try
+            {
+                string gxt = Weapon.GetDisplayNameFromHash(hash);
+                string txt = MenuLabelDb.ResolveGxt(gxt);
+                if (!string.IsNullOrEmpty(txt)) return txt;
+            }
+            catch { }
+            return null;
+        }
+
+        /// <summary>What a ped is doing, as a lowercase clause for the detailed scan
+        /// ("walking east", "fighting", "sitting in a Tornado").
+        ///
+        /// Deliberately NOT a generalization of GetPlayerStateString: that one returns
+        /// Title Case standalone labels for the Status menu and is verified as such.
+        /// This shares its ladder — vehicle, swim, fall, ragdoll, climb, fire, aim,
+        /// sprint, run, walk, stand — and puts the things that matter to someone who
+        /// cannot see the street (combat, fleeing, a scenario) ahead of it.</summary>
+        private string PedActivity(Ped p)
+        {
+            try
+            {
+                if (p.IsDead) return "dead";
+                if (p.IsInjured) return "injured";
+
+                if (p.IsInVehicle())
+                {
+                    Vehicle v = p.CurrentVehicle;
+                    string vn = v != null ? ModelNames.DescribeVehicle(v) : null;
+                    bool driving = v != null && v.Driver == p;
+                    return (driving ? "driving" : "riding in")
+                         + (vn != null ? " a " + vn : " a vehicle");
+                }
+
+                if (p.IsInMeleeCombat) return "brawling";
+                if (p.IsShooting) return "shooting";
+                if (p.IsInCombat) return "fighting";
+                if (p.IsFleeing) return "fleeing";
+                if (p.IsAiming) return "taking aim";
+                if (p.IsOnFire) return "on fire";
+                if (p.IsRagdoll) return "on the ground";
+                if (p.IsSwimmingUnderWater) return "diving";
+                if (p.IsSwimming) return "swimming";
+                if (p.IsFalling) return "falling";
+                if (p.IsClimbingLadder) return "on a ladder";
+                if (p.IsClimbing || p.IsVaulting) return "climbing";
+                if (p.IsInCover) return "in cover";
+                if (p.IsProne) return "lying down";
+                if (p.IsDucking) return "crouching";
+
+                if (p.IsSprinting) return "sprinting " + getDir(p.Heading);
+                if (p.IsRunning) return "running " + getDir(p.Heading);
+                if (Function.Call<bool>(Hash.IS_PED_WALKING, p))
+                    return "walking " + getDir(p.Heading);
+
+                // Standing still. A scenario ped (bench, phone box, smoking spot) is
+                // worth distinguishing from someone simply stopped — it means the person
+                // is placed there and will stay, which changes whether they are worth
+                // walking around. WHICH scenario is not readable without brute-forcing
+                // the whole scenario name list per ped, so it is left unsaid rather than
+                // guessed at.
+                if (Function.Call<bool>(Hash.IS_PED_USING_ANY_SCENARIO, p))
+                    return "stopped, going about their business";
+                return "standing";
+            }
+            catch { return "standing"; }
+        }
+
+        /// <summary>" armed with a Pistol", or "". Firearms only (flag 4) — announcing
+        /// every ped's fists as a weapon would make the whole scan read as a threat.</summary>
+        private string PedWeaponClause(Ped p)
+        {
+            try
+            {
+                if (!Function.Call<bool>(Hash.IS_PED_ARMED, p, 4)) return "";
+                string w = WeaponDisplayName(p.Weapons.Current.Hash);
+                return w != null ? ", armed with a " + w : ", armed";
+            }
+            catch { return ""; }
+        }
+
+        /// <summary>", 15 miles per hour east, with 2 occupants, siren on" — the detailed
+        /// half of the nearest-vehicle scan.
+        ///
+        /// mph because that is the unit every other speed readout in this mod uses
+        /// (the Status menu, auto-drive, the speed announcement). Heading goes through
+        /// getDir, which takes GTA's counterclockwise convention — the same convention
+        /// Entity.Heading is already in. Do NOT substitute HeadingToCompass here: that
+        /// one is clockwise, and the readout would come out mirrored.</summary>
+        private string VehicleDetailClause(Vehicle v)
+        {
+            var sb = new System.Text.StringBuilder();
+            try
+            {
+                int mph = (int)Math.Round(v.Speed * 2.23694f);
+                if (v.IsStopped || mph < 1) sb.Append(", stationary");
+                else sb.Append(", ").Append(mph).Append(mph == 1 ? " mile per hour " : " miles per hour ")
+                       .Append(getDir(v.Heading));
+            }
+            catch { }
+
+            try
+            {
+                // Reuses the phrasing AnnounceAutolockTarget already established, so the
+                // two surfaces do not describe the same fact two different ways.
+                int occupants = 0;
+                if (v.Driver != null && v.Driver.IsAlive) occupants++;
+                occupants += v.PassengerCount;
+                sb.Append(occupants > 0
+                    ? ", with " + occupants + " occupant" + (occupants > 1 ? "s" : "")
+                    : " (empty)");
+            }
+            catch { }
+
+            try { if (v.IsSirenActive) sb.Append(", siren on"); }
+            catch { }
+
+            return sb.ToString();
+        }
+
+        /// <summary>", about 2 metres across" / ", held by someone" — the detailed half of
+        /// the nearest-object scan. Size is what separates a bollard from a skip when you
+        /// are deciding whether you can walk past it.</summary>
+        private string PropDetailClause(Prop p)
+        {
+            var sb = new System.Text.StringBuilder();
+            // iter-60: skip the size when DescribeProp already spent it. An unnamed prop
+            // used to get "unknown object, about 3 metres across, about 2 metres across"
+            // — twice, and from two different axis pairs, so the two numbers disagreed.
+            if (!ModelNames.NameCarriesSize(p))
+            {
+                try
+                {
+                    GTA.Math.Vector3 lo, hi;
+                    p.Model.GetDimensions(out lo, out hi);
+                    float span = Math.Max(Math.Abs(hi.X - lo.X), Math.Abs(hi.Y - lo.Y));
+                    if (span >= 0.05f)
+                    {
+                        if (span < 0.5f) sb.Append(", small");
+                        else if (span < 2f) sb.Append(", about a metre across");
+                        else sb.Append(", about ").Append((int)Math.Round(span)).Append(" metres across");
+                    }
+                }
+                catch { }
+            }
+
+            try { if (p.IsAttached()) sb.Append(", attached to something"); }
+            catch { }
+
+            return sb.ToString();
+        }
+
         string GetVehicleTypeString(Vehicle veh)
         {
             if (veh.IsHelicopter) return "Helicopter";
@@ -24341,9 +28259,9 @@ namespace GrandTheftAccessibility
                     return "Speed: " + (speed < 0.5f ? "Stationary" : speed.ToString("F1") + " mph");
                 case 12:
                     Weapon wep = player.Weapons.Current;
-                    string weapName = wep.Hash.ToString();
-                    if (hashes.ContainsKey(weapName))
-                        weapName = hashes[weapName];
+                    // iter-58: was a hashes.txt lookup keyed by the enum name, which
+                    // never matched anything. The game names weapons itself.
+                    string weapName = WeaponDisplayName(wep.Hash) ?? wep.Hash.ToString();
                     return "Current Weapon: " + weapName;
                 case 13:
                 {
@@ -24618,10 +28536,10 @@ namespace GrandTheftAccessibility
                 {
                     if (getSetting("intoxVanillaOnly") == 1)
                     {
-                        string sv = "Intoxication, game's own system: "
-                            + intoxVanillaDrinks + (intoxVanillaDrinks == 1 ? " drink." : " drinks.");
-                        if (intoxVanillaFailed) sv += " Bridge unavailable in this build.";
-                        return sv;
+                        return "Intoxication: game's own bridge unavailable safely; using this mod's system. "
+                            + IntoxStageName(intoxStage) + ". "
+                            + intoxDrinks.ToString("0.#") + " drinks, "
+                            + intoxHits.ToString("0.#") + " hits.";
                     }
                     string s86 = "Intoxication: " + IntoxStageName(intoxStage)
                         + ". " + intoxDrinks.ToString("0.#") + " drinks, "
@@ -24758,12 +28676,16 @@ namespace GrandTheftAccessibility
                     foreach (Ped ped in tempPeds)
                     {
 
-                        if (hashes.ContainsKey(ped.Model.NativeValue.ToString()) && !ped.IsDead)
+                        // iter-58: this was never a name lookup — it was "in hashes.txt
+                        // and not one of the three protagonists". hashes.txt held no
+                        // ambient ped models at all, so the ContainsKey term excluded
+                        // every ordinary pedestrian, and the protagonist test only ever
+                        // worked for Michael (player_zero is the one positive hash of the
+                        // three; the other two sign-extended and never matched). PedType
+                        // answers the actual question.
+                        if (!ped.IsDead && !IsProtagonist(ped))
                         {
-                            if (hashes[ped.Model.NativeValue.ToString()] != "player_one" && hashes[ped.Model.NativeValue.ToString()] != "player_two" && hashes[ped.Model.NativeValue.ToString()] != "player_zero")
-                            {
-                                peds.Add(ped);
-                            }
+                            peds.Add(ped);
                         }
                     }
                     if (peds.Count < 4)
@@ -24801,12 +28723,16 @@ namespace GrandTheftAccessibility
                     List<Ped> peds = new List<Ped>();
                     foreach (Ped ped in tempPeds)
                     {
-                        if (hashes.ContainsKey(ped.Model.NativeValue.ToString()) && !ped.IsDead)
+                        // iter-58: this was never a name lookup — it was "in hashes.txt
+                        // and not one of the three protagonists". hashes.txt held no
+                        // ambient ped models at all, so the ContainsKey term excluded
+                        // every ordinary pedestrian, and the protagonist test only ever
+                        // worked for Michael (player_zero is the one positive hash of the
+                        // three; the other two sign-extended and never matched). PedType
+                        // answers the actual question.
+                        if (!ped.IsDead && !IsProtagonist(ped))
                         {
-                            if (hashes[ped.Model.NativeValue.ToString()] != "player_one" && hashes[ped.Model.NativeValue.ToString()] != "player_two" && hashes[ped.Model.NativeValue.ToString()] != "player_zero")
-                            {
-                                peds.Add(ped);
-                            }
+                            peds.Add(ped);
                         }
                     }
 
@@ -24978,6 +28904,7 @@ namespace GrandTheftAccessibility
                 case 34: return "Weapon for " + GuardSlotName(configGuardSlotIndex) + ": "
                     + CurrentSlotWeaponName(configGuardSlotIndex);
                 case 35: return "Vehicle delivery: " + (getSetting("butlerValet") == 1 ? "On" : "Off");
+                case 36: return "Animal direct melee: " + (getSetting("animalDirectMelee") == 1 ? "On" : "Off");
                 default: return bodyguardMenu[index];
             }
         }
@@ -25058,7 +28985,8 @@ namespace GrandTheftAccessibility
                     if (bodyguardGroupId >= 0 && FORMATION_TYPES[guardFormationIndex].id >= 0)
                     {
                         // Built-in formation
-                        Function.Call(Hash.SET_GROUP_FORMATION, bodyguardGroupId, FORMATION_TYPES[guardFormationIndex].id);
+                        foreach (int groupId in bodyguardGroupIds)
+                            Function.Call(Hash.SET_GROUP_FORMATION, groupId, FORMATION_TYPES[guardFormationIndex].id);
                     }
                     else if (FORMATION_TYPES[guardFormationIndex].id < 0)
                     {
@@ -25074,7 +29002,8 @@ namespace GrandTheftAccessibility
                     guardFormationSpacing = spacing;
                     if (bodyguardGroupId >= 0)
                     {
-                        Function.Call(Hash.SET_GROUP_FORMATION_SPACING, bodyguardGroupId, spacing, spacing, spacing);
+                        foreach (int groupId in bodyguardGroupIds)
+                            Function.Call(Hash.SET_GROUP_FORMATION_SPACING, groupId, spacing, spacing, spacing);
                     }
                     Speech.Ambient("Formation spacing: " + spacing + ".");
                     break;
@@ -25212,6 +29141,15 @@ namespace GrandTheftAccessibility
                             : "Vehicle delivery off.");
                     }
                     break;
+
+                case 36: // iter-68 animal-native direct melee; new behavior ships OFF
+                    {
+                        int directMeleeOn = getSetting("animalDirectMelee") == 1 ? 0 : 1;
+                        setSetting("animalDirectMelee", directMeleeOn);
+                        WriteBodyguardLog("EVENT animal-direct-melee-toggle value=" + directMeleeOn);
+                        Speech.Ambient("Animal direct melee " + (directMeleeOn == 1 ? "on." : "off."));
+                    }
+                    break;
             }
         }
 
@@ -25293,7 +29231,7 @@ namespace GrandTheftAccessibility
         private void IssueDriveThenPark(Ped driver, Vehicle veh, GTA.Math.Vector3 dest,
             float heading, float speed, float parkRadius, string site)
         {
-            int style = GetDrivingStyleFromFlags();
+            int style = AutodriveStyle();
             bool useSequence = getSetting("driveSequenceV2") == 1;
             if (useSequence) GateReach("driveSequenceV2");
             if (useSequence)
@@ -25567,7 +29505,7 @@ namespace GrandTheftAccessibility
 
             parkingInProgress = true;
             parkingDestination = parkPos;
-            int style = GetDrivingStyleFromFlags();
+            int style = AutodriveStyle();
             Function.Call(Hash.TASK_VEHICLE_DRIVE_TO_COORD_LONGRANGE,
                 driver, veh,
                 parkPos.X, parkPos.Y, parkPos.Z,
@@ -25631,6 +29569,7 @@ namespace GrandTheftAccessibility
         {
             if (!bodyguardSystemEnabled || bodyguards.Count == 0) return;
 
+            TickBodyguardDiagnostics();
             TickGuardHealthMonitor();
             TickGuardPersistence();
             TickGuardTaskValidation();
@@ -25759,7 +29698,7 @@ namespace GrandTheftAccessibility
 
                             SetupGuardAttributes(newGuard, i);
                             SetupGuardRelationship(newGuard);
-                            Function.Call(Hash.SET_PED_AS_GROUP_MEMBER, newGuard, bodyguardGroupId);
+                            SetupGuardGroup();
                             guardDeathAnnounced[i] = false;
                             for (int t = 0; t < 3; t++) guardHealthWarnings[i, t] = false;
                             Speech.Ambient(label + " respawned.");
@@ -25884,14 +29823,13 @@ namespace GrandTheftAccessibility
                 // Re-issue follow if moderately far and task is follow
                 if (dist > 50f && guardTaskMode == "follow")
                 {
-                    Function.Call(Hash.SET_PED_AS_GROUP_MEMBER, guard, bodyguardGroupId);
+                    AddGuardToChainedGroup(guard);
                 }
 
                 // Re-add to group if needed
-                int guardGroup = Function.Call<int>(Hash.GET_PED_GROUP_INDEX, guard);
-                if (guardGroup != bodyguardGroupId && guardTaskMode == "follow")
+                if (guardTaskMode == "follow")
                 {
-                    Function.Call(Hash.SET_PED_AS_GROUP_MEMBER, guard, bodyguardGroupId);
+                    AddGuardToChainedGroup(guard);
                 }
             }
         }
@@ -25943,11 +29881,16 @@ namespace GrandTheftAccessibility
                                        && !Function.Call<bool>(Hash.IS_PED_WALKING, guard)
                                        && !Function.Call<bool>(Hash.IS_PED_SPRINTING, guard);
 
-                            if (guardGroup != bodyguardGroupId || isIdle)
+                            int guardIndex = bodyguards.IndexOf(guard);
+                            int expectedGroupIndex = guardIndex / 7;
+                            bool isChainLeader = guardIndex == 6 || guardIndex == 13;
+                            int expectedGroup = expectedGroupIndex < bodyguardGroupIds.Count
+                                ? bodyguardGroupIds[expectedGroupIndex] : bodyguardGroupId;
+                            if ((!isChainLeader && guardGroup != expectedGroup) || isIdle)
                             {
                                 guard.Task.ClearAllImmediately();
                                 if (bodyguardGroupId >= 0)
-                                    Function.Call(Hash.SET_PED_AS_GROUP_MEMBER, guard, bodyguardGroupId);
+                                    AddGuardToChainedGroup(guard);
                                 guard.AlwaysKeepTask = true;
                                 guard.BlockPermanentEvents = true;
                             }
@@ -26049,7 +29992,7 @@ namespace GrandTheftAccessibility
                     if (i == 0 && extractionInProgress) continue;
                     guard.Task.ClearAllImmediately();
                     if (bodyguardGroupId >= 0)
-                        Function.Call(Hash.SET_PED_AS_GROUP_MEMBER, guard, bodyguardGroupId);
+                        AddGuardToChainedGroup(guard);
                     guard.AlwaysKeepTask = true;
                     guard.BlockPermanentEvents = true;
                 }
@@ -26084,7 +30027,7 @@ namespace GrandTheftAccessibility
                     if (!IsGuardValid(guard) || guard.IsInVehicle()) continue;
                     guard.Task.ClearAll();
                     if (bodyguardGroupId >= 0)
-                        Function.Call(Hash.SET_PED_AS_GROUP_MEMBER, guard, bodyguardGroupId);
+                        AddGuardToChainedGroup(guard);
                     // Belt-and-braces: group AI sometimes stalls at the shoreline, so
                     // far-away guards also get an explicit follow task (it swims).
                     if (World.GetDistance(guard.Position, Game.Player.Character.Position) > 10f)
@@ -26212,7 +30155,7 @@ namespace GrandTheftAccessibility
                                 float groundZ = World.GetGroundHeight(new GTA.Math.Vector2(wp.X, wp.Y));
                                 if (groundZ > 0) wp.Z = groundZ;
                                 autodriveDestination = wp;
-                                int drivingStyle = GetDrivingStyleFromFlags();
+                                int drivingStyle = AutodriveStyle();
                                 Function.Call(Hash.TASK_VEHICLE_DRIVE_TO_COORD_LONGRANGE,
                                     driver, veh, wp.X, wp.Y, wp.Z,
                                     autodriveSpeed, drivingStyle, 20f);
@@ -26306,7 +30249,7 @@ namespace GrandTheftAccessibility
                 {
                     // Ground vehicle: wander
                     autonavMode = "drive";
-                    int drivingStyle = GetDrivingStyleFromFlags();
+                    int drivingStyle = AutodriveStyle();
                     Function.Call(Hash.SET_DRIVER_ABILITY, primaryGuard, 1.0f);
                     Function.Call(Hash.SET_DRIVER_AGGRESSIVENESS, primaryGuard, 0.5f);
                     Function.Call(Hash.TASK_VEHICLE_DRIVE_WANDER,
@@ -26508,6 +30451,19 @@ namespace GrandTheftAccessibility
         // ============================================
         void TickProactiveThreatScan()
         {
+            // hostileDetection: 0 off, 1 direct combat only (what this mod has always done for
+            // a player without bodyguards, so it is the default and changes nothing), 2 adds
+            // relationships / police / the all-clear, 3 adds armed-proximity watching.
+            //
+            // The bodyguard system's own "Proactive Detection" toggle still forces layers A
+            // and B on regardless, because a guard that can see a threat should engage it
+            // whether or not the player has asked to be TOLD about it.
+            int hostileLevel = getSetting("hostileDetection");
+            bool guardsActive = bodyguardSystemEnabled && bodyguards.Count > 0;
+            if (hostileLevel == 0 && !guardsActive) return;
+            bool layerRelationship = hostileLevel >= 2 || (guardsActive && proactiveThreatDetection);
+            bool layerArmed = hostileLevel >= 3 || (guardsActive && armedPedAlert);
+
             if (DateTime.Now.Ticks - proactiveScanTicks < 20000000) return; // 2 seconds
             proactiveScanTicks = DateTime.Now.Ticks;
 
@@ -26515,7 +30471,7 @@ namespace GrandTheftAccessibility
             watchedPeds.RemoveAll(p => p == null || p.IsDead || !p.Exists());
 
             Ped player = Game.Player.Character;
-            float scanRadius = proactiveThreatDetection ? 120f : 100f;
+            float scanRadius = layerRelationship ? 120f : 100f;
             Ped[] nearbyPeds = GetBodyguardNearbyPeds(scanRadius);
 
             // Build a set of guard handles to skip
@@ -26539,7 +30495,7 @@ namespace GrandTheftAccessibility
                 }
 
                 // Layer A: relationship-based detection (proactive)
-                if (!isHostile && proactiveThreatDetection)
+                if (!isHostile && layerRelationship)
                 {
                     int rel = Function.Call<int>(Hash.GET_RELATIONSHIP_BETWEEN_PEDS, ped, player);
                     if (rel == 4 || rel == 5) // Dislike or Hate
@@ -26548,8 +30504,8 @@ namespace GrandTheftAccessibility
                     }
                 }
 
-                // Police detection: always engage cops during wanted level
-                if (!isHostile && Game.Player.WantedLevel > 0)
+                // Police detection: engage cops during a wanted level
+                if (!isHostile && layerRelationship && Game.Player.Wanted.WantedLevel > 0)
                 {
                     if (Function.Call<int>(Hash.GET_PED_TYPE, ped) == 6) // PED_TYPE_COP
                     {
@@ -26561,8 +30517,10 @@ namespace GrandTheftAccessibility
                     }
                 }
 
-                // Layer B: guard-awareness propagation
-                if (!isHostile && proactiveThreatDetection)
+                // Layer B: guard-awareness propagation. Skipped entirely without guards —
+                // the loop below would simply never execute, but saying so is cheaper than
+                // making a reader work that out.
+                if (!isHostile && layerRelationship && bodyguards.Count > 0)
                 {
                     foreach (Ped guard in bodyguards)
                     {
@@ -26576,7 +30534,7 @@ namespace GrandTheftAccessibility
                 }
 
                 // Layer C: armed ped proximity alert
-                if (!isHostile && armedPedAlert)
+                if (!isHostile && layerArmed)
                 {
                     float distToPlayer = World.GetDistance(player.Position, ped.Position);
                     if (distToPlayer < 30f && Function.Call<bool>(Hash.IS_PED_ARMED, ped, 4)) // 4 = firearm
@@ -26613,36 +30571,96 @@ namespace GrandTheftAccessibility
                 }
             }
 
-            // Announcements (delta-only: speak only when count changes)
+            // Announcements (delta-only: speak only when the count changes)
             if (trackedEnemies.Count != lastAnnouncedEnemyCount)
             {
                 if (trackedEnemies.Count > 0)
-                {
-                    // Check if police are among threats
-                    bool policeDetected = false;
-                    if (Game.Player.WantedLevel > 0)
-                    {
-                        foreach (Ped e in trackedEnemies)
-                        {
-                            if (e != null && e.Exists() && Function.Call<int>(Hash.GET_PED_TYPE, e) == 6) // PED_TYPE_COP
-                            {
-                                policeDetected = true;
-                                break;
-                            }
-                        }
-                    }
-
-                    if (policeDetected)
-                        Speech.Info(trackedEnemies.Count + " hostile" + (trackedEnemies.Count > 1 ? "s" : "") + " detected. Police closing in.");
-                    else
-                        Speech.Info(trackedEnemies.Count + " hostile" + (trackedEnemies.Count > 1 ? "s" : "") + " detected");
-                }
+                    Speech.Info(DescribeHostiles());
                 else if (lastAnnouncedEnemyCount > 0)
-                {
                     Speech.Info("All threats neutralized.");
-                }
                 lastAnnouncedEnemyCount = trackedEnemies.Count;
             }
+        }
+
+        /// <summary>Says how many hostiles there are, then names and PLACES the nearest two.
+        ///
+        /// "Two hostiles detected" tells a sighted player almost nothing they could not see and
+        /// a blind player almost nothing at all: not which way to face, not how much time they
+        /// have, not whether it is a mugger or a police officer. Every part of the answer was
+        /// already in hand — ModelNames can name the ped since iter-58, the bearing helpers have
+        /// existed since iter-37 — it was simply never assembled.
+        ///
+        /// Capped at the nearest two plus a count, matching the ScanResultCap idiom: a crowd
+        /// enumerated one by one is a paragraph spoken while someone is shooting at you.</summary>
+        private string DescribeHostiles()
+        {
+            int n = trackedEnemies.Count;
+            string head = n + " hostile" + (n > 1 ? "s" : "");
+            Ped player = Game.Player.Character;
+            GTA.Math.Vector3 me = player.Position;
+
+            List<Ped> sorted = new List<Ped>();
+            foreach (Ped e in trackedEnemies)
+                if (e != null && e.Exists() && !e.IsDead) sorted.Add(e);
+            sorted.Sort(delegate (Ped a, Ped b)
+            {
+                float da = GTA.Math.Vector3.DistanceSquared(me, a.Position);
+                float db = GTA.Math.Vector3.DistanceSquared(me, b.Position);
+                return da.CompareTo(db);
+            });
+            if (sorted.Count == 0) return head + " detected.";
+
+            bool police = false;
+            foreach (Ped e in sorted)
+            {
+                try
+                {
+                    if (Function.Call<int>(Hash.GET_PED_TYPE, e) == 6) { police = true; break; }
+                }
+                catch { }
+            }
+
+            System.Text.StringBuilder sb = new System.Text.StringBuilder();
+            sb.Append(head);
+            if (police && Game.Player.Wanted.WantedLevel > 0) sb.Append(", police among them");
+            sb.Append(".");
+
+            int named = Math.Min(2, sorted.Count);
+            for (int i = 0; i < named; i++)
+            {
+                Ped e = sorted[i];
+                string who;
+                try { who = ModelNames.DescribePed(e); }
+                catch { who = "someone"; }
+                if (string.IsNullOrEmpty(who)) who = "someone";
+                bool armed = false;
+                try { armed = Function.Call<bool>(Hash.IS_PED_ARMED, e, 4); }
+                catch { }
+                float dist = GTA.Math.Vector3.Distance(me, e.Position);
+                sb.Append(" ").Append(armed ? "Armed " : "").Append(armed ? who.ToLower() : who);
+                sb.Append(", ").Append(HostileBearingWord(e.Position));
+                sb.Append(", ").Append((int)Math.Round(dist)).Append(" meters.");
+            }
+            if (sorted.Count > named)
+                sb.Append(" ").Append(sorted.Count - named).Append(" more.");
+            return sb.ToString();
+        }
+
+        /// <summary>An eight-way relative bearing to a world point, in the SAME listener frame
+        /// the spatial audio uses — so the word and the sound agree about where "ahead" is.
+        /// They disagreeing would be worse than either alone.</summary>
+        private string HostileBearingWord(GTA.Math.Vector3 world)
+        {
+            float rx, fy, uz;
+            if (!ToListenerFrame(world, out rx, out fy, out uz)) return "nearby";
+            double deg = Math.Atan2(rx, fy) * 180.0 / Math.PI;   // 0 ahead, + right
+            double a = Math.Abs(deg);
+            if (a <= 22.5) return "ahead";
+            if (a >= 157.5) return "behind";
+            string side = deg > 0 ? "right" : "left";
+            if (a <= 67.5) return "ahead " + side;
+            if (a <= 112.5) return "to your " + side;
+            return "behind " + side;
         }
 
         // ============================================
@@ -26693,11 +30711,14 @@ namespace GrandTheftAccessibility
                 enemyAssignmentCount.Clear();
                 guardToEnemyHandle.Clear();
 
-                // Assign guards 1-6 with coordinated spreading
-                for (int i = 1; i < bodyguards.Count; i++)
+                // Assign all combat-capable guards. A human Butler stays reserved for
+                // service duties; an animal in slot zero is a combat guard.
+                for (int i = 0; i < bodyguards.Count; i++)
                 {
                     Ped guard = bodyguards[i];
                     if (guard == null || !guard.IsAlive || !guard.Exists()) continue;
+                    if (i == 0 && !guard.Model.IsAnimalPed) continue;
+                    if (i == 0 && (guardDriverActive || extractionInProgress)) continue;
 
                     int profile = GetGuardProfile(guard);
 
@@ -26756,14 +30777,18 @@ namespace GrandTheftAccessibility
                         if (guardCurrentTarget.ContainsKey(guardHandle))
                             currentTarget = guardCurrentTarget[guardHandle];
 
+                        // iter-68: the human coordinator deliberately redistributes
+                        // targets every two seconds. For animals using direct melee that
+                        // cancels the approach/strike task before it can land. Keep a live
+                        // target sticky; normal selection resumes once it dies or vanishes.
+                        if (guard.Model.IsAnimalPed && getSetting("animalDirectMelee") == 1
+                            && currentTarget != null && currentTarget.Exists() && !currentTarget.IsDead)
+                            bestTarget = currentTarget;
+
                         // Re-engage if target changed or current target dead
                         if (currentTarget == null || !currentTarget.Exists() || currentTarget.IsDead || currentTarget != bestTarget)
                         {
-                            guard.Task.ClearAllImmediately();
-                            guard.Task.FightAgainst(bestTarget);
-                            guard.AlwaysKeepTask = true;
-                            guard.BlockPermanentEvents = true;
-                            guardCurrentTarget[guardHandle] = bestTarget;
+                            IssueGuardCombatTask(guard, bestTarget, "auto-assign");
                             if (!guardCombatState.ContainsKey(guardHandle) || guardCombatState[guardHandle] == GuardCombatState.Idle)
                                 guardCombatState[guardHandle] = GuardCombatState.Engaging;
                         }
@@ -26780,6 +30805,9 @@ namespace GrandTheftAccessibility
             {
                 // All threats neutralized - resume follow
                 guardCurrentTarget.Clear();
+                guardTargetAssignedTicks.Clear();
+                guardTargetInitialHealth.Clear();
+                guardTargetMinDistance.Clear();
                 guardToEnemyHandle.Clear();
                 enemyAssignmentCount.Clear();
                 for (int i = 1; i < bodyguards.Count; i++)
@@ -26811,10 +30839,12 @@ namespace GrandTheftAccessibility
 
             Ped player = Game.Player.Character;
 
-            for (int i = 1; i < bodyguards.Count; i++)
+            for (int i = 0; i < bodyguards.Count; i++)
             {
                 Ped guard = bodyguards[i];
                 if (guard == null || !guard.IsAlive || !guard.Exists()) continue;
+                if (i == 0 && !guard.Model.IsAnimalPed) continue;
+                if (i == 0 && (guardDriverActive || extractionInProgress)) continue;
                 if (guard.IsInVehicle()) continue; // skip vehicle-based guards (they use drive-by behavior)
 
                 int guardHandle = guard.Handle;
@@ -26844,11 +30874,7 @@ namespace GrandTheftAccessibility
                     }
                     if (nextTarget != null)
                     {
-                        guard.Task.ClearAllImmediately();
-                        guard.Task.FightAgainst(nextTarget);
-                        guard.AlwaysKeepTask = true;
-                        guard.BlockPermanentEvents = true;
-                        guardCurrentTarget[guardHandle] = nextTarget;
+                        IssueGuardCombatTask(guard, nextTarget, "tactics-next");
                         guardCombatState[guardHandle] = GuardCombatState.Engaging;
                         currentTarget = nextTarget;
                     }
@@ -26856,6 +30882,12 @@ namespace GrandTheftAccessibility
                 }
 
                 if (currentTarget == null) continue;
+
+                // Direct-melee animals already own the correct locomotion and strike
+                // task. Human firearm profiles (flank, sniper, cover and suppression)
+                // would replace it with movement or shooting tasks every three seconds.
+                if (guard.Model.IsAnimalPed && getSetting("animalDirectMelee") == 1)
+                    continue;
 
                 float distToTarget = World.GetDistance(guard.Position, currentTarget.Position);
                 float distToPlayer = World.GetDistance(guard.Position, player.Position);
@@ -26897,10 +30929,7 @@ namespace GrandTheftAccessibility
                             else
                             {
                                 // Close enough, engage from flank
-                                guard.Task.ClearAllImmediately();
-                                guard.Task.FightAgainst(currentTarget);
-                                guard.AlwaysKeepTask = true;
-                                guard.BlockPermanentEvents = true;
+                                IssueGuardCombatTask(guard, currentTarget, "flank-engage");
                                 guardCombatState[guardHandle] = GuardCombatState.Engaging;
                                 guardLastRepositionTicks[guardHandle] = DateTime.Now.Ticks;
                             }
@@ -26910,10 +30939,7 @@ namespace GrandTheftAccessibility
                             // If flanking and close to target, switch to engage
                             if (distToTarget < 12f)
                             {
-                                guard.Task.ClearAllImmediately();
-                                guard.Task.FightAgainst(currentTarget);
-                                guard.AlwaysKeepTask = true;
-                                guard.BlockPermanentEvents = true;
+                                IssueGuardCombatTask(guard, currentTarget, "flank-arrived");
                                 guardCombatState[guardHandle] = GuardCombatState.Engaging;
                             }
                         }
@@ -26935,10 +30961,7 @@ namespace GrandTheftAccessibility
                             // Near player or enemy is close -- engage
                             if (!guardCombatState.ContainsKey(guardHandle) || guardCombatState[guardHandle] != GuardCombatState.Engaging)
                             {
-                                guard.Task.ClearAllImmediately();
-                                guard.Task.FightAgainst(currentTarget);
-                                guard.AlwaysKeepTask = true;
-                                guard.BlockPermanentEvents = true;
+                                IssueGuardCombatTask(guard, currentTarget, "close-protection");
                                 guardCombatState[guardHandle] = GuardCombatState.Engaging;
                             }
                         }
@@ -26964,10 +30987,7 @@ namespace GrandTheftAccessibility
                             // At good range, shoot from position
                             if (!guardCombatState.ContainsKey(guardHandle) || guardCombatState[guardHandle] != GuardCombatState.Engaging)
                             {
-                                guard.Task.ClearAllImmediately();
-                                guard.Task.FightAgainst(currentTarget);
-                                guard.AlwaysKeepTask = true;
-                                guard.BlockPermanentEvents = true;
+                                IssueGuardCombatTask(guard, currentTarget, "sniper-engage");
                                 guardCombatState[guardHandle] = GuardCombatState.Engaging;
                             }
                         }
@@ -27002,10 +31022,7 @@ namespace GrandTheftAccessibility
                                 // Assault guards engage directly
                                 if (!guardCombatState.ContainsKey(guardHandle) || guardCombatState[guardHandle] == GuardCombatState.Suppressing)
                                 {
-                                    guard.Task.ClearAllImmediately();
-                                    guard.Task.FightAgainst(currentTarget);
-                                    guard.AlwaysKeepTask = true;
-                                    guard.BlockPermanentEvents = true;
+                                    IssueGuardCombatTask(guard, currentTarget, "assault-engage");
                                     guardCombatState[guardHandle] = GuardCombatState.Engaging;
                                 }
                             }
@@ -27259,6 +31276,27 @@ namespace GrandTheftAccessibility
         // ============================================
         // PHASE 7: AUTO-PATROL
         // ============================================
+        /// <summary>Free passenger seats in a vehicle, or 0 if there is no usable vehicle.
+        ///
+        /// The driver's seat is deliberately excluded: it is the butler's, and offering it to a
+        /// guard is how a convoy ends up with nobody able to drive the player anywhere.</summary>
+        private int CountFreePassengerSeats(Vehicle veh)
+        {
+            if (veh == null || !veh.Exists()) return 0;
+            int free = 0;
+            try
+            {
+                int capacity = Function.Call<int>(Hash.GET_VEHICLE_MAX_NUMBER_OF_PASSENGERS, veh);
+                for (int seat = 0; seat < capacity; seat++)
+                {
+                    if (Function.Call<bool>(Hash.IS_VEHICLE_SEAT_FREE, veh, seat))
+                        free++;
+                }
+            }
+            catch { return 0; }
+            return free;
+        }
+
         void TickGuardPatrol()
         {
             GTA.Math.Vector3 playerPos = Game.Player.Character.Position;
@@ -27280,12 +31318,23 @@ namespace GrandTheftAccessibility
                     {
                         Ped guard = bodyguards[i];
                         if (guard == null || !guard.IsAlive || !guard.Exists()) continue;
-                        // Don't clear butler's driving/extraction task if in a vehicle or extracting
+                        // Don't clear the butler's driving/extraction task if in a vehicle or
+                        // extracting...
                         if (i == 0 && (guard.IsInVehicle() || extractionInProgress)) continue;
+                        // ...and don't clear ANY seated guard's task either. This is the
+                        // mirror of the exemption at patrol start: a guard who was never
+                        // tasked to patrol has nothing to cancel, and ClearAllImmediately on a
+                        // seated passenger is how you get a guard who steps out of a moving
+                        // car the moment the player starts walking again.
+                        if (guard.IsInVehicle() && extractionInProgress) continue;
+                        if (guard.IsInVehicle()
+                            && Game.Player.Character.IsInVehicle()
+                            && guard.CurrentVehicle == Game.Player.Character.CurrentVehicle)
+                            continue;
                         guard.Task.ClearAllImmediately();
                         // Re-add to group
                         if (bodyguardGroupId >= 0)
-                            Function.Call(Hash.SET_PED_AS_GROUP_MEMBER, guard, bodyguardGroupId);
+                            AddGuardToChainedGroup(guard);
                         guard.AlwaysKeepTask = true;
                         guard.BlockPermanentEvents = true;
                     }
@@ -27299,16 +31348,41 @@ namespace GrandTheftAccessibility
             {
                 guardsPatrolling = true;
                 bool playerInVehicle = Game.Player.Character.IsInVehicle();
+                Vehicle playerVehicle = playerInVehicle
+                    ? Game.Player.Character.CurrentVehicle : null;
+                int freeSeats = CountFreePassengerSeats(playerVehicle);
+                int patrolled = 0, stayedAboard = 0;
 
                 for (int i = 0; i < bodyguards.Count; i++)
                 {
                     Ped guard = bodyguards[i];
                     if (guard == null || !guard.IsAlive || !guard.Exists()) continue;
 
-                    // Never pull butler out of a vehicle to patrol
+                    // Never pull the butler out of a vehicle to patrol.
                     if (i == 0 && guard.IsInVehicle()) continue;
 
+                    // The same rule, for everyone else. A guard already seated in the PLAYER'S
+                    // vehicle stays seated; a guard on foot who still has a seat waiting in it
+                    // belongs in the car, not 50 m away — the player is about to drive off.
+                    // Seats are claimed nearest-first so one empty seat does not excuse the
+                    // whole detail from patrolling.
+                    if (playerVehicle != null && playerVehicle.Exists())
+                    {
+                        if (guard.IsInVehicle() && guard.CurrentVehicle == playerVehicle)
+                        {
+                            stayedAboard++;
+                            continue;
+                        }
+                        if (!guard.IsInVehicle() && freeSeats > 0)
+                        {
+                            freeSeats--;
+                            stayedAboard++;
+                            continue;   // left to the existing entry/follow logic
+                        }
+                    }
+
                     guard.Task.ClearAllImmediately();
+                    patrolled++;
 
                     if (guard.IsInVehicle() && playerInVehicle)
                     {
@@ -27327,7 +31401,19 @@ namespace GrandTheftAccessibility
                     guard.AlwaysKeepTask = true;
                     guard.BlockPermanentEvents = true;
                 }
-                Speech.Ambient("Guards patrolling.");
+                if (driveLogger != null && driveLogger.IsRunning)
+                    driveLogger.Write("[F" + driveLogFrameCount + "] EVENT guard-patrol:"
+                        + " start patrolled=" + patrolled + " aboard=" + stayedAboard
+                        + " playerInVehicle=" + playerInVehicle);
+                // Say which it was. "Guards patrolling" while four of them are sitting in the
+                // car with you is a description of something that did not happen.
+                if (patrolled == 0 && stayedAboard > 0)
+                    Speech.Ambient("Guards staying with the vehicle.");
+                else if (stayedAboard > 0)
+                    Speech.Ambient(patrolled + " guard" + (patrolled == 1 ? "" : "s")
+                        + " patrolling, " + stayedAboard + " with the vehicle.");
+                else
+                    Speech.Ambient("Guards patrolling.");
             }
         }
 
@@ -28550,9 +32636,14 @@ namespace GrandTheftAccessibility
                                 Function.Call(Hash.TASK_HELI_MISSION,
                                     pilot, heli, 0, 0,
                                     offsetX, offsetY, z,
-                                    20, 40.2336f, -1f, -1f,
+                                    HeliLandMissionMode(), 40.2336f, -1f, -1f,
                                     -1, -1,
                                     -1f, 96);   // flags: LandOnArrival | DontDoAvoidance
+                                if (driveLogger != null && driveLogger.IsRunning)
+                                    driveLogger.Write("[F" + driveLogFrameCount
+                                        + "] EVENT heli-land-issue: mode=" + HeliLandMissionMode()
+                                        + " radius=" + (int)heliLandingSearchRadius
+                                        + " candidate=" + heliLandingCandidatesTried);
                                 pilot.AlwaysKeepTask = true;
 
                                 Speech.Ambient("Trying landing zone at " + (int)heliLandingSearchRadius + " meters.");
@@ -28780,13 +32871,16 @@ namespace GrandTheftAccessibility
             beaconBeep.Type = SignalGeneratorType.Sin; // Sine wave (distinct from enemy SawTooth)
 
             var beaconSample = beaconBeep.Take(TimeSpan.FromSeconds(0.1));
-            var beaconPanned = new PanningSampleProvider(beaconSample) { Pan = pan };
+            var beaconShaped = new EnvelopeSampleProvider(beaconSample, 0.1);
             try
             {
                 if (outBeacon == null) outBeacon = new WaveOutEvent();
                 else outBeacon.Stop();
-                outBeacon.Init(beaconPanned);
-                outBeacon.Play();
+                // applyDistance false: the beacon exists to be FOLLOWED, so it must stay
+                // equally audible at 5 m and at 95 m. Distance is already in the pitch ramp
+                // above and in the spoken range.
+                PlaySpatial(outBeacon, beaconShaped, bodyguards[0].Position, pan, false,
+                    "butler-beacon");
             }
             catch
             {
@@ -28862,11 +32956,60 @@ namespace GrandTheftAccessibility
         /// </summary>
         private void onAborted(object sender, EventArgs e)
         {
+            try { StopDiagnosticBridge(); } catch { }
+            // Script fire handles are process-local; a reload that skipped this would
+            // strand every burning ring with nothing left able to remove it.
+            try { if (wildfires != null) wildfires.ExtinguishAll(); } catch { }
+            try
+            {
+                if (bodyguardLog != null)
+                {
+                    bodyguardLog.WriteLine(DateTime.Now.ToString("O") + " EVENT log-stop");
+                    bodyguardLog.Dispose();
+                    bodyguardLog = null;
+                }
+            }
+            catch { }
+            // ---- iter-59 C4/C5: FINAL CENSUSES, BEFORE THE LOGGER STOPS ----
+            //
+            // capture-final MUST be written before driveLogger.Stop(). iter-57 J added
+            // the emitter 45 lines below this call — but Stop() sets running=false, the
+            // emitter is guarded on driveLogger.IsRunning, and Write() early-returns on
+            // !running anyway. So the fix was dead on arrival and
+            // driveassist-2026-08-15 contains zero capture-final lines. Ordering, not
+            // logic, was the whole bug.
+            //
+            // The gate census needs the same treatment, for a subtler reason. It runs on
+            // a 30 s heartbeat, so ANY gate whose first fire lands in the final <30 s is
+            // reported as never having fired. That is not hypothetical: on 08-15 the last
+            // gate-census was F55372 and tempActionV2's only fire was F55985, 613 frames
+            // later — so the digest recorded "QUIET, never-reached, 0/rung" for a rung the
+            // log plainly shows executing, and iter-57's central fix was almost written
+            // off as unproven on the strength of it. Same for stuckLadderV2 at F55985.
+            // The counters were right; the last sample was simply taken too early.
+            try
+            {
+                if (driveLogger != null && driveLogger.IsRunning)
+                {
+                    WriteGateCensus();
+                    if (snapshotWriter != null)
+                        driveLogger.Write("[F" + driveLogFrameCount + "] EVENT capture-final: "
+                            + snapshotWriter.Census());
+                }
+            }
+            catch { }
             try { if (driveLogger != null) driveLogger.Stop(); } catch { }
             // Menulog spike: flush and close the menu-probe log. Native calls are
             // deliberately avoided here (script is unloading; SHVDN releases this
             // script's scaleform refs itself), so the movie handle is not released.
             try { if (menuLogger != null) menuLogger.Stop(); } catch { }
+            // iter-54 D: drain the menu snapshot queue. Same reason the drive writer is
+            // stopped below — the worker thread owns undisposed Bitmaps, and a script
+            // reload that abandoned them would leak GDI handles for the process lifetime.
+            try { if (menuSnapshotWriter != null) menuSnapshotWriter.Stop(); } catch { }
+            // iter-58: write out anything the per-minute tick has not flushed yet, so a
+            // short session still leaves a usable gap log.
+            try { ModelNames.Flush(); } catch { }
 
             // Remove any mod-spawned flight plane + AI pilot so they aren't left as
             // orphaned entities after a script reload/unload.
@@ -28891,6 +33034,15 @@ namespace GrandTheftAccessibility
             // iter-52: drain the snapshot queue and free the preroll bitmaps. Without
             // this a reload leaks up to four full-screen bitmaps per session.
             try { ClearPrerollRing(); } catch { }
+            // iter-57 J: write the census on THIS path too. capture-final previously
+            // fired only on the falling edge of driveLogEnabled — i.e. only if the
+            // player manually toggled debug logging off while still in-game — so
+            // quitting the game (the normal case, and how 08-14 ended) never recorded
+            // honest totals. `written=` was structurally always the startup value, and
+            // the digest then reported a writer that had produced 300 files as never
+            // having run.
+            // (capture-final is emitted at the TOP of onAborted — iter-59 C4 — because
+            // the logger is already stopped by the time control reaches here.)
             try { if (snapshotWriter != null) snapshotWriter.Stop(); } catch { }
 
             // Dispose audio resources to prevent handle leaks on script reload
@@ -29465,6 +33617,25 @@ namespace GrandTheftAccessibility
         /// triage-log.py anchors on "^[F<n>] EVENT <name>:" and anything inserted
         /// ahead of EVENT would silently drop every unrest line out of the digest.
         /// </summary>
+        // San Andreas Wildfires (Wildfires.cs). Lazily built so the log callback closes
+        // over this instance.
+        private Wildfires wildfires;
+
+        private void TickWildfires()
+        {
+            if (wildfires == null)
+                wildfires = new Wildfires(msg =>
+                {
+                    try
+                    {
+                        if (driveLogger != null && driveLogger.IsRunning)
+                            driveLogger.Write("[F" + driveLogFrameCount + "] EVENT " + msg);
+                    }
+                    catch { }
+                });
+            wildfires.Tick(getSetting("sanAndreasWildfires") == 1 && !Game.IsLoading);
+        }
+
         private void UnrestLog(string msg)
         {
             try
@@ -32074,9 +36245,6 @@ namespace GrandTheftAccessibility
         private int intoxAppliedToHandle = 0;
         private bool intoxVisualsApplied = false;
         private int intoxAudioMode = 0;             // last mode written; change-only logging
-        private int intoxSuppressLoggedStage = -1;  // vanilla-only suppression, logged on change
-        private int intoxVanillaDrinks = 0;         // drink count for the vanilla bridge
-        private bool intoxVanillaFailed = false;    // fingerprint rejected; never retry blind
         // Consumption animation + prop
         private bool intoxAnimPending = false;
         private long intoxAnimRequestedTicks = 0;   // ModClock
@@ -32116,10 +36284,42 @@ namespace GrandTheftAccessibility
         private bool intoxWeaponStashed = false;
         private WeaponHash intoxPrevWeapon = WeaponHash.Unarmed;
         private long intoxStateLogTicks = 0;         // ModClock, heartbeat
-        private bool intoxVanillaWasActive = false;  // vanilla-only, for the sober line
+        // iter-69: the raw-global vanilla bridge is deliberately unavailable. Its
+        // offsets are build-specific and an allocation/readback probe cannot identify
+        // the structure it is about to overwrite. Speak once, then use the owned model.
+        private bool intoxVanillaUnavailableSaid = false;
         // Driving
         private bool intoxAssistSuspend = false;
         private long intoxAssistSuspendSinceTicks = 0;  // ModClock, telemetry only
+
+        // ---- iter-61: the Interaction Menu the mod drove straight through ----
+        // On 08-17 the two most expensive incidents of the session (171 and 122 of a
+        // 324.7 total) were the BATI riding into a Sandy Shores storefront wall at
+        // 18 mph with the SP Interaction Menu open across every captured frame. The mod
+        // had no idea: IS_PAUSE_MENU_ACTIVE is FALSE for that menu, so as far as the
+        // assist was concerned this was ordinary driving, and it kept firing takeover
+        // pulses at a player whose stick was steering a menu.
+        //
+        // The menu is pi_menu.ysc. It does not stop the world and it does not disable
+        // player control (the bike was moving), but it does call SET_INPUT_EXCLUSIVE for
+        // the frontend each frame, which takes ordinary gameplay controls away. That is
+        // observable without reading a single script global — and a global would be
+        // build-specific, which is the fragility this audience cannot afford.
+        //
+        // DARK by default. The failure mode of a false positive here is standing the
+        // assist down during normal driving, which would look exactly like another
+        // regression — so the detector logs for a session before frontendSuspendV2 is
+        // allowed to let it act.
+        private bool frontendMenuOpen = false;
+        private bool frontendAssistSuspend = false;
+        private int frontendMenuStreak = 0;
+        private int frontendMenuClearStreak = 0;
+        private long frontendMenuSinceTicks = 0;
+        private int frontendMenuTransitions = 0;
+        // ~5 frames of agreement each way. Long enough to reject a one-frame blip from
+        // another script's control grab, short enough that the stand-down is not itself
+        // a hazard at speed.
+        private const int FRONTEND_MENU_CONFIRM_FRAMES = 5;
         private float intoxSteerTarget = 0f;
         private float intoxSteerCurrent = 0f;
         private long intoxSteerNextTicks = 0;       // ModClock
@@ -32129,6 +36329,15 @@ namespace GrandTheftAccessibility
         private long intoxBlackoutNagTicks = 0;     // ModClock
         private long intoxRagdollTicks = 0;         // ModClock
         private bool intoxPassedOutSaid = false;
+        // iter-69: every task and ped mutation is cleaned up on the entity that owns
+        // it, never whichever protagonist happens to be current at teardown time.
+        private Ped intoxConsumeOwner = null;
+        private Ped intoxEffectOwner = null;
+        private Ped intoxReleaseOwner = null;
+        private bool intoxPedFlagsApplied = false;
+        // A dose commits when the enter leg completes. The outro is presentation;
+        // cancelling it must not turn a consumed drink into half a drink.
+        private bool intoxDoseCommitted = false;
 
         /// <summary>
         /// One consumable. A row per item rather than a dozen parallel arrays: at
@@ -32473,153 +36682,23 @@ namespace GrandTheftAccessibility
         }
 
         // ===================================================================
-        // VANILLA DRUNKENNESS BRIDGE (intoxVanillaOnly)
+        // VANILLA DRUNKENNESS SETTING (iter-69 fail-closed)
         //
-        // Drives the GAME's own drunk_controller by writing the same script globals
-        // its consumable scripts write, so one drink produces exactly the vanilla
-        // effect ladder — camera shake escalating per drink, DRUNK timecycle from
-        // the 2nd, audio submix, blackout — with none of this mod's drinks-per-hour
-        // metabolism model layered on top.
+        // The former bridge wrote a build-specific script-global structure. An
+        // allocated address and a successful readback of a value just written do not
+        // identify that structure; after a title update they only prove that unrelated
+        // game memory was writable. The current decompiled controller also requires a
+        // per-ped registration path the bridge never reproduced.
         //
-        // Recipe transcribed from func_299 in stripclub_drinking.c (the Vanilla
-        // Unicorn bar) and func_37 in the safehouse activity scripts.
-        //
-        // THESE INDICES ARE BUILD-SPECIFIC. That is the whole risk: a wrong index
-        // writes into unrelated script state. Every entry point therefore checks
-        // the block is allocated AND reads the master flag back, and latches
-        // intoxVanillaFailed on any mismatch so it fails closed, once, loudly —
-        // never a silent scribble over another script's variables.
+        // Keep the setting for compatibility with existing settings files, but never
+        // write raw globals. Speak once and run the owned, observable model instead.
         // ===================================================================
-        private const int VG_DRUNK_ENABLE = 46112;
-        private const int VG_DRUNK_CAM = 46113;
-        private const int VG_DRUNK_UNTIL = 46114;   // GET_GAME_TIMER deadline
-        private const int VG_DRUNK_SPAN = 46115;
-        private const int VG_DRUNK_BLUR = 46116;
-        private const int VG_DRUNK_SHAKE_CUR = 46117;
-        private const int VG_DRUNK_SHAKE_TGT = 46118;
-        private const int VG_DRUNK_TC_ON = 46120;
-        private const int VG_DRUNK_TC_NAME = 46121;
-        private const int INTOX_VANILLA_SPAN_MS = 30000;   // vanilla default span
-
-        /// <summary>
-        /// One drink, the vanilla way. Returns false if the globals could not be
-        /// verified, in which case the caller falls back to this mod's own model
-        /// rather than pretending something happened.
-        /// </summary>
-        private bool TriggerVanillaDrunk(int kind)
+        private void NoteVanillaBridgeUnavailable()
         {
-            if (intoxVanillaFailed) return false;
-            try
-            {
-                if (GlobalVariable.Get(VG_DRUNK_ENABLE).MemoryAddress == IntPtr.Zero
-                    || GlobalVariable.Get(VG_DRUNK_TC_NAME).MemoryAddress == IntPtr.Zero)
-                {
-                    intoxVanillaFailed = true;
-                    IntoxLog("intox-vanilla-fail: globals not allocated (build mismatch?)");
-                    Speech.Critical("The game's drunkenness system is not reachable in this build.");
-                    return false;
-                }
-
-                intoxVanillaDrinks++;
-                // func_300()/func_38(): consumed-count / 10, floored 0.1, capped 1.
-                float shake = intoxVanillaDrinks / 10f;
-                if (shake < 0.1f) shake = 0.1f;
-                if (shake > 1f) shake = 1f;
-
-                int now = Function.Call<int>(Hash.GET_GAME_TIMER);
-                bool already = GlobalVariable.Get(VG_DRUNK_ENABLE).Read<int>() != 0;
-                int until = GlobalVariable.Get(VG_DRUNK_UNTIL).Read<int>();
-
-                if (already && until > now)
-                {
-                    // Repeat drink while still drunk: EXTEND, exactly as the vanilla
-                    // scripts do (Global_46114 += duration). More drinks keeps you
-                    // drunk longer; depth comes from the shake/timecycle below.
-                    GlobalVariable.Get(VG_DRUNK_UNTIL).Write<int>(until + INTOX_VANILLA_SPAN_MS);
-                }
-                else
-                {
-                    try { Function.Call(Hash.SHAKE_GAMEPLAY_CAM, "DRUNK_SHAKE", shake); } catch { }
-                    GlobalVariable.Get(VG_DRUNK_CAM).Write<int>(0);
-                    GlobalVariable.Get(VG_DRUNK_ENABLE).Write<int>(1);
-                    GlobalVariable.Get(VG_DRUNK_UNTIL).Write<int>(now + INTOX_VANILLA_SPAN_MS);
-                    GlobalVariable.Get(VG_DRUNK_SPAN).Write<int>(INTOX_VANILLA_SPAN_MS);
-                    GlobalVariable.Get(VG_DRUNK_BLUR).Write<float>(0.3f);
-                }
-                GlobalVariable.Get(VG_DRUNK_SHAKE_TGT).Write<float>(shake);
-                GlobalVariable.Get(VG_DRUNK_SHAKE_CUR).Write<float>(shake);
-
-                // stripclub_drinking.c: the timecycle starts at the SECOND drink.
-                if (intoxVanillaDrinks >= 2)
-                {
-                    GlobalVariable.Get(VG_DRUNK_TC_ON).Write<float>(0.25f);
-                    GlobalVariable.Get(VG_DRUNK_TC_NAME).WriteString(
-                        CONSUMABLES[kind].Hits > 0f ? INTOX_TCMOD_HIGH : INTOX_TCMOD_DRUNK, 16);
-                }
-
-                bool ok = GlobalVariable.Get(VG_DRUNK_ENABLE).Read<int>() == 1;
-                if (!ok)
-                {
-                    intoxVanillaFailed = true;
-                    IntoxLog("intox-vanilla-fail: master flag did not read back");
-                    return false;
-                }
-                EnsureDrunkController();
-                IntoxLog("intox-vanilla: drink=" + intoxVanillaDrinks
-                    + " shake=" + shake.ToString("0.##")
-                    + " untilMs=" + (GlobalVariable.Get(VG_DRUNK_UNTIL).Read<int>() - now)
-                    + " tc=" + (intoxVanillaDrinks >= 2 ? 1 : 0));
-                return true;
-            }
-            catch (Exception ex)
-            {
-                intoxVanillaFailed = true;
-                IntoxLog("intox-vanilla-fail: " + ex.Message);
-                return false;
-            }
-        }
-
-        /// <summary>
-        /// drunk_controller terminates its own thread when nobody is drunk, so
-        /// setting the globals is not enough — the thread has to exist to read them.
-        /// </summary>
-        private void EnsureDrunkController()
-        {
-            try
-            {
-                int running = Function.Call<int>(
-                    Hash.GET_NUMBER_OF_THREADS_RUNNING_THE_SCRIPT_WITH_THIS_HASH,
-                    Game.GenerateHash("drunk_controller"));
-                if (running > 0) return;
-                Function.Call(Hash.REQUEST_SCRIPT, "drunk_controller");
-                if (Function.Call<bool>(Hash.HAS_SCRIPT_LOADED, "drunk_controller"))
-                {
-                    Function.Call(Hash.START_NEW_SCRIPT, "drunk_controller", 1424);
-                    Function.Call(Hash.SET_SCRIPT_AS_NO_LONGER_NEEDED, "drunk_controller");
-                    IntoxLog("intox-vanilla: started drunk_controller");
-                }
-                else
-                {
-                    IntoxLog("intox-vanilla: drunk_controller not loaded yet");
-                }
-            }
-            catch { }
-        }
-
-        private void ClearVanillaDrunk()
-        {
-            intoxVanillaDrinks = 0;
-            if (intoxVanillaFailed) return;
-            try
-            {
-                if (GlobalVariable.Get(VG_DRUNK_ENABLE).MemoryAddress == IntPtr.Zero) return;
-                // Let the controller run its own teardown rather than yanking the
-                // effects out from under it: clearing the deadline is how vanilla
-                // ends a drunk session.
-                GlobalVariable.Get(VG_DRUNK_UNTIL).Write<int>(
-                    Function.Call<int>(Hash.GET_GAME_TIMER));
-            }
-            catch { }
+            if (intoxVanillaUnavailableSaid) return;
+            intoxVanillaUnavailableSaid = true;
+            IntoxLog("intox-vanilla-disabled: unsafe build-specific globals");
+            Speech.Critical("The game's own drunkenness bridge is unavailable safely. Using this mod's intoxication instead.");
         }
 
         private string IntoxStageName(int v)
@@ -32667,6 +36746,112 @@ namespace GrandTheftAccessibility
         /// (toggle, 5 s timeout, sustained speed) and would hand the assist back to a
         /// driver who is still too drunk to use it within five seconds.
         /// </summary>
+        /// <summary>
+        /// iter-61: is a non-pause frontend menu (the SP Interaction Menu) holding the
+        /// player's input while the world keeps running? Runs every assist tick, logs
+        /// every confirmed transition, and only touches the suspend latch when
+        /// frontendSuspendV2 is on.
+        ///
+        /// The signal is SET_INPUT_EXCLUSIVE's side effect: gameplay controls the mod
+        /// itself never writes go disabled while the menu is up. Vehicle-exit (75) and
+        /// horn (86) are chosen because the mod has no reason to touch either, so a
+        /// disable on them is somebody else's frontend and not our own actuation. Both
+        /// must agree, and neither the pause menu nor a warning modal may be up — those
+        /// are separate states the assist already handles.
+        ///
+        /// Every raw reading goes in the event line. One session decides whether the
+        /// pair is trustworthy; nothing is promoted on reasoning alone.
+        /// </summary>
+        private void UpdateFrontendMenuState()
+        {
+            // ---- dead-man, checked before anything else ----
+            // Losing the assist with no way to get it back is the worst thing this
+            // feature can do, and iter-45f shipped exactly that. The latch releases the
+            // instant its gate goes off or the player leaves the vehicle, not at the
+            // next confirmed transition — which might never come.
+            bool inVeh = Game.Player.Character.IsInVehicle();
+            if (frontendAssistSuspend
+                && (getSetting("frontendSuspendV2") != 1 || !inVeh))
+                SetFrontendAssistSuspend(false, inVeh ? "gate-off" : "left-vehicle");
+
+            // Only evaluated in a vehicle. On foot the vehicle controls this detector
+            // reads have no meaningful enabled state, and a false positive gathered
+            // there would pollute the very evidence the dark launch exists to collect.
+            if (!inVeh)
+            {
+                frontendMenuStreak = 0;
+                frontendMenuClearStreak = 0;
+                return;
+            }
+
+            bool pauseActive = Function.Call<bool>(Hash.IS_PAUSE_MENU_ACTIVE);
+            bool warnActive = Function.Call<bool>(Hash.IS_WARNING_MESSAGE_ACTIVE);
+            bool exitOn = Function.Call<bool>(Hash.IS_CONTROL_ENABLED, 0, 75);  // INPUT_VEH_EXIT
+            bool hornOn = Function.Call<bool>(Hash.IS_CONTROL_ENABLED, 0, 86);  // INPUT_VEH_HORN
+            bool lookOn = Function.Call<bool>(Hash.IS_CONTROL_ENABLED, 0, 1);   // INPUT_LOOK_LR
+            bool candidate = !pauseActive && !warnActive && !exitOn && !hornOn;
+
+            if (candidate) { frontendMenuStreak++; frontendMenuClearStreak = 0; }
+            else { frontendMenuClearStreak++; frontendMenuStreak = 0; }
+
+            bool want = frontendMenuOpen
+                ? frontendMenuClearStreak < FRONTEND_MENU_CONFIRM_FRAMES
+                : frontendMenuStreak >= FRONTEND_MENU_CONFIRM_FRAMES;
+            if (want == frontendMenuOpen) return;
+
+            long nowFe = DateTime.Now.Ticks;
+            long heldMs = frontendMenuSinceTicks > 0 ? (nowFe - frontendMenuSinceTicks) / 10000L : -1L;
+            frontendMenuOpen = want;
+            frontendMenuSinceTicks = nowFe;
+            frontendMenuTransitions++;
+
+            if (driveLogger != null && driveLogger.IsRunning)
+                driveLogger.Write("[F" + driveLogFrameCount + "] EVENT frontend-menu:"
+                    + " open=" + (frontendMenuOpen ? 1 : 0)
+                    + " prevHeldMs=" + heldMs
+                    + " n=" + frontendMenuTransitions
+                    // Raw readings, so a false positive can be attributed to a specific
+                    // signal rather than to "the detector".
+                    + " pauseMenu=" + (pauseActive ? 1 : 0)
+                    + " warnMsg=" + (warnActive ? 1 : 0)
+                    + " vehExitEnabled=" + (exitOn ? 1 : 0)
+                    + " hornEnabled=" + (hornOn ? 1 : 0)
+                    + " lookEnabled=" + (lookOn ? 1 : 0)
+                    // Corroborators the mod already tracks, to separate the Interaction
+                    // Menu from the phone and from the mod's own readable menu.
+                    + " phoneOpen=" + (mlPhoneOpen ? 1 : 0)
+                    + " mrPause=" + (mlPauseActive ? 1 : 0)
+                    + " gate=" + getSetting("frontendSuspendV2")
+                    + " spd=" + Game.Player.Character.CurrentVehicle.Speed.ToString("F1"));
+
+            // ---- the acting half, OFF until a session says the detector is honest ----
+            if (getSetting("frontendSuspendV2") != 1) return;   // release handled above
+            GateReach("frontendSuspendV2");
+            if (frontendMenuOpen)
+            {
+                GateFire("frontendSuspendV2");
+                SetFrontendAssistSuspend(true, "interaction-menu");
+            }
+            else SetFrontendAssistSuspend(false, "menu-closed");
+        }
+
+        /// <summary>
+        /// iter-61: a PARALLEL latch, on the intoxAssistSuspend model — not a reuse of
+        /// assistSuspended, whose three auto-resume paths would hand the wheel back
+        /// while the menu is still up. Says so out loud both ways: a silent stand-down
+        /// is indistinguishable from the mod being broken.
+        /// </summary>
+        private void SetFrontendAssistSuspend(bool on, string why)
+        {
+            if (frontendAssistSuspend == on) return;
+            frontendAssistSuspend = on;
+            if (driveLogger != null && driveLogger.IsRunning)
+                driveLogger.Write("[F" + driveLogFrameCount + "] EVENT frontend-suspend:"
+                    + " on=" + (on ? 1 : 0) + " why=" + why);
+            if (on) Speech.Info("Menu open. Drive assist paused.");
+            else Speech.Info("Drive assist resumed.");
+        }
+
         private void SetIntoxAssistSuspend(bool on, string why)
         {
             if (intoxAssistSuspend == on) return;
@@ -32771,6 +36956,9 @@ namespace GrandTheftAccessibility
 
         private void ClearIntoxVisuals()
         {
+            // These natives are global. Never clear a mission or another script's
+            // presentation when this subsystem did not successfully apply its own.
+            if (!intoxVisualsApplied) return;
             try
             {
                 Function.Call(Hash.CLEAR_TIMECYCLE_MODIFIER);
@@ -32929,8 +37117,8 @@ namespace GrandTheftAccessibility
                 switch (to)
                 {
                     case 1: Speech.Info("Tipsy."); break;
-                    case 2: Speech.Info("Drunk. Your driving is impaired."); break;
-                    default: Speech.Critical("Very drunk. Drive assist is off."); break;
+                    case 2: Speech.Info("Drunk."); break;
+                    default: Speech.Critical("Very drunk."); break;
                 }
             }
             else if (to == 0) Speech.Info("Sober again.");
@@ -32939,34 +37127,51 @@ namespace GrandTheftAccessibility
 
         private void ResetIntoxication(string reason)
         {
+            bool hadConsumeScenario = intoxConsumeScenario;
             intoxDrinks = 0f;
             intoxHits = 0f;
             intoxStage = 0;
             intoxBlackout = false;
             intoxStage3SinceTicks = 0;
             intoxConsuming = -1;
-            intoxConsumeScenario = false;
             intoxConsumeStartTicks = 0;
-            intoxBlackoutDriving = false;
+            if (intoxBlackoutDriving)
+            {
+                if (reason == "abort") intoxBlackoutDriving = false;
+                else EndIntoxBlackoutDriving(reason);
+            }
             intoxCompensateSaid = false;
             intoxPassedOutSaid = false;
-            intoxVanillaWasActive = false;
             intoxStateLogTicks = 0;
             StopConsumeAnim();
+            if (hadConsumeScenario)
+            {
+                try
+                {
+                    Ped owner = intoxConsumeOwner;
+                    if (owner != null && owner.Exists() && !owner.IsInVehicle())
+                        Function.Call(Hash.CLEAR_PED_TASKS, owner);
+                }
+                catch { }
+            }
+            intoxConsumeScenario = false;
             ClearConsumeProp();
             ReleaseConsumeBank();
             StopConsumeAudioScene();
             RestoreConsumeWeapon();
-            ClearVanillaDrunk();
             SetIntoxAssistSuspend(false, reason);
             try
             {
-                Ped p = Game.Player.Character;
+                Ped p = intoxEffectOwner;
                 if (p != null && p.Exists())
                 {
-                    Function.Call(Hash.RESET_PED_MOVEMENT_CLIPSET, p, 0f);
-                    Function.Call(Hash.SET_PED_IS_DRUNK, p, false);
-                    Function.Call(Hash.SET_PED_CONFIG_FLAG, p, 100, false);
+                    if (intoxClipsetApplied != null)
+                        Function.Call(Hash.RESET_PED_MOVEMENT_CLIPSET, p, 0f);
+                    if (intoxPedFlagsApplied)
+                    {
+                        Function.Call(Hash.SET_PED_IS_DRUNK, p, false);
+                        Function.Call(Hash.SET_PED_CONFIG_FLAG, p, 100, false);
+                    }
                 }
                 // A ONE-SHOT 0 on teardown, which is what vanilla's own teardown
                 // does. Only a PER-FRAME 0 is forbidden — that would fight the
@@ -32981,6 +37186,30 @@ namespace GrandTheftAccessibility
             intoxClipsetFailed = false;
             intoxClipsetRequestedTicks = 0;
             ClearIntoxVisuals();
+            intoxEffectOwner = null;
+            intoxConsumeOwner = null;
+            intoxPedFlagsApplied = false;
+            intoxAppliedToHandle = 0;
+            intoxDoseCommitted = false;
+            intoxSteerTarget = 0f;
+            intoxSteerCurrent = 0f;
+            intoxSteerNextTicks = 0;
+            intoxStutterUntilTicks = 0;
+            intoxBlackoutNagTicks = 0;
+            intoxRagdollTicks = 0;
+            intoxLastReminderTicks = 0;
+        }
+
+        private bool HasOwnedIntoxState()
+        {
+            return intoxStage != 0 || intoxDrinks > 0f || intoxHits > 0f
+                || intoxBlackout || intoxConsuming >= 0 || intoxAnimPending
+                || intoxSyncScene >= 0 || intoxOutroActive
+                || intoxProp != null || intoxProp2 != null
+                || intoxBankName != null || intoxAudioSceneName != null
+                || intoxWeaponStashed || intoxClipsetApplied != null
+                || intoxVisualsApplied || intoxAudioMode != 0
+                || intoxPedFlagsApplied || intoxAssistSuspend;
         }
 
         /// <summary>
@@ -33021,7 +37250,7 @@ namespace GrandTheftAccessibility
             intoxWeaponStashed = false;
             try
             {
-                Ped pc = Game.Player.Character;
+                Ped pc = intoxConsumeOwner;
                 if (pc != null && pc.Exists() && intoxPrevWeapon != WeaponHash.Unarmed)
                     Function.Call(Hash.SET_CURRENT_PED_WEAPON, pc, (uint)intoxPrevWeapon, true);
             }
@@ -33033,7 +37262,7 @@ namespace GrandTheftAccessibility
         {
             try
             {
-                Ped pc = Game.Player.Character;
+                Ped pc = intoxConsumeOwner;
                 if (pc != null && pc.Exists())
                 {
                     if (intoxSyncScene >= 0)
@@ -33044,6 +37273,7 @@ namespace GrandTheftAccessibility
                         // announced the consume had finished. Only CLEAR_PED_TASKS
                         // ends a scene task.
                         intoxLastSyncScene = intoxSyncScene;
+                        intoxReleaseOwner = pc;
                         intoxReleaseVerifyTicks = ModClock.Ticks + 7000000L;   // 700 ms
                         // Run the scene out to its end first, the way vanilla aborts
                         // one, so the ped leaves from the clip's final pose instead
@@ -33290,6 +37520,7 @@ namespace GrandTheftAccessibility
             // prop2=1. Vanilla chains the same way (its own start gate requires the
             // dict AND the assets AND the bank before it will begin).
             bool propsReady = ConsumePropsReady(kind);
+            bool bankReady = intoxBankName == null || intoxBankLoaded;
             bool timedOut = ModClock.Ticks - intoxAnimRequestedTicks > 30000000L;   // 3 s
 
             if (!loaded)
@@ -33304,10 +37535,16 @@ namespace GrandTheftAccessibility
             // Dict is in but a prop is not: keep waiting until the same deadline,
             // then start anyway. A late prop costs foley; no animation at all costs
             // the whole interaction.
-            if (!propsReady && !timedOut) return;
+            if ((!propsReady || !bankReady) && !timedOut) return;
+            if (!bankReady)
+                IntoxLog("intox-bank-start-timeout: kind=" + kind + " name=" + intoxBankName);
 
             intoxAnimPending = false;
             string clip = CONSUMABLES[kind].Clip;
+            // Start the routing scene only after the bank has had the same streaming
+            // gate as the animation and props. Starting the clip first loses its
+            // opening/pouring/lighting audio events on a cold cache.
+            StartConsumeAudioScene(kind);
             AttachConsumeProp(player, kind);
 
             // On foot, reproduce the safehouse sequence exactly: a synchronized
@@ -33595,6 +37832,8 @@ namespace GrandTheftAccessibility
             { Speech.Ambient("You can't do that in a car."); return; }
 
             intoxConsuming = kind;
+            intoxConsumeOwner = player;
+            intoxDoseCommitted = false;
             intoxLastConsumeTicks = ModClock.Ticks;
             // PROVISIONAL only. TickConsumeAnim overwrites both the moment the
             // animation actually starts, with the clip's measured length; these
@@ -33646,12 +37885,8 @@ namespace GrandTheftAccessibility
             {
                 try { Function.Call(Hash.REQUEST_AMBIENT_AUDIO_BANK, intoxBankName, false, -1); } catch { }
             }
-            // ...and the AUDIO SCENE, which is the other half and the one that was
-            // missing entirely. The bank makes the sounds resident; the scene is
-            // what routes them to the mix. Loading a bank with no scene active is
-            // why 2026-08-09 logged bank ok=1, scene running and the animation
-            // confirmed playing, and still produced no drinking or smoking sound.
-            StartConsumeAudioScene(kind);
+            // The routing scene starts in TickConsumeAnim only after the bank, dict,
+            // and props are ready (or their shared timeout expires).
             // Kick the prop model off now so it has the anim's streaming window to
             // arrive; TickConsumeProp retries the attach and never waits on it.
             if (CONSUMABLES[kind].Prop != null)
@@ -33674,6 +37909,23 @@ namespace GrandTheftAccessibility
         {
             if (intoxConsumeStartTicks == 0) return 0;
             return (int)((ModClock.Ticks - intoxConsumeStartTicks) / 10000L);
+        }
+
+        /// <summary>
+        /// Commits the dose exactly once, when the enter leg has completed. Teardown
+        /// is not a consumption event: an interrupted outro keeps the full dose, and
+        /// an interruption before this point gives none.
+        /// </summary>
+        private void CommitConsumeDose(int kind, string why)
+        {
+            if (intoxDoseCommitted || kind < 0 || kind >= CONSUMABLES.Length) return;
+            intoxDoseCommitted = true;
+            intoxDrinks = Math.Min(20f, intoxDrinks + CONSUMABLES[kind].Drinks);
+            intoxHits = Math.Min(20f, intoxHits + CONSUMABLES[kind].Hits);
+            IntoxLog("intox-dose: kind=" + kind + " committed=1 why=" + why
+                + " prop=" + (intoxPropAttached ? 1 : 0)
+                + " drinks=" + intoxDrinks.ToString("0.##")
+                + " hits=" + intoxHits.ToString("0.##"));
         }
 
         private void FinishConsume(bool interrupted, string why = "timer")
@@ -33710,51 +37962,39 @@ namespace GrandTheftAccessibility
                 // thought they were getting into, with no idea why.
                 try
                 {
-                    Ped pc = Game.Player.Character;
+                    Ped pc = intoxConsumeOwner;
                     if (pc != null && pc.Exists() && !pc.IsInVehicle())
                         Function.Call(Hash.CLEAR_PED_TASKS, pc);
                 }
                 catch { }
                 intoxConsumeScenario = false;
             }
-            float share = interrupted ? 0.5f : 1f;
-
-            // Vanilla mode: hand the drink to the game's own drunk system instead of
-            // this mod's meters. Deliberately NO partial dose on interrupt — vanilla
-            // has no concept of half a drink, and the whole point of this mode is to
-            // stop superimposing our model. Falls through to our own model only if
-            // the bridge could not be verified.
-            if (getSetting("intoxVanillaOnly") == 1 && (CONSUMABLES[kind].Drinks > 0f || CONSUMABLES[kind].Hits > 0f))
-            {
-                if (TriggerVanillaDrunk(kind))
-                {
-                    IntoxLog("intox-dose: kind=" + kind + " interrupted=" + (interrupted ? 1 : 0)
-                        + " prop=" + (intoxPropAttached ? 1 : 0) + " vanilla=1");
-                    // "cancel" is the player's own re-selection, and ConsumeItem
-                    // already speaks "Stopped." for it — saying "Interrupted." here
-                    // too would report their deliberate action back at them twice.
-                    if (interrupted) { if (why != "cancel") Speech.Info("Interrupted."); }
-                    else Speech.Info(CONSUMABLES[kind].Name + " finished. "
-                        + intoxVanillaDrinks + (intoxVanillaDrinks == 1 ? " drink." : " drinks."));
-                    return;
-                }
-                Speech.Info("Falling back to this mod's own drunkenness.");
-            }
-
-            intoxDrinks = Math.Min(20f, intoxDrinks + CONSUMABLES[kind].Drinks * share);
-            intoxHits = Math.Min(20f, intoxHits + CONSUMABLES[kind].Hits * share);
-            IntoxLog("intox-dose: kind=" + kind + " interrupted=" + (interrupted ? 1 : 0)
-                + " prop=" + (intoxPropAttached ? 1 : 0)
-                + " drinks=" + intoxDrinks.ToString("0.##")
-                + " hits=" + intoxHits.ToString("0.##"));
+            if (!intoxDoseCommitted)
+                IntoxLog("intox-dose: kind=" + kind + " committed=0 why=" + why
+                    + " prop=" + (intoxPropAttached ? 1 : 0));
             if (interrupted) { if (why != "cancel") Speech.Info("Interrupted."); }
             else Speech.Info(CONSUMABLES[kind].Name + " finished.");
+            intoxDoseCommitted = false;
+            intoxConsumeOwner = null;
         }
 
         private void TickIntoxication()
         {
             Ped player = Game.Player.Character;
             if (player == null || !player.Exists()) return;
+
+            // A synchronized task, weapon stash, or movement clipset belongs to one
+            // concrete ped. Never carry it across a protagonist switch.
+            if ((intoxConsumeOwner != null && intoxConsumeOwner.Handle != player.Handle)
+                || (intoxEffectOwner != null && intoxEffectOwner.Handle != player.Handle))
+            {
+                IntoxLog("intox-owner-change: consume="
+                    + (intoxConsumeOwner != null ? intoxConsumeOwner.Handle : 0)
+                    + " effect=" + (intoxEffectOwner != null ? intoxEffectOwner.Handle : 0)
+                    + " current=" + player.Handle);
+                ResetIntoxication("character-switch");
+                return;
+            }
 
             // Dead-man: the suspend latch must be self-healing. It is the one thing
             // standing between a blind driver and no navigation assistance.
@@ -33779,22 +38019,30 @@ namespace GrandTheftAccessibility
                 if (stillRunning)
                 {
                     IntoxLog("intox-anim-stuck: scene=" + intoxLastSyncScene);
-                    try { Function.Call(Hash.CLEAR_PED_TASKS_IMMEDIATELY, player); } catch { }
+                    try
+                    {
+                        Ped releasePed = intoxReleaseOwner;
+                        if (releasePed != null && releasePed.Exists())
+                            Function.Call(Hash.CLEAR_PED_TASKS_IMMEDIATELY, releasePed);
+                    }
+                    catch { }
                     Speech.Critical("That animation stuck. Releasing you.");
                 }
                 intoxLastSyncScene = -1;
+                intoxReleaseOwner = null;
             }
 
             if (getSetting("intoxEnabled") != 1)
             {
-                if (intoxStage != 0 || intoxDrinks > 0f || intoxHits > 0f) ResetIntoxication("disabled");
+                if (HasOwnedIntoxState()) ResetIntoxication("disabled");
                 return;
             }
 
-            // Vanilla-only mode: consumption still runs (that is what produces the
-            // safehouse foley), but this mod applies no drunkenness presentation of
-            // its own, leaving the field to the game's own drunk_controller.
-            bool vanillaOnly = getSetting("intoxVanillaOnly") == 1;
+            // iter-69: preserve the setting row for compatibility, but fail closed.
+            // No script-global writes are safe without a build-specific, read-only
+            // fingerprint and the complete per-ped registration protocol.
+            if (getSetting("intoxVanillaOnly") == 1) NoteVanillaBridgeUnavailable();
+            bool vanillaOnly = false;
 
             long now = ModClock.Ticks;
             float dt = intoxLastTickTicks > 0 ? (now - intoxLastTickTicks) / 10000000f : 0f;
@@ -33869,11 +38117,22 @@ namespace GrandTheftAccessibility
                     // the scene was snapped to phase 1 and the ped task-cleared, so
                     // the player never put the bottle down or stood back up. Try the
                     // outro; only finish immediately if there is not one to play.
+                    CommitConsumeDose(intoxConsuming, why);
                     if (!TryStartConsumeOutro(player, intoxConsuming, why))
                         FinishConsume(false, why);
                 }
-                else if (now >= intoxConsumeEndTicks) FinishConsume(false, "timer");
-                else if (now >= intoxConsumeHardTicks) FinishConsume(false, "hard");
+                else if (intoxSyncScene >= 0)
+                {
+                    // A confirmed scene owns normal completion. Only the later hard
+                    // watchdog may break it; the old ordering checked the earlier
+                    // timer first, making this branch unreachable.
+                    if (now >= intoxConsumeHardTicks) FinishConsume(true, "hard");
+                }
+                else if (now >= intoxConsumeEndTicks)
+                {
+                    CommitConsumeDose(intoxConsuming, "timer");
+                    FinishConsume(false, "timer");
+                }
             }
 
             // ---- decay ----
@@ -33896,6 +38155,7 @@ namespace GrandTheftAccessibility
                 // and scales it every frame, so a one-shot on the stage boundary
                 // only fought the continuous ramp it now owns.
                 if (newStage < 2) intoxCompensateSaid = false;
+                if (newStage >= 3 && from < 3) intoxLastReminderTicks = now;
             }
 
             // ---- blackout overlay ----
@@ -33925,105 +38185,69 @@ namespace GrandTheftAccessibility
                     // would swallow the recovery line on a fast decay.
                     if (intoxBlackoutDriving)
                     {
-                        intoxBlackoutDriving = false;
-                        Speech.Critical("You are coming round. You have the wheel back.");
+                        EndIntoxBlackoutDriving("blackout-ended");
                     }
                     else Speech.Info("Coming round.");
                 }
             }
 
-            // ---- character-switch guard ----
-            if (intoxAppliedToHandle != player.Handle)
+            // ---- effect ownership ----
+            if (intoxStage > 0 && intoxAppliedToHandle != player.Handle)
             {
                 intoxAppliedToHandle = player.Handle;
+                intoxEffectOwner = player;
                 intoxClipsetApplied = null;
                 intoxClipsetWanted = null;
                 intoxClipsetFailed = false;
             }
 
             // ---- effects ----
-            try
+            if (intoxStage > 0)
             {
-                Function.Call(Hash.SET_PED_IS_DRUNK, player, intoxStage > 0);
-                Function.Call(Hash.SET_PED_CONFIG_FLAG, player, 100, intoxStage > 0);
-            }
-            catch { }
-
-            if (vanillaOnly)
-            {
-                // Make the suppression VISIBLE. Applying nothing in silence is
-                // indistinguishable from a broken feature — which is exactly how it
-                // read on 2026-08-01: this setting was on, and a session of "the
-                // reverb doesn't work at all" was really "the mod was told not to".
-                // Our meters must not keep ticking underneath the vanilla system —
-                // that is the "superimposed metabolism" this mode exists to remove.
-                // The game owns the whole state now; we only report it.
-                intoxDrinks = 0f;
-                intoxHits = 0f;
-                if (intoxSuppressLoggedStage != intoxVanillaDrinks)
-                {
-                    intoxSuppressLoggedStage = intoxVanillaDrinks;
-                    int untilMs = 0;
-                    try
-                    {
-                        if (!intoxVanillaFailed
-                            && GlobalVariable.Get(VG_DRUNK_ENABLE).MemoryAddress != IntPtr.Zero)
-                            untilMs = GlobalVariable.Get(VG_DRUNK_UNTIL).Read<int>()
-                                      - Function.Call<int>(Hash.GET_GAME_TIMER);
-                    }
-                    catch { }
-                    IntoxLog("intox-vanilla-active: drinks=" + intoxVanillaDrinks
-                        + " remainMs=" + untilMs);
-                }
-                // Presentation goes back to the game. Everything this mod imposes —
-                // clipset, timecycle, post-FX, camera shake, the audio override —
-                // stands down, and anything already applied is cleared so it cannot
-                // stick across the toggle.
-                //
-                // The meters are zeroed above, so there are no stage transitions to
-                // announce in this mode and the comment that used to sit here
-                // claiming "the METERS keep running" contradicted the code six lines
-                // above it. Announcements are still owed to a blind player though,
-                // so they come off the VANILLA state instead: FinishConsume speaks
-                // the running drink count, and the end of the game's own drunk
-                // window is spoken here. Without this, vanilla-only mode sobered up
-                // in complete silence.
-                ClearIntoxPresentation(player);
-                bool vanillaActive = false;
                 try
                 {
-                    if (!intoxVanillaFailed
-                        && GlobalVariable.Get(VG_DRUNK_ENABLE).MemoryAddress != IntPtr.Zero)
-                        vanillaActive = GlobalVariable.Get(VG_DRUNK_ENABLE).Read<int>() != 0
-                            && GlobalVariable.Get(VG_DRUNK_UNTIL).Read<int>()
-                               > Function.Call<int>(Hash.GET_GAME_TIMER);
+                    Function.Call(Hash.SET_PED_IS_DRUNK, player, true);
+                    Function.Call(Hash.SET_PED_CONFIG_FLAG, player, 100, true);
+                    intoxPedFlagsApplied = true;
                 }
                 catch { }
-                if (intoxVanillaWasActive && !vanillaActive)
-                {
-                    intoxVanillaDrinks = 0;
-                    IntoxLog("intox-vanilla: ended");
-                    Speech.Info("Sober again.");
-                }
-                intoxVanillaWasActive = vanillaActive;
             }
-            else
+            else if (intoxPedFlagsApplied)
             {
-                intoxSuppressLoggedStage = -1;
-                intoxVanillaWasActive = false;
-                ApplyIntoxClipset(player, intoxStage);
-                ApplyIntoxVisuals(player, intoxStage);
-                ApplyIntoxAudio(player, intoxStage);
+                try
+                {
+                    Function.Call(Hash.SET_PED_IS_DRUNK, player, false);
+                    Function.Call(Hash.SET_PED_CONFIG_FLAG, player, 100, false);
+                }
+                catch { }
+                intoxPedFlagsApplied = false;
+                if (intoxClipsetApplied == null)
+                {
+                    intoxEffectOwner = null;
+                    intoxAppliedToHandle = 0;
+                }
+            }
+
+            ApplyIntoxClipset(player, intoxStage);
+            ApplyIntoxVisuals(player, intoxStage);
+            ApplyIntoxAudio(player, intoxStage);
+            if (intoxStage == 0 && !intoxPedFlagsApplied && intoxClipsetApplied == null)
+            {
+                intoxEffectOwner = null;
+                intoxAppliedToHandle = 0;
             }
 
             TickIntoxStateLog(now, vanillaOnly);
 
-            // ---- suspend drive assist from stage 3 ----
-            if (getSetting("intoxDriveImpair") == 1 && !vanillaOnly)
-            {
-                if (intoxStage >= 3 && !intoxAssistSuspend) SetIntoxAssistSuspend(true, "stage" + intoxStage);
-            }
-            else if (intoxAssistSuspend) SetIntoxAssistSuspend(false, "gate-off");
+            // ---- suspend drive assist only when an enabled intoxication writer
+            // owns the vehicle. Blackout takeover is an independent setting. ----
+            bool shouldSuspendAssist = !vanillaOnly
+                && ((getSetting("intoxDriveImpair") == 1 && intoxStage >= 3)
+                    || (getSetting("intoxBlackoutDrive") == 1 && intoxBlackout));
+            if (shouldSuspendAssist && !intoxAssistSuspend)
+                SetIntoxAssistSuspend(true, intoxBlackout ? "blackout" : "stage" + intoxStage);
+            else if (!shouldSuspendAssist && intoxAssistSuspend)
+                SetIntoxAssistSuspend(false, "gate-or-state");
 
             // ---- standing reminder while badly impaired ----
             if (intoxStage >= 3 && now - intoxLastReminderTicks > 600000000L)   // 60 s
@@ -34073,35 +38297,54 @@ namespace GrandTheftAccessibility
         /// block so nothing can silently overwrite these writes, and every write goes
         /// through WriteControlValue so it lands in the log's ctrlRet ledger.
         /// </summary>
+        private void EndIntoxBlackoutDriving(string why)
+        {
+            if (!intoxBlackoutDriving) return;
+            intoxBlackoutDriving = false;
+            intoxSteerTarget = 0f;
+            intoxSteerCurrent = 0f;
+            intoxSteerNextTicks = 0;
+            intoxStutterUntilTicks = 0;
+            IntoxLog("intox-blackout: driving-off why=" + why);
+            Speech.Critical("You have the wheel back.");
+        }
+
         private void TickIntoxDriving()
         {
-            if ((intoxStage < 2 && !intoxBlackout) || getSetting("intoxDriveImpair") != 1)
-            { intoxBlackoutDriving = false; return; }
+            bool impairOn = getSetting("intoxDriveImpair") == 1;
+            bool blackoutOn = getSetting("intoxBlackoutDrive") == 1;
+            bool impairEligible = impairOn && intoxStage >= 2;
+            bool blackoutEligible = blackoutOn && intoxBlackout;
+            if (!impairEligible && !blackoutEligible)
+            {
+                EndIntoxBlackoutDriving("gate-or-state");
+                return;
+            }
             // iter-51: this gate had a full implementation and NO GateReach call, so
             // the census reported it "QUIET — no-GateReach-call-site" forever and the
             // digest could not distinguish it from a gate that was never written.
             // Reach = the impaired-driving tick actually ran; fire is on the control
             // writes below, where the impairment becomes real.
-            GateReach("intoxDriveImpair");
+            if (impairEligible) GateReach("intoxDriveImpair");
+            if (blackoutEligible) GateReach("intoxBlackoutDrive");
             Ped player = Game.Player.Character;
-            if (player == null || !player.Exists()) { intoxBlackoutDriving = false; return; }
+            if (player == null || !player.Exists()) { EndIntoxBlackoutDriving("no-player"); return; }
 
             Vehicle veh = null;
             try { if (player.IsInVehicle()) veh = player.CurrentVehicle; } catch { }
-            if (veh == null || !veh.Exists()) { intoxBlackoutDriving = false; return; }
+            if (veh == null || !veh.Exists()) { EndIntoxBlackoutDriving("no-vehicle"); return; }
             // If the butler (or anyone else) is driving, the player's state is irrelevant.
-            try { if (veh.Driver != player) { intoxBlackoutDriving = false; return; } } catch { }
+            try { if (veh.Driver != player) { EndIntoxBlackoutDriving("not-driver"); return; } } catch { }
 
             long now = ModClock.Ticks;
 
             // ---- blackout: dead-driver injection ----
-            if (intoxBlackout && getSetting("intoxBlackoutDrive") == 1)
+            if (blackoutEligible)
             {
                 // iter-51: same story as intoxDriveImpair — a fully implemented gate
                 // with no census call site, so it read QUIET whether it was working
                 // or not. Reach here (blackout reached the driving hook), fire on the
                 // control writes below (the dead driver actually took the wheel).
-                GateReach("intoxBlackoutDrive");
                 if (isAutodriving)
                 {
                     if (!intoxBlackoutDriving)
@@ -34147,11 +38390,11 @@ namespace GrandTheftAccessibility
                 return;
             }
 
-            if (intoxBlackoutDriving)
-            {
-                intoxBlackoutDriving = false;
-                Speech.Critical("You are coming round. You have the wheel back.");
-            }
+            EndIntoxBlackoutDriving("blackout-gate-ended");
+
+            // Blackout takeover is independent. If it was the only enabled driving
+            // effect, there is no ordinary wander to apply after its branch ends.
+            if (!impairEligible) return;
 
             // ---- stages 2/3: wander ----
             bool assistSteering = getSetting("steeringAssist") > 0 && !assistSuspended
@@ -34213,6 +38456,99 @@ namespace GrandTheftAccessibility
         private void MLog(string line)
         {
             menuLogger.Write("[F" + menuLogFrameCount + "] " + line);
+        }
+
+        /// <summary>iter-54 D: photographs the current frontend frame for a menu/phone
+        /// gap, at most once per distinct <paramref name="key"/> per session.
+        ///
+        /// `key` is what makes this affordable. The triggers are all "the reader had
+        /// nothing to say for this row", which is precisely the situation a person
+        /// responds to by arrowing back and forth over the row — so a time-based
+        /// throttle would either still fire dozens of times or miss the second distinct
+        /// gap that follows the first by 200 ms. Keying on the identity of the thing
+        /// that failed gives exactly one frame per unanswered question.
+        ///
+        /// Writes an EVENT line whose seq matches the image filename, so the join back
+        /// from log to picture needs no extra bookkeeping — the same contract the drive
+        /// side uses with collisionMarkerSeq.</summary>
+        private void MSnap(string tag, string key, string extra)
+        {
+            if (menuSnapshotWriter == null) return;
+            if (getSetting("menuSnapshotImage") != 1) return;
+            if (menuLogger == null || !menuLogger.IsRunning) return;
+
+            string dedup = tag + "|" + (key ?? "");
+            if (mlSnapSeen.Contains(dedup)) return;
+
+            if (!menuSnapshotWriter.IsRunning)
+            {
+                // Say it ONCE. A capture path that fails silently costs a whole session,
+                // and repeating it per row would bury the log it is trying to explain.
+                if (!menuSnapshotUnavailableLogged)
+                {
+                    menuSnapshotUnavailableLogged = true;
+                    MLog("EVENT capture-unavailable: why=" + menuSnapshotWriter.SelfTestStatus
+                        + " tag=" + tag);
+                }
+                return;
+            }
+
+            mlSnapSeen.Add(dedup);
+            mlSnapSeq++;
+            MLog("EVENT capture: seq=" + mlSnapSeq + " tag=" + tag
+                + " key=" + (key ?? "-") + (string.IsNullOrEmpty(extra) ? "" : " " + extra));
+            try { menuSnapshotWriter.CaptureFor(mlSnapSeq, tag); } catch { }
+            if (menuSnapshotWriter.ConsumeCapNotice())
+            {
+                MLog("EVENT capture-cap-hit: " + menuSnapshotWriter.Census());
+                Speech.Critical("Menu screenshots have reached the session limit. "
+                    + "No further images will be captured.");
+            }
+        }
+
+        /// <summary>Brings the menu snapshot writer up alongside a running menulog, and
+        /// says in the log what happened either way.
+        ///
+        /// Deliberately mirrors EnsureSnapshotWriter rather than sharing with it: the two
+        /// writers have different lifetimes (one follows driveLogger, one follows
+        /// menuLogger) and a session commonly runs one without the other. The iter-53
+        /// lesson this inherits is that binding the start to a rising edge produces
+        /// sessions with every gate on and no images and nothing saying why — so this is
+        /// called every tick and re-arms whenever the gate reads 0.</summary>
+        private void EnsureMenuSnapshotWriter()
+        {
+            if (menuSnapshotWriter == null || menuLogger == null || !menuLogger.IsRunning)
+                return;
+
+            if (getSetting("menuSnapshotImage") != 1)
+            {
+                menuSnapshotStartAttempted = false;
+                return;
+            }
+            if (menuSnapshotWriter.IsRunning || menuSnapshotStartAttempted) return;
+
+            menuSnapshotStartAttempted = true;
+            try { menuSnapshotWriter.Start(menuLogger.FilePath); } catch { }
+            // iter-55: as on the drive side — without this the field reads "?" at F1,
+            // because settings.xml is otherwise only re-read when the pause menu closes.
+            try { SettingsXmlDb.Reload(); } catch { }
+            MLog("EVENT capture-selftest: " + menuSnapshotWriter.Census()
+                + " videoWindowed=" + SettingsXmlRaw("video", "Windowed"));
+            // iter-59 C8: the menu side kept the confident wrong instruction that
+            // iter-56 C2 removed from the drive side (:39831). The claim is refuted
+            // again by driveassist-2026-08-15: selfTest=black with videoWindowed=0 at
+            // F0, then capture recovered 10 seconds later with NOTHING changed and
+            // wrote 73 files. A black frame at startup means the mod started during a
+            // loading or fade screen — it is not evidence of exclusive fullscreen, and
+            // telling a blind player to go and change their display mode over it sends
+            // them to fix something that is not broken.
+            //
+            // Same correction as the drive side: say what was measured, say it is a
+            // retry rather than a verdict, and do not name a cause that was not tested.
+            if (menuSnapshotWriter.SelfTestStatus == "black" || !menuSnapshotWriter.IsRunning)
+                Speech.Ambient("Menu screenshots are not capturing yet. "
+                    + "The log says what was measured.");
+            else WarnIfCaptureDegraded();
         }
 
         // Queue a live announcement. Trailing-edge coalescer: latest text wins;
@@ -34597,18 +38933,32 @@ namespace GrandTheftAccessibility
                     ResetMenuProbeState();
                     MLog("EVENT menulog-version: reader1.5");
                     Speech.Info("Menu debug logging started");
+                    // Fresh log, fresh image budget and fresh dedup set — otherwise a
+                    // second session in one game run silently photographs nothing,
+                    // because every key was already "seen" by the first.
+                    mlSnapSeq = 0;
+                    mlSnapSeen.Clear();
+                    menuSnapshotStartAttempted = false;
+                    menuSnapshotUnavailableLogged = false;
                 }
             }
             else if (!enabled && menuLogWasEnabled)
             {
                 StopPhoneProbe();
                 MLog("EVENT menulog-stop:");
+                if (menuSnapshotWriter != null && menuSnapshotWriter.IsRunning)
+                {
+                    MLog("EVENT capture-census: " + menuSnapshotWriter.Census());
+                    try { menuSnapshotWriter.Stop(); } catch { }
+                }
                 menuLogger.Stop();
                 Speech.Info("Menu debug logging stopped");
             }
             menuLogWasEnabled = enabled;
             if (!menuLogger.IsRunning) return;
             menuLogFrameCount++;
+
+            EnsureMenuSnapshotWriter();
 
             // Each sub-probe has its own catch + 20-error fuse so one flaky
             // native can neither spam the log nor take down the other probe.
@@ -34837,6 +39187,11 @@ namespace GrandTheftAccessibility
                 mlSf = SfProbeState.Off;
                 mlPhoneRow = int.MinValue;
                 mlAppMask = 0;
+                // iter-53 P2: the FULL reset lives here now — one phone episode is the
+                // right scope for the page-signature cache. Within an episode the
+                // signatures are evidence; across episodes they are stale.
+                PhoneRowText.Reset();
+                PhoneListRows.Reset();
             }
 
             if (!mlPhoneOpen) return;
@@ -35121,6 +39476,17 @@ namespace GrandTheftAccessibility
                     mrCurrentPane = pane;
                     mrPaneKeysUntrusted = false;
                     MLog("EVENT reader-pane: pane=" + pane + " via=hashedItem");
+                    // COVERAGE, not a gap: one frame the first time each pane is seen,
+                    // so build-menulabels.py has ground truth for what a pane actually
+                    // contains instead of the current arrangement, where its row tables
+                    // are reconstructed by reading menulogs by hand. Tagged distinctly
+                    // from the *-UNMAPPED gaps so triage can rank the gaps first.
+                    //
+                    // NOT triggered on profile-commit-diff, which the iteration plan
+                    // proposed: that diff is computed when the menu CLOSES, so the frame
+                    // at that instant shows the game world, not the setting that changed.
+                    // A screenshot there would be evidence of nothing.
+                    MSnap("PANE-FIRST-VISIT", pane.ToString(), "via=hashedItem");
                 }
                 return label; // clean label, no suffix, no harvest
             }
@@ -35219,6 +39585,11 @@ namespace GrandTheftAccessibility
                         {
                             MLog("EVENT settingsxml-unmapped: pref=" + row.pref
                                 + " optionType=" + row.optionType + " pane=" + mrCurrentPane);
+                            // The row and its current value are on screen right now.
+                            // Keyed on the pref, so arrowing over it repeatedly is one
+                            // frame, and a second unmapped pref still gets its own.
+                            MSnap("SETTINGS-UNMAPPED", row.pref,
+                                "optionType=" + row.optionType + " pane=" + mrCurrentPane);
                         }
                     }
                     return rowText + ReaderPositionSuffix(row);
@@ -35262,9 +39633,15 @@ namespace GrandTheftAccessibility
             if (!MenuLabelDb.TryPaneRowCount(mrCurrentPane, out total, out src))
             {
                 if (mrPositionNoDataLogged.Add(mrCurrentPane))
+                {
                     MLog("EVENT reader-position-nodata: pane=" + mrCurrentPane
                         + " derived=" + MenuLabelDb.DerivedPaneRowCount(mrCurrentPane)
                         + " -- walk this pane fully, then align-panes.py --write");
+                    // The log can say the pane has no row data; only the frame can say
+                    // how much of the pane there actually is to walk.
+                    MSnap("PANE-NODATA", mrCurrentPane.ToString(),
+                        "derived=" + MenuLabelDb.DerivedPaneRowCount(mrCurrentPane));
+                }
                 return "";
             }
             int pos = row.ord.Value + 1;
@@ -35552,7 +39929,18 @@ namespace GrandTheftAccessibility
             else if (mrAcceptPending && (now - mrAcceptAt).TotalMilliseconds > 250)
             {
                 mrAcceptPending = false;
-                MLog("EVENT accept-noop:");
+                // iter-54: this used to log bare `EVENT accept-noop:` with no fields, so
+                // four separate dead rows in one session collapsed into a single
+                // indistinguishable entry in triage and there was no way to tell WHICH
+                // row did nothing. The context was always available here; it was simply
+                // never written.
+                MLog("EVENT accept-noop: pane=" + mrCurrentPane
+                    + " menu=" + mlLastMenuID + " item=" + mlSelUniqueID);
+                // A row that did nothing when activated. Whether that is a dead row, a
+                // sub-menu that failed to open, or a confirmation prompt nobody spoke is
+                // not answerable from the log — the frame settles it outright.
+                MSnap("ACCEPT-NOOP", mrCurrentPane + ":" + mlLastMenuID + ":" + mlSelUniqueID,
+                    "pane=" + mrCurrentPane + " menu=" + mlLastMenuID + " item=" + mlSelUniqueID);
             }
 
             // v1.2 stability gate: a (d1,d2) pair must survive two consecutive
@@ -35829,6 +40217,14 @@ namespace GrandTheftAccessibility
                         // on with confidence instead of hopefully.
                         if (getSetting("phoneRowTextV2") == 1 || menuLogWasEnabled)
                             PhoneRowText.Probe(PhoneCharIndex(), mlAppNames[i], MLog);
+                        // iter-53 P1: dump the shared list-row buffer for the app that
+                        // just opened. Two open questions ride on this — the display-row
+                        // to slot mapping, and whether the strings resolve at all — and
+                        // one session of this dump answers both. Same "runs whenever the
+                        // menu log is on" rule as the probe above: collecting the
+                        // evidence is what lets the gate be flipped on with confidence.
+                        if (menuLogWasEnabled && PhoneListRows.HandlesApp(mlAppNames[i]))
+                            PhoneListRows.Dump(mlAppNames[i], MLog);
                         // Slot ground truth vs the table — using the STABLE
                         // home row; known mission overrides are not "errors".
                         if (MenuLabelDb.IsKnownSlotOverride(mlPhoneMovie, mrPhoneStableHomeRow, mlAppNames[i]))
@@ -35857,7 +40253,11 @@ namespace GrandTheftAccessibility
                     // v1.5: the row-label page belonged to the app that just
                     // closed. Drop it rather than let the home grid read rows out
                     // of a dead app's list.
-                    PhoneRowText.Reset();
+                    // iter-53 P2: ResetForApp, not Reset — the page is dead but the
+                    // cross-app page signatures are the only thing that can identify a
+                    // shared global table, and wiping them here is what left every app
+                    // probing blind and reading the theme-colour list.
+                    PhoneRowText.ResetForApp();
                     // v1.4: mark the return to the grid so the tile announcement
                     // can carry it. A separate "Contacts closed" utterance would
                     // just be interrupted by the tile name a tick later (or
@@ -35865,6 +40265,15 @@ namespace GrandTheftAccessibility
                     // "Home, Contacts" — says both in the time of one.
                     mrPhoneBackToHome = true;
                     mrPhoneApp = null;
+                    // iter-53 P4: forcing a re-announce is not enough on its own —
+                    // mlPhoneRow still holds the IN-APP row for the ~200 ms until the
+                    // next GET_CURRENT_SELECTION lands, so the announce fired straight
+                    // away against a stale index and named the wrong tile: "Home, Quick
+                    // Save" after leaving Email (in-app row 3), "Home, Texts" after
+                    // leaving Settings (in-app row 1). Discard the value instead of
+                    // reading it — the announce block already refuses on MinValue, so
+                    // this simply waits the one probe round-trip for the truth.
+                    mlPhoneRow = int.MinValue;
                 }
                 mrPhoneLastAppMask = mlAppMask;
             }
@@ -35906,8 +40315,14 @@ namespace GrandTheftAccessibility
                         // "row 5, unavailable" is not.
                         lbl = MenuLabelDb.PhoneHomeLabel(mlPhoneMovie, mlPhoneRow);
                         if (lbl == null && tileAvailable)
+                        {
                             MLog("EVENT reader-unmapped-phone: movie=" + mlPhoneMovie + " row=" + mlPhoneRow
                                 + " live=" + (liveGrid ? 1 : 0));
+                            // The phone home grid is on screen with this tile focused.
+                            // One frame names the app that the row map does not.
+                            MSnap("PHONE-UNMAPPED-HOME", mlPhoneMovie + ":" + mlPhoneRow,
+                                "movie=" + mlPhoneMovie + " row=" + mlPhoneRow);
+                        }
                     }
                     string tile = lbl ?? (tileAvailable ? "row " + mlPhoneRow : "empty");
                     if (!tileAvailable && lbl != null)
@@ -35991,7 +40406,18 @@ namespace GrandTheftAccessibility
                 string cname;
                 if (PhoneGlobals.TryContactName(row, out cname, MLog)) return cname;
             }
-            // The live row-label array every other phone app writes to. Gated — it
+            // iter-53 P1: the LIST apps — Email, Messages, Internet (and Contacts, which
+            // PhoneGlobals already caught above) — write their visible rows into the
+            // shared Global_9509 buffer that feeds SET_DATA_SLOT. That buffer IS what is
+            // on screen, so it goes AHEAD of PhoneRowText's page probe, whose blind
+            // page-scoring is what made Email read out the theme-colour list.
+            if (getSetting("phoneRowTextV2") == 1
+                && PhoneListRows.HandlesApp(script) && PhoneListRows.Ok)
+            {
+                string listed;
+                if (PhoneListRows.TryRowLabel(row, out listed)) return listed;
+            }
+            // The live row-label array the SETTINGS-shaped screens write to. Gated — it
             // reads script globals whose page offset this build has not confirmed —
             // and PhoneRowText.Ok is now false whenever the probe could not find a
             // page that actually belongs to the open app.
@@ -36002,7 +40428,13 @@ namespace GrandTheftAccessibility
             }
             MLog("EVENT reader-unmapped-phone: script=" + (script ?? "?")
                 + " row=" + row + " hasTable=" + (MenuLabelDb.HasPhoneAppRows(script) ? 1 : 0)
+                + " listApp=" + (PhoneListRows.HandlesApp(script) ? 1 : 0)
                 + " globalsOk=" + (PhoneGlobals.Ok ? 1 : 0));
+            // Inside a phone app with a row the reader cannot name. This is the single
+            // highest-value frame in the whole menu system: the row map is built by hand
+            // from observation, and this is the observation.
+            MSnap("PHONE-UNMAPPED-ROW", (script ?? "?") + ":" + row,
+                "script=" + (script ?? "?") + " row=" + row);
             return "row " + row;
         }
 
@@ -36781,23 +41213,36 @@ namespace GrandTheftAccessibility
 
             // Put the incident on a road node when there is one — emergencycall.c does
             // the same, because responders that spawn off-road never arrive.
-            try
-            {
-                var outPos = new OutputArgument();
-                var outHead = new OutputArgument();
-                if (Function.Call<bool>(Hash.GET_NTH_CLOSEST_VEHICLE_NODE_WITH_HEADING,
-                        me.X, me.Y, me.Z, 1, outPos, outHead, 1, 3.0f, 0))
-                    at = outPos.GetResult<GTA.Math.Vector3>();
-            }
-            catch { /* fall back to the player's own position */ }
+            //
+            // iter-53 E1: this used to hand-roll the native with only TWO OutputArguments,
+            // passing the int literal 1 into the `int* outNumLanes` slot. The engine then
+            // wrote the lane count to address 0x1 — an access violation inside game code,
+            // which no managed try/catch can contain. That is why every 911 call (police,
+            // ambulance AND fire, they all come through here) hard-crashed the game.
+            // TryGetNodeWithHeading is the shared, correct form: three OutputArguments and
+            // the full ten-argument list. Use it and never hand-roll this native again.
+            GTA.Math.Vector3 nodePos;
+            float nodeHeading;
+            if (TryGetNodeWithHeading(me, NodeNth(0), NodeFlagsFor(NODEFLAGS_PATH),
+                    out nodePos, out nodeHeading))
+                at = nodePos;
+            // else: fall back to the player's own position
 
             int incident = -1;
             try
             {
+                // iter-53 E2: CREATE_INCIDENT is BOOL (int service, float x, float y,
+                // float z, int units, float radius, int* outIncidentID, Any, Any) — nine
+                // arguments, and the return says whether the out-arg was written at all.
+                // SHVDN 3.6 allocates OutputArgument buffers with Marshal.AllocCoTaskMem
+                // and does NOT zero them, so reading the id after a FALSE return yields
+                // uninitialised heap garbage, which then reaches IS_INCIDENT_VALID and
+                // DELETE_INCIDENT. CreateUnrestIncident():30837 has always done this
+                // correctly; match it.
                 var outIncident = new OutputArgument();
-                Function.Call(Hash.CREATE_INCIDENT, svc.service, at.X, at.Y, at.Z,
-                    svc.units, svc.radius, outIncident);
-                incident = outIncident.GetResult<int>();
+                bool created = Function.Call<bool>(Hash.CREATE_INCIDENT,
+                    svc.service, at.X, at.Y, at.Z, svc.units, svc.radius, outIncident, 0, 0);
+                incident = created ? outIncident.GetResult<int>() : -1;
             }
             catch (Exception ex)
             {
@@ -36806,8 +41251,11 @@ namespace GrandTheftAccessibility
                 return;
             }
 
+            // The id is only meaningful when CREATE_INCIDENT returned true; -1 means it
+            // refused, and IS_INCIDENT_VALID must not be asked about a made-up id.
             bool valid = false;
-            try { valid = Function.Call<bool>(Hash.IS_INCIDENT_VALID, incident); } catch { }
+            if (incident >= 0)
+                try { valid = Function.Call<bool>(Hash.IS_INCIDENT_VALID, incident); } catch { }
             if (!valid)
             {
                 Speech.Info("The call did not go through. ");
@@ -36835,7 +41283,15 @@ namespace GrandTheftAccessibility
                 if (speak) Speech.Info("No emergency call is active. ");
                 return;
             }
-            try { Function.Call(Hash.DELETE_INCIDENT, activeDispatchIncident); } catch { }
+            // iter-53 E3: DELETE_INCIDENT on an id the engine no longer knows is one of
+            // the "you will crash or freeze" natives. ClearUnrestIncident():30761 checks
+            // first; do the same here.
+            try
+            {
+                if (Function.Call<bool>(Hash.IS_INCIDENT_VALID, activeDispatchIncident))
+                    Function.Call(Hash.DELETE_INCIDENT, activeDispatchIncident);
+            }
+            catch { }
             if (speak) Speech.Info(activeDispatchName + " call cancelled. ");
             if (driveLogger != null && driveLogger.IsRunning)
                 driveLogger.Write("[F" + driveLogFrameCount + "] EVENT dispatch-cancel:"
@@ -36871,9 +41327,30 @@ namespace GrandTheftAccessibility
         {
             // Suppression has to be re-asserted every frame — the native is
             // *_THIS_FRAME. This is the only per-frame write in the whole region.
+            //
+            // iter-53 E4: this used to call the native with ZERO arguments. Its real
+            // signature is void (int eventType, BOOL suppress), so the engine read two
+            // stale slots out of the native context — undefined behaviour that suppressed
+            // whatever happened to be sitting there, if anything. There is no documented
+            // "all events" sentinel, so suppress each harvested event id explicitly.
+            //
+            // ASSUMPTION, still unverified in game: the ids in the harvested registry
+            // (parsed from re_arrests.c's script->id switch) are the same id space this
+            // native takes. That is very likely — it is the engine's random-event id — but
+            // if blocking turns out not to work, this is the line to doubt first, not the
+            // arity. A wrong id here is harmless: it blocks nothing rather than crashing.
             if (blockRandomEvents && getSetting("randomEventAlerts") == 1)
             {
-                try { Function.Call(Hash.SUPRESS_RANDOM_EVENT_THIS_FRAME); } catch { }
+                try
+                {
+                    var evs = WorldDataDb.RandomEvents;
+                    for (int i = 0; i < evs.Count; i++)
+                    {
+                        if (evs[i] == null || evs[i].id < 0) continue;
+                        Function.Call(Hash.SUPRESS_RANDOM_EVENT_THIS_FRAME, evs[i].id, true);
+                    }
+                }
+                catch { }
             }
 
             if (activeDispatchIncident >= 0
@@ -36979,6 +41456,24 @@ namespace GrandTheftAccessibility
                     {
                         lastGateCensusTicks = nowTicks;
                         WriteGateCensus();
+                        // iter-59 C4: the capture census belongs on this same
+                        // heartbeat, for the identical reason stated two lines above.
+                        // It was emitted ONLY at startup and on recovery, so `written=`
+                        // was structurally always 0 — an instrument that reports its own
+                        // success as failure. driveassist-2026-08-15 wrote 73 images and
+                        // its only census said written=0, forcing the digest to carry a
+                        // hand-written CONTRADICTION caveat telling the reader to go and
+                        // count files. gate-census appeared 42 times in that log;
+                        // capture-census appeared 0. A shutdown-only census cannot
+                        // survive the way sessions actually end (08-15 has no
+                        // "# Session ended:" line at all — onAborted never ran).
+                        try
+                        {
+                            if (snapshotWriter != null)
+                                driveLogger.Write("[F" + driveLogFrameCount
+                                    + "] EVENT capture-census: " + snapshotWriter.Census());
+                        }
+                        catch { }
                     }
                 }
                 // iter-41 Stage 0.14: poll for in-game gate flips at ~2 Hz. Cheap
@@ -37096,6 +41591,20 @@ namespace GrandTheftAccessibility
                     + (veh != null
                         ? " bh=" + veh.BodyHealth.ToString("F0")
                           + " eh=" + veh.EngineHealth.ToString("F0")
+                        : "")
+                    // iter-71 A5: the CHEAP half of the damage context, every frame.
+                    // The expensive fields (fire, petrol tank, attitude) stay on the
+                    // drawdown/collision emitters; these three are a bool and two
+                    // subtractions, and they are what tells a reader at a glance that
+                    // a frame belongs to the two seconds after a spawn or a teleport
+                    // rather than to ordinary driving. 08-19's worst incident cost a
+                    // whole review pass for want of exactly this.
+                    + (veh != null
+                        ? " inAir=" + veh.IsInAir
+                          + " sinceSpawnMs=" + (vehicleEntryTicks > 0
+                              ? ((ModClock.Ticks - vehicleEntryTicks) / 10000L).ToString() : "-")
+                          + " sinceTpMs=" + (lastTeleportTicks > 0
+                              ? ((ModClock.Ticks - lastTeleportTicks) / 10000L).ToString() : "-")
                         : ""));
                 sb.AppendLine("  delta: planar=" + dPlanar.ToString("F3") + "m"
                     + " heading=" + dHeading.ToString("F2") + "deg"
@@ -37133,7 +41642,7 @@ namespace GrandTheftAccessibility
                 sb.AppendLine("  road: onValidRoad=" + isOnValidRoad
                     + " nativeOnRoad=" + nativeOnRoad           // iter-27 L3: native ground truth
                     + " lat=" + lastLaneLateralError.ToString("F2") // iter-27 L3: lateral offset, all modes
-                    + " latAgeMs=" + (lastLaneLateralErrorTicks > 0 ? (nowTicks - lastLaneLateralErrorTicks) / 10000 : -999) // iter-29 C1: >scan-interval = stale/frozen; iter-33: -999 = never measured (was -1, ambiguous with a tiny age)
+                    + " latAgeMs=" + (lastLaneLateralErrorTicks > 0 ? (ModClock.Ticks - lastLaneLateralErrorTicks) / 10000 : -999) // iter-29 C1: >scan-interval = stale/frozen; iter-33: -999 = never measured (was -1, ambiguous with a tiny age)
                     + " headingDelta=" + roadHeadingDelta.ToString("F1")
                     // iter-39 L7 budget: lastValidRoadDist printed 999.0 on 24031 of
                     // 24031 frames on 07-23 — a field whose only value is its own
@@ -37161,6 +41670,10 @@ namespace GrandTheftAccessibility
                         ? " edgeL=" + roadEdgeLeftM.ToString("F1")
                           + " edgeR=" + roadEdgeRightM.ToString("F1")
                           + " roadW=" + roadWidthMeasM.ToString("F1") : "")
+                    // iter-53 D9: and WHY, when there is no reading. ~10 B/frame, only
+                    // written when the sample failed, which turns the digest's 58.5%
+                    // "refusal rate" from an inference-from-absence into a breakdown.
+                    + (roadEdgeValid ? "" : " edgeStat=" + roadEdgeStat)
                     // iter-42 B2: grade in DEGREES so it is directly comparable to
                     // the A3 wheel-plane pitch — agreement between two independent
                     // derivations is the acceptance test for both.
@@ -37344,6 +41857,17 @@ namespace GrandTheftAccessibility
                     + (achValid
                         ? " steerAch=" + achSteerNorm.ToString("F3")
                           + " steerAchDeg=" + achSteerDeg.ToString("F1")
+                        : "")
+                    // iter-57 A: WHO IS DRIVING. Nothing in the 08-14 log said a native
+                    // task was holding the wheel, which is why 81% of that session's
+                    // damage took a frame-by-frame reconstruction to attribute. A dead
+                    // steer channel means something entirely different depending on
+                    // this field, so it belongs on the same line as steerAch.
+                    + (tempActionCurrent != 0
+                        ? " tempAction=" + tempActionCurrent
+                          + " tempSite=" + (tempActionSite ?? "-")
+                          + " tempLeftMs=" + Math.Max(0L,
+                              (tempActionUntilTicks - ModClock.Ticks) / 10000L)
                         : ""));
                 sb.AppendLine("  brake: brakeCmd=" + cachedBrakeMagnitude.ToString("F3")
                     + " rampedBrake=" + rampedBrakeInput.ToString("F3")
@@ -37412,14 +41936,25 @@ namespace GrandTheftAccessibility
                             + " slip=" + whlSlip.ToString("F2")
                             // Name the failure mode rather than leaving it to be
                             // re-derived from the sign at analysis time.
-                            + (whlSlip > WHEEL_SLIP_REPORT_MS ? " mode=spin"
+                            //
+                            // iter-64: with NO wheel touching, neither "spin" nor "lockup"
+                            // is true - both words assert a tyre-road relationship that does
+                            // not exist. 08-19 labelled a 46 m free fall mode=lockup, and
+                            // labelled a high-centred car (all four wheels clear of the
+                            // ground, full throttle, slip 11.94) the same way. Say nocontact
+                            // and let slip stand on its own.
+                            + (whlContactMask == 0 ? " mode=nocontact"
+                               : whlSlip > WHEEL_SLIP_REPORT_MS ? " mode=spin"
                                : whlSlip < -WHEEL_SLIP_REPORT_MS ? " mode=lockup" : "")
                             + (whlPlaneValid
                                 ? " pitch=" + whlPitchDeg.ToString("F1")
                                   + " camber=" + whlCamberDeg.ToString("F1") : "")
-                            + (whlAnyBurst ? " burst=true" : "")
-                            + (whlMinTyre >= 0f && whlMinTyre < 1000f
-                                ? " minTyre=" + whlMinTyre.ToString("F0") : "")
+                            // iter-64: UNCONDITIONAL. These were suppressed when nominal,
+                            // so across 67.6 MB of 08-19 neither appeared once - and a
+                            // reader could not tell "no tyre was ever damaged" from "the
+                            // read is broken". Same absence-vs-nominal trap as refused-vs-
+                            // clear in the ray fan, and the same fix: always say.
+                            + WheelDamageTag()
                             + (wheelAbnormal ? "" : " hb=1"));
                     }
                 }
@@ -37487,7 +42022,7 @@ namespace GrandTheftAccessibility
                         + " nativeOnRoad=" + nativeOnRoad
                         + " node=" + lastPathStartNodeIdx
                         + " latAgeMs=" + (lastLaneLateralErrorTicks > 0
-                            ? (nowTicks - lastLaneLateralErrorTicks) / 10000 : -999)
+                            ? (ModClock.Ticks - lastLaneLateralErrorTicks) / 10000 : -999)
                         + " skew=" + vehicleSkewAngle.ToString("F1"));
                 }
 
@@ -37553,6 +42088,15 @@ namespace GrandTheftAccessibility
         // 1-2 scans rebuild a fresh threat picture.
         private void ResetForTeleport(string source)
         {
+            // iter-53 D9: the two perception AGE stamps. This method cleared eleven
+            // caches and not these, so perceptAgeMs (the max of the two) survived every
+            // discontinuity and produced markers reading `UNKNOWN-STALE!stale542335ms`
+            // and `!stale5016648ms` — which are not stale perception, they are a 542 s
+            // idle gap and an 84-minute alt-tab being reported as if the mod had been
+            // steering on nine-minute-old sensor data. Zero means "no reading yet",
+            // which is the truth after a teleport.
+            lastScanCompletedTicks = 0;
+            lastLaneLateralErrorTicks = 0;
             cachedBrakeThreatPos = GTA.Math.Vector3.Zero;
             cachedBrakeThreatVel = GTA.Math.Vector3.Zero;
             cachedBrakeThreatStamp = 0;
@@ -37719,6 +42263,16 @@ namespace GrandTheftAccessibility
         private int prerollCount = 0;
         private long prerollNextGrabTicks = 0;
         private long prerollArmedUntilTicks = 0;
+        // iter-57 K: when the newest ring frame was actually grabbed. The ring had no
+        // time base at all, and the "t-3s" labels are derived from the FILENAME on the
+        // assumption of a 1 Hz cadence that prerollNextGrabTicks cannot guarantee —
+        // ModClock only advances while the script ticks, so any hitch stretches the
+        // real interval while the label keeps claiming one second.
+        private long prerollLastGrabTicks = 0;
+        // Twice the ring's nominal span. Older than this and the frames are not run-up
+        // to anything; they are a different moment wearing a run-up's filename.
+        private const long PREROLL_STALE_TICKS =
+            PREROLL_FRAMES * PREROLL_INTERVAL_MS * 10000L * 2L;
 
         /// <summary>True when a failure looks plausible right now: the stuck ladder is
         /// engaged, the low-speed timer is running, or the assist is in a recovery mode.
@@ -37727,7 +42281,7 @@ namespace GrandTheftAccessibility
         {
             if (stuckLayer >= 1) return true;
             if (lowSpeedAnyStartTicks > 0) return true;
-            if (currentDriveMode != DriveMode.LaneKeeping) return true;
+            if (!IsLaneKeepingMode()) return true;
             return false;
         }
 
@@ -37735,9 +42289,33 @@ namespace GrandTheftAccessibility
         {
             if (getSetting("snapshotPreroll") != 1 || getSetting("snapshotImage") != 1) return;
             if (snapshotWriter == null || !snapshotWriter.IsRunning) return;
-            if (!Game.Player.Character.IsInVehicle()) return;
+            // iter-57 K: CLEAR ON THE WAY OUT, not just on disarm. This early return
+            // used to leave the ring intact, so a stretch on foot preserved whatever
+            // was in it. On 08-14 the script did not tick for 11.49 s while the player
+            // was in a menu; they came out on foot 1313 m away in a different vehicle,
+            // marker #20 fired, and the flush handed the writer three 11.5-second-old
+            // bitmaps of a wedge in another county alongside a live capture. The
+            // resulting sheet reads as one continuous event and is not one.
+            if (!Game.Player.Character.IsInVehicle())
+            {
+                ClearPrerollRing();
+                return;
+            }
 
             long now = ModClock.Ticks;
+            // iter-57 K: a wall-clock discontinuity invalidates the ring just as surely
+            // as leaving the car. If the last grab is older than the ring's own span,
+            // its frames are not "t-3s" whatever the filename says.
+            if (prerollCount > 0 && prerollLastGrabTicks > 0
+                && now - prerollLastGrabTicks > PREROLL_STALE_TICKS)
+            {
+                if (driveLogger != null && driveLogger.IsRunning)
+                    driveLogger.Write("[F" + driveLogFrameCount
+                        + "] EVENT capture-preroll-stale:"
+                        + " dropped=" + prerollCount
+                        + " oldestAgeMs=" + ((now - prerollLastGrabTicks) / 10000L));
+                ClearPrerollRing();
+            }
             if (PrerollShouldArm()) prerollArmedUntilTicks = now + PREROLL_DISARM_MS * 10000L;
             if (now > prerollArmedUntilTicks)
             {
@@ -37755,6 +42333,7 @@ namespace GrandTheftAccessibility
                 prerollRing[prerollHead] = bmp;
                 prerollHead = (prerollHead + 1) % PREROLL_FRAMES;
                 if (prerollCount < PREROLL_FRAMES) prerollCount++;
+                prerollLastGrabTicks = now;   // iter-57 K
             }
             catch { /* a failed grab must never take the game down */ }
         }
@@ -37770,6 +42349,7 @@ namespace GrandTheftAccessibility
             }
             prerollHead = 0;
             prerollCount = 0;
+            prerollLastGrabTicks = 0;   // iter-57 K
         }
 
         /// <summary>Hands the buffered frames to the writer, oldest first, named -pre3
@@ -37788,6 +42368,107 @@ namespace GrandTheftAccessibility
             }
             prerollHead = 0;
             prerollCount = 0;
+        }
+
+        /// <summary>iter-53 S1: brings the screenshot writer up whenever images are
+        /// wanted and it is not already running, and says in the log what happened
+        /// either way. Called every frame — the whole body is two field reads once the
+        /// writer is up.
+        ///
+        /// This exists because the previous wiring bound the writer's only start to the
+        /// rising edge of driveAssistDebugLog, so the natural user order (start logging,
+        /// then enable images) produced a session with every snapshot gate on and not a
+        /// single image, and nothing in the log to say why. A capture path that can fail
+        /// without a log line costs a whole play session; this one cannot.</summary>
+        private void EnsureSnapshotWriter()
+        {
+            if (snapshotWriter == null || driveLogger == null || !driveLogger.IsRunning)
+                return;
+
+            if (getSetting("snapshotImage") != 1)
+            {
+                // Re-arm, so turning images back on (e.g. after switching the game to
+                // borderless windowed because we told them to) gets a fresh attempt.
+                snapshotStartAttempted = false;
+                return;
+            }
+            if (snapshotWriter.IsRunning) return;
+
+            // iter-56 C1: a failed start is no longer terminal for the session. Retry on a
+            // 30 s cadence — one GDI blit per interval, and only while the writer is down.
+            // The old code latched snapshotStartAttempted and never looked again, so the
+            // black frame the self-test happened to catch at F0 disabled images for all
+            // 17 minutes of 08-12-214825. Startup is exactly when a game is most likely to
+            // be mid-load or mid-fade, which makes F0 the worst single sample to bet a
+            // session on.
+            if (snapshotStartAttempted)
+            {
+                if (!snapshotWriter.RetryStartIfDown(driveLogger.FilePath)) return;
+                driveLogger.Write("[F" + driveLogFrameCount + "] EVENT capture-recovered: "
+                    + snapshotWriter.Census());
+                Speech.Info("Failure screenshots are working now.");
+                WarnIfCaptureDegraded();
+                return;
+            }
+
+            snapshotStartAttempted = true;
+            try { snapshotWriter.Start(driveLogger.FilePath); } catch { }
+            // iter-55: settings.xml is only re-read when the pause menu closes, so at F0
+            // every one of the three fields below logged "?" — the exact fields that were
+            // supposed to explain a capture problem, absent at the only moment they are
+            // written. Re-read here so they carry a value.
+            try { SettingsXmlDb.Reload(); } catch { }
+            driveLogger.Write("[F" + driveLogFrameCount + "] EVENT capture-selftest: "
+                + snapshotWriter.Census()
+                + " videoWindowed=" + SettingsXmlRaw("video", "Windowed")
+                + " screenW=" + SettingsXmlRaw("video", "ScreenWidth")
+                + " screenH=" + SettingsXmlRaw("video", "ScreenHeight"));
+            // iter-56 C2: SAY WHAT WAS MEASURED, NOT WHAT WAS GUESSED.
+            //
+            // This used to assert exclusive fullscreen as the cause of a black frame. The
+            // mod's own measurements refute that: at 21:46:38 on 08-12 the capture rect was
+            // 3,32,1530x830 at clientFrac=61% — a plain window with a title bar at y=32,
+            // which cannot be exclusive fullscreen — and the self-test still read black.
+            // The player heard this line, switched to borderless exactly as instructed
+            // (21:48:25 measures 0,0,1920x1080), and it failed again. A blind player was
+            // given a confident, specific, wrong instruction and acted on it.
+            // `videoWindowed` is no help either: it read 0 for that 1530x830 window, which
+            // is why SnapshotWriter.cs:379 already documents settings.xml as unreliable.
+            //
+            // It is also no longer fatal — RetryStartIfDown re-tests every 30 s — so the
+            // honest line is "not yet", not "unavailable".
+            //
+            // Priority was inverted too: this, the TOTAL failure, was Speech.Ambient (the
+            // lowest tier, dropped outright if anything Critical fires the same tick) while
+            // the lesser failures shout — degraded framing is Speech.Critical at :38464 and
+            // cap-hit is Speech.Critical at :39040. At F0 it landed behind ~15 Informational
+            // menu lines. Fail closed AND say so out loud.
+            if (!snapshotWriter.IsRunning)
+                Speech.Critical("Failure screenshots are not capturing yet. Retrying every "
+                    + "30 seconds. The log says what was measured.");
+            // iter-56 C2: this was on the `else` branch, so a black self-test skipped the
+            // framing warning entirely — the one that would have reported the 70-percent
+            // desktop in every iter-54 image.
+            else WarnIfCaptureDegraded();
+        }
+
+        /// <summary>Says once per session that the capture region is not a clean view of
+        /// the game.
+        ///
+        /// The capture can succeed and still be wrong: 08-12 wrote 120 frames that each
+        /// carried ~40% Windows desktop, with the self-test reporting "ok" the whole way,
+        /// and nobody found out until an agent opened one of the images days later. The
+        /// blank-frame guard cannot catch it — a desktop has variation everywhere — so
+        /// this is the only warning there is. Critical priority, because it interrupts,
+        /// and at session start there is still time to fix the window and get a usable
+        /// session out of the next half hour.</summary>
+        private void WarnIfCaptureDegraded()
+        {
+            if (captureDegradedSpoken) return;
+            string why;
+            if (!SnapshotWriter.IsCaptureDegraded(out why)) return;
+            captureDegradedSpoken = true;
+            Speech.Critical("Warning: " + why + ".");
         }
 
         private void SnapshotFailure(string tag, string extra)
@@ -37866,7 +42547,7 @@ namespace GrandTheftAccessibility
                 float fcSkew = vehicleSkewAngle;
                 float fcLat = lastLaneLateralError;
                 bool laneOffOn = getSetting("laneOffsetPolyline") == 1;
-                bool fcInRecovery = currentDriveMode != DriveMode.LaneKeeping
+                bool fcInRecovery = !IsLaneKeepingMode()
                     || pivotEscapeActive || stuckLayer >= 1 || alignmentEngageReverse;
                 long recentWedgeMs = (stuckLayer >= 1 && stuckLayerSinceTicks > 0)
                     ? (now - stuckLayerSinceTicks) / 10000 : -1;
@@ -37881,7 +42562,7 @@ namespace GrandTheftAccessibility
                 float fcDecel = lastDecelMs2;
                 bool fcWheelsDown = veh != null && !veh.IsInAir;
                 long offRoadDurMs = offRoadStartTicks > 0 ? (ModClock.Ticks - offRoadStartTicks) / 10000 : -1; // ModClock pair
-                long latAgeMs = lastLaneLateralErrorTicks > 0 ? (now - lastLaneLateralErrorTicks) / 10000 : -1;
+                long latAgeMs = lastLaneLateralErrorTicks > 0 ? (ModClock.Ticks - lastLaneLateralErrorTicks) / 10000 : -1;
                 // iter-39 L4: age of the perception this classification would rest on.
                 // Two 07-23 markers were classified off a lane model 2.6 s and 4.4 s
                 // old (the assist was suspended, so nothing was being recomputed) while
@@ -37918,12 +42599,42 @@ namespace GrandTheftAccessibility
                 // assistSuspended (:27325), so it was invisible here too.
                 else if (intoxAssistSuspend)
                     failClass = "INTOX-STANDDOWN";
+                // iter-61: the FOURTH parallel authority latch. iter-56 A1 had to retrofit
+                // autodrive here after it produced 11 bogus UNKNOWN-STALE rows; a new
+                // latch that skips this line buys the same bug again.
+                else if (frontendAssistSuspend)
+                    failClass = "MENU-STANDDOWN";
+                // iter-56 A1: autodrive is the THIRD parallel authority latch, and the
+                // last one with no representation here. The assist block at :7263 is
+                // gated on !isAutodriving, so when iter-35's last-resort ladder hands the
+                // car to auto-drive, ProcessSteeringAssist stops stamping
+                // lastScanCompletedTicks AND ApplyCachedSteeringInputs stops running —
+                // every perception field freezes while assistSuspended and
+                // InWatchdogGrace() both stay FALSE. On 08-12-214825 that produced ELEVEN
+                // UNKNOWN-STALE markers (#44-#54) whose stale ages all back-solve to a
+                // single instant: F10405 "Drive assist still stuck. Auto-drive taking
+                // over.", released at F18901 "Auto-drive ending." apply-assist fired 0
+                // times across that window against 55 at incident 09, which is the proof
+                // the block was gated off rather than running on stale data. Both the
+                // dead-vehicle and intox arms above exist for exactly this shape; this is
+                // the same bug a third time. Test BEFORE the staleness tests.
+                else if (isAutodriving)
+                    failClass = "AUTODRIVE";
                 else if (perceptAgeMs > 500 && assistSuspended)
                     failClass = "SUSPENDED";
                 else if (perceptAgeMs > 500 && InWatchdogGrace())
                     failClass = "PLAYER-GRACE";
-                else if (perceptAgeMs > 500)
-                    failClass = "UNKNOWN-STALE";
+                // iter-56 A4: split the stale class by WHICH clock froze. Group B of
+                // 08-12-214825 (#56-#67) had scanAgeMs FRESH at 0-58 ms with latAgeMs
+                // running to 56974 ms: the scan was fine and only lastLaneLateralError
+                // was frozen, because the car was off the road graph (navC=999.0
+                // cacheEmpty=True) so no polyline resolved. That is a different fault
+                // from a dead scan pipeline with a different fix, and one label for both
+                // hid the difference across 23 rows.
+                else if (scanAgeMsSnap > 500)
+                    failClass = "SCAN-STALLED";
+                else if (latAgeMs > 500)
+                    failClass = "LAT-STALLED";
                 else if (fcSpeedPeak < 3f && (fcInRecovery || laneKeepFailureStreak >= 12
                     || cachedHandbrakeMagnitude > 0.1f))
                     failClass = "WEDGE";
@@ -37935,8 +42646,52 @@ namespace GrandTheftAccessibility
                     failClass = "LATERAL-OFFROAD";
                 else if (fcSpeedPeak > 5f && Math.Abs(fcLat) > 2.5f && !fcInRecovery && fcNativeOnRoad)
                     failClass = "LANE-OFFSET";
+                // iter-53 D9: OTHER used to be the fall-through for "moderate speed, on
+                // road, small |lat|, fresh perception, not recovering" — i.e. for
+                // NOTHING BEING WRONG — and it swallowed 40+ of 82 markers on
+                // 08-11-182121, which read as a taxonomy failure when it was really the
+                // classifier faithfully describing markers that should never have
+                // fired (see the D1 brace bug). With those gone, split what remains on
+                // the one input the classifier never looked at: what the car touched.
+                // NearestContactLabel() is already computed for the grind and
+                // collision-suppressed paths, so this is free.
                 else
-                    failClass = "OTHER";
+                {
+                    string fcContact = null;
+                    try { fcContact = NearestContactLabel(); } catch { }
+                    // ---- iter-59 C3: CONTACT- must mean contact ----
+                    //
+                    // NearestContactLabel() starts its search at best=999f and has no
+                    // distance bound — by design, because its other callers (the grind
+                    // and collision-suppressed paths) genuinely want "nearest thing,
+                    // whatever the range". Used here as the fall-through arm, that made
+                    // CONTACT- the label for anything the scanner could see anywhere:
+                    // on 08-15, marker #2 was classified CONTACT-C/vehicle with the
+                    // vehicle 33.4 m away, and 24 of the session's 32 markers carried a
+                    // CONTACT- class. The digest's failure table — the artifact every
+                    // iteration is ranked on — read as a collision list and was not one.
+                    //
+                    // Cap it at something a vehicle could plausibly be touching. Beyond
+                    // that the honest answer is NEAREST-, which still carries the side
+                    // and kind but does not claim contact. Nothing is discarded; the
+                    // distance stays in the label either way.
+                    float fcDist = -1f;
+                    int at = fcContact != null ? fcContact.IndexOf('@') : -1;
+                    if (at > 0)
+                        float.TryParse(fcContact.Substring(at + 1),
+                            System.Globalization.NumberStyles.Float,
+                            System.Globalization.CultureInfo.InvariantCulture, out fcDist);
+                    if (!string.IsNullOrEmpty(fcContact) && fcContact != "none")
+                    {
+                        // "L/world@2.5" -> CONTACT-L/world. Space-free, and it says
+                        // which side and what kind without needing the raw line.
+                        string side = at > 0 ? fcContact.Substring(0, at) : fcContact;
+                        bool touching = fcDist >= 0f
+                            && fcDist <= CONTACT_CLASS_MAX_M + GetVehicleHalfLengthForClearance(veh);
+                        failClass = (touching ? "CONTACT-" : "NEAREST-") + side;
+                    }
+                    else failClass = "OTHER";
+                }
 
                 // Street as a SPACE-FREE token (triage kv regex is key=(\S*)): the
                 // compact v2 name first, native name with spaces stripped as the
@@ -37985,6 +42740,17 @@ namespace GrandTheftAccessibility
                     // (:27325) so it never touches assistSuspended either.
                     + " vehDead=" + (deadVehicleHandle != 0)
                     + " intoxSusp=" + intoxAssistSuspend
+                    // iter-61: menuOpen is logged even when the gate is off, because a
+                    // marker taken while a menu was up is not a driving failure and the
+                    // reader needs to see that on the header line, not infer it.
+                    + " menuOpen=" + frontendMenuOpen
+                    + " menuSusp=" + frontendAssistSuspend
+                    // iter-56 A2: the third authority latch, and the one that produced 11
+                    // of the 23 bogus UNKNOWN-STALE rows on 08-12-214825. Without it the
+                    // header reads suspended=False grace=False vehDead=False
+                    // intoxSusp=False while auto-drive, not the assist, is driving the
+                    // car — so every one of those markers claimed the assist was ON.
+                    + " autodrive=" + isAutodriving
                     // iter-46 0b-5: carry the wanted level ON THE MARKER, so combat
                     // damage is segregated from a per-marker fact instead of from a
                     // reconstructed speech timeline. The marker is NOT suppressed —
@@ -38316,9 +43082,48 @@ namespace GrandTheftAccessibility
                 // back to this snapshot with no extra bookkeeping.
                 if (getSetting("snapshotImage") == 1 && snapshotWriter != null)
                 {
+                    // iter-53 D4: images were asked for and the writer is not up. Say so
+                    // ONCE — silently dropping every capture is what made the last session
+                    // unreadable. Once per log, because the alternative is a line per
+                    // failure saying the same thing.
+                    // iter-56 C3: COUNT them. The once-per-log line is right — a line per
+                    // failure would say the same thing 66 times — but with the writer down
+                    // the whole session, `accepted` and `droppedCap` both stay 0, so
+                    // nothing anywhere recorded how many images were actually lost. The
+                    // 08-12 digest could only say `capture-unavailable x1` for a 66-image
+                    // loss, which understates it by two orders of magnitude. The running
+                    // total now rides in the census as dropWhileDown=.
+                    if (!snapshotWriter.IsRunning)
+                    {
+                        snapshotWriter.NoteDroppedWhileDown();
+                        if (!snapshotUnavailableLogged)
+                        {
+                            snapshotUnavailableLogged = true;
+                            driveLogger.Write("[F" + driveLogFrameCount
+                                + "] EVENT capture-unavailable: why=" + snapshotWriter.SelfTestStatus
+                                + " tag=" + tag + " seq=" + collisionMarkerSeq
+                                + " (further drops counted in dropWhileDown=)");
+                        }
+                    }
                     // Preroll first so the run-up frames sort before the failure frame.
                     try { FlushPrerollFor(collisionMarkerSeq, tag); } catch { }
-                    try { snapshotWriter.CaptureFor(collisionMarkerSeq, tag); } catch { }
+                    // iter-55: the frame number makes co-firing emitters share one grab.
+                    // DAMAGE-DRAWDOWN arrives with AUTO-COLLISION, and ENGINE-STUCK with
+                    // STUCK-ARM and STUCK-LAYER — on 08-12 that spent 11 of 120 budget
+                    // slots on byte-identical images.
+                    try { snapshotWriter.CaptureFor(collisionMarkerSeq, tag, driveLogFrameCount); } catch { }
+                    // iter-53 D4: the image cap used to bite in silence, and the artifact
+                    // set still looked complete afterwards. iter-55 also says it out loud
+                    // at interrupting priority — a blind tester otherwise plays on for
+                    // twenty minutes believing the session is still being recorded.
+                    if (snapshotWriter.ConsumeCapNotice())
+                    {
+                        driveLogger.Write("[F" + driveLogFrameCount
+                            + "] EVENT capture-cap-hit: " + snapshotWriter.Census()
+                            + " atTag=" + tag + " atSeq=" + collisionMarkerSeq);
+                        Speech.Critical("Failure screenshots have reached the session "
+                            + "limit. No further images will be captured.");
+                    }
                 }
                 return true;
             }
@@ -38443,6 +43248,40 @@ namespace GrandTheftAccessibility
                         + " engineHealth=" + veh.EngineHealth.ToString("F0"));
                 }
                 catch { sb.AppendLine("  chassis: (read failed)"); }
+                // ---- iter-57 L: WHAT DID IT HIT? ----
+                // At marker #30 on 08-14 — 475 damage, the worst event of the session —
+                // the complete record of what was struck was: every ray `clear`, `veh:
+                // (none within 15 m)`, `ped: (none within 10 m)`, `attacker=none`. But
+                // `attacker=none` only means "no ped or vehicle attacker"; it does not
+                // mean nothing was hit. The event was undiagnosable from the artifacts
+                // and only the screenshot named it (canopy pillars of a derelict gas
+                // station). An image should corroborate the log, not be the sole source.
+                try
+                {
+                    bool collided = Function.Call<bool>(
+                        Hash.HAS_ENTITY_COLLIDED_WITH_ANYTHING, veh);
+                    // The last material the vehicle collided with, plus where the
+                    // collision normal points. A head-on wall and a glancing kerb
+                    // produce the same damage number and completely different normals —
+                    // which is the question the ray fan could not answer.
+                    int lastMat = Function.Call<int>(
+                        Hash.GET_LAST_MATERIAL_HIT_BY_ENTITY, veh);
+                    GTA.Math.Vector3 cn = Function.Call<GTA.Math.Vector3>(
+                        Hash.GET_COLLISION_NORMAL_OF_LAST_HIT_FOR_ENTITY, veh);
+                    sb.AppendLine("  impact: collided=" + collided
+                        + " lastMaterial=" + lastMat
+                        + " normal=" + FmtV(cn)
+                        // Dot of the collision normal against our forward: -1 is
+                        // dead-ahead head-on, ~0 is a glancing/side scrape.
+                        + " normalDotFwd=" + (cn.LengthSquared() > 0.0001f
+                            ? GTA.Math.Vector3.Dot(cn, veh.ForwardVector).ToString("F2")
+                            : "n/a")
+                        + " tempAction=" + (TempActionLive()
+                            ? tempActionCurrent.ToString() : "0")
+                        + " signedSpd=" + GTA.Math.Vector3.Dot(
+                            veh.Velocity, veh.ForwardVector).ToString("F2"));
+                }
+                catch { sb.AppendLine("  impact: (read failed)"); }
             }
 
             // Ground clearance directly beneath, and the road model at the failure
@@ -38598,8 +43437,18 @@ namespace GrandTheftAccessibility
             return maxAbs;
         }
 
+        // iter-59 C3: how close the nearest scanned entity has to be before the
+        // failClass fall-through is allowed to call it a CONTACT. Added to the
+        // vehicle's own half-length, since navAssist distances are measured from the
+        // entity origin — so a DILETTAN (halfLen 2.25) gets ~4.75 m and a CLIFFHANGER
+        // (halfLen 1.17) gets ~3.67 m, which is the point of scaling it rather than
+        // picking one number for every vehicle.
+        private const float CONTACT_CLASS_MAX_M = 2.5f;
+
         // iter-34 BS-2: nearest shapecast contact as a compact label ("C/vehicle@3.8")
         // for grind-episode telemetry — identifies WHAT the car is grinding against.
+        // NOTE: deliberately UNBOUNDED — callers that need a contact-distance test must
+        // apply it themselves (see the failClass fall-through, iter-59 C3).
         private string NearestContactLabel()
         {
             float best = 999f; string label = "none";
@@ -38612,6 +43461,205 @@ namespace GrandTheftAccessibility
             if (navAssistTypeBehind != "none" && navAssistDistBehind < best)
             { best = navAssistDistBehind; label = "B/" + navAssistTypeBehind + "@" + navAssistDistBehind.ToString("F1"); }
             return label;
+        }
+
+        /// <summary>iter-53 D6: the ped half of the attacker question. IdentifyAttacker
+        /// walks GetNearbyVehicles only, so its "none" has always meant "no vehicle" —
+        /// which on 08-11-182121 was read as "nothing hit us" for a death that had a
+        /// Sheriff cruiser and two peds 5.3 m away. Same token shape, same
+        /// clear-the-damager courtesy, so the two can be read side by side.</summary>
+        private string IdentifyPedAttacker(Vehicle playerVeh)
+        {
+            try
+            {
+                if (playerVeh == null || !playerVeh.Exists()) return "none";
+                foreach (Ped p in World.GetNearbyPeds(playerVeh.Position, 25f))
+                {
+                    if (p == null || !p.Exists()) continue;
+                    if (p.Handle == Game.Player.Character.Handle) continue;
+                    if (!Function.Call<bool>(Hash.HAS_ENTITY_BEEN_DAMAGED_BY_ENTITY,
+                            playerVeh, p, true))
+                        continue;
+                    GTA.Math.Vector3 to = p.Position - playerVeh.Position;
+                    float fdot = GTA.Math.Vector3.Dot(playerVeh.ForwardVector, to);
+                    float rdot = GTA.Math.Vector3.Dot(playerVeh.RightVector, to);
+                    string bearing = Math.Abs(fdot) >= Math.Abs(rdot)
+                        ? (fdot >= 0f ? "ahead" : "behind")
+                        : (rdot >= 0f ? "right" : "left");
+                    return p.Handle + ":ped:" + to.Length().ToString("F1") + ":" + bearing;
+                }
+            }
+            catch { }
+            return "none";
+        }
+
+        /// <summary>iter-53 D6: a car can die with nothing touching it — fire and a
+        /// ruptured petrol tank are the two common ways. Both wrapped, because a dying
+        /// entity is exactly when a property read is most likely to throw.</summary>
+        private bool SafeIsVehicleOnFire(Vehicle v)
+        {
+            try { return v != null && v.Exists() && v.IsOnFire; }
+            catch { return false; }
+        }
+
+        private float SafePetrolTankHealth(Vehicle v)
+        {
+            try { return (v != null && v.Exists()) ? v.PetrolTankHealth : -1f; }
+            catch { return -1f; }
+        }
+
+        /// <summary>iter-64: the health tag every OBEDIENCE emitter was missing.
+        ///
+        /// 08-19 asked a question the artifact set could not answer: does deformation
+        /// damage degrade the car's obedience to drive-assist inputs? Every response
+        /// metric in the digest is stratified by SPEED (the actuation bands) or by
+        /// VEHICLE INSTANCE (the steering-lock table), and health is a dimension of
+        /// neither - so "the controller is wrong" and "the car is bent" are the same
+        /// row. The session ended bh=755 eh=21 with 979 of the worst incident's 1184
+        /// points being engine health, and not one obedience line recorded it.
+        ///
+        /// Note this is deliberately NOT IsDriveable. That flips only at engine death,
+        /// so it would have read true for the whole session and said nothing; handling
+        /// degrades continuously long before any binary flips. Health is a COVARIATE
+        /// here, never a decision input - nothing in the driving model reads it.</summary>
+        private string HealthTag(Vehicle v)
+        {
+            try
+            {
+                if (v == null || !v.Exists()) return " bh=- eh=-";
+                return " bh=" + v.BodyHealth.ToString("F0")
+                     + " eh=" + v.EngineHealth.ToString("F0");
+            }
+            catch { return " bh=- eh=-"; }
+        }
+
+        /// <summary>
+        /// iter-71 A5: the context a large health drawdown needs and never had.
+        ///
+        /// on-fire and petrol-tank health were logged at exactly ONE site in the whole
+        /// mod — the vehicle-death line. So 08-19's catastrophic engine loss (932 to
+        /// 155 across two markers, then to 21) could not be attributed: collision
+        /// physics, a fire, a ruptured tank, or some combination, and the telemetry
+        /// could not choose. The car never died, so the one line that would have said
+        /// never ran.
+        ///
+        /// Attitude is here for the same reason. The same session logged
+        /// `contact 0000` as lockup while the car was in free fall, and the mod wrote
+        /// brake and full-lock steering into it. Roll and pitch separate "airborne"
+        /// from "on its roof" from "high-centred on a kerb", and only one of those
+        /// three is a controller failure.
+        ///
+        /// The two ages exist because the worst incident on record was a trainer
+        /// spawn-fall that consumed a full review pass before anyone could rule it out
+        /// as controller evidence. A drawdown two seconds after a spawn or a teleport
+        /// is a placement artifact; the same numbers ninety seconds in are a driving
+        /// fault. vehicleEntryTicks was already being stamped and read by nothing.
+        /// </summary>
+        private string DamageContextTag(Vehicle v)
+        {
+            try
+            {
+                if (v == null || !v.Exists()) return " onFire=- petrolTank=- roll=- pitch=- inAir=- sinceSpawnMs=- sinceTpMs=-";
+                GTA.Math.Vector3 rot = v.Rotation;
+                long nowT = ModClock.Ticks;
+                return " onFire=" + SafeIsVehicleOnFire(v)
+                     + " petrolTank=" + SafePetrolTankHealth(v).ToString("F0")
+                     + " roll=" + rot.Y.ToString("F1")
+                     + " pitch=" + rot.X.ToString("F1")
+                     + " inAir=" + v.IsInAir
+                     + " contact=" + (whlValid ? Convert.ToString(whlContactMask, 2).PadLeft(4, '0') : "-")
+                     + " sinceSpawnMs=" + (vehicleEntryTicks > 0 ? ((nowT - vehicleEntryTicks) / 10000L).ToString() : "-")
+                     + " sinceTpMs=" + (lastTeleportTicks > 0 ? ((nowT - lastTeleportTicks) / 10000L).ToString() : "-");
+            }
+            catch { return " onFire=- petrolTank=- roll=- pitch=- inAir=- sinceSpawnMs=- sinceTpMs=-"; }
+        }
+
+        /// <summary>iter-64: airborne-episode tracker. Called once per frame from the
+        /// drive-assist tick, whatever the gates are doing - this is instrumentation and
+        /// has no behaviour of its own.
+        ///
+        /// Uses the wheel-contact mask rather than IsInAir, because the mask is already
+        /// sampled every frame and because it also catches the case IsInAir misses: a car
+        /// high-centred with all four wheels clear of the ground, which is what 08-19's
+        /// S12 immobility actually was (246 of 329 wheel blocks at contact=0000, full
+        /// throttle, slip 11.94) and which the digest rendered as controller thrash.</summary>
+        private void UpdateAirborneEpisode(Vehicle veh)
+        {
+            if (veh == null || !veh.Exists()) { airEpiActive = false; return; }
+            float z = veh.Position.Z;
+            // The mask is the better signal (it also catches a high-centred car), but it
+            // only exists while wheelStateV2 is sampling. Fall back to IsInAir rather than
+            // letting an unrelated gate silently switch this detector off - that is exactly
+            // how the previous airborne annotation managed to never fire.
+            bool noContact;
+            if (whlValid) noContact = whlContactMask == 0;
+            else { try { noContact = veh.IsInAir; } catch { airEpiActive = false; return; } }
+            long now = ModClock.Ticks;
+
+            if (noContact)
+            {
+                if (!airEpiActive)
+                {
+                    airEpiActive = true;
+                    airEpiStartTicks = now;
+                    airEpiStartZ = z;
+                    airEpiMinZ = z;
+                    airEpiFrames = 0;
+                    try { airEpiStartSpd = veh.Speed; } catch { airEpiStartSpd = -1f; }
+                }
+                airEpiFrames++;
+                if (z < airEpiMinZ) airEpiMinZ = z;
+                return;
+            }
+
+            if (!airEpiActive) return;
+            airEpiActive = false;
+            long ms = (now - airEpiStartTicks) / 10000L;
+            float drop = airEpiStartZ - airEpiMinZ;
+            // A kerb hop is not a road departure. Report only episodes that were either
+            // long enough or deep enough to matter, so the log does not fill with hops.
+            if (ms < AIR_EPI_MIN_MS && drop < AIR_EPI_MIN_DROP_M) return;
+            if (driveLogger != null && driveLogger.IsRunning)
+            {
+                float spdOut = -1f;
+                try { spdOut = veh.Speed; } catch { }
+                driveLogger.Write("[F" + driveLogFrameCount + "] EVENT airborne:"
+                    + " durMs=" + ms
+                    + " frames=" + airEpiFrames
+                    + " drop=" + drop.ToString("F1")
+                    + " z0=" + airEpiStartZ.ToString("F1")
+                    + " zMin=" + airEpiMinZ.ToString("F1")
+                    + " zEnd=" + z.ToString("F1")
+                    + " spdIn=" + airEpiStartSpd.ToString("F1")
+                    + " spdOut=" + spdOut.ToString("F1")
+                    + " mode=" + currentDriveMode
+                    + " street=" + World.GetStreetName(veh.Position)
+                    + " pos=" + FmtV(veh.Position)
+                    + HealthTag(veh)
+                    + DamageContextTag(veh));   // iter-71 A5
+            }
+            // A real departure earns images. 08-19's fall had none, and the reader had to
+            // reconstruct 46 m of it by hand from a frames file.
+            if (drop >= AIR_EPI_MIN_DROP_M * 3f)
+                SnapshotFailure("ROAD-DEPARTURE", "drop=" + drop.ToString("F1")
+                    + " durMs=" + ms);
+        }
+
+        /// <summary>iter-64: the mechanical-degradation tag, for the same question.
+        ///
+        /// Health scalars alone cannot separate "bent" from "worn". SteeringLimitMultiplier
+        /// is the one directly relevant to steering obedience - a damaged wheel reduces its
+        /// own steering limit - and is the leading candidate explanation for the digest's
+        /// LOCK SUSPECT rows, where achieved angle exceeded the reported lock by 2x. All of
+        /// these are managed nightly members; no raw natives.</summary>
+        private string WheelDamageTag()
+        {
+            if (!whlValid) return " minTyre=- whlHealth=- steerLim=-";
+            return " minTyre=" + (whlMinTyre >= 0f ? whlMinTyre.ToString("F0") : "-")
+                 + " burst=" + whlAnyBurst
+                 + " whlHealth=" + (whlMinHealth >= 0f ? whlMinHealth.ToString("F0") : "-")
+                 + " steerLim=" + (whlMinSteerLimit >= 0f
+                     ? whlMinSteerLimit.ToString("F2") : "-");
         }
 
         // iter-36 P0: identify WHAT delivered the damage. iter-35's 980-point
@@ -38784,6 +43832,10 @@ namespace GrandTheftAccessibility
                 float offMag = 0f;
                 int fwd = 0, bwd = 0;
                 float jblend = 1f;
+                // iter-59 C1: the lane split the DECISION used, hoisted to vertex
+                // scope so the poly-offset line can publish it beside the graph's.
+                int segBiasFwd = 0, segBiasBwd = 0;
+                bool segSplitFromEngine = false;
                 if (haveGraph)
                 {
                     int nodeIdx = NodeGraph.FindNearestNode(p, LANE_OFFSET_NODE_SEARCH_M);
@@ -38839,8 +43891,14 @@ namespace GrandTheftAccessibility
                         if (laneW) GateReach("laneWidthV2");
                         float laneWidth = laneW ? VANILLA_LANE_WIDTH_M : LANE_WIDTH_M;
                         int biasFwd = fwd, biasBwd = bwd;
+                        // iter-59 C1: which counts actually drove the decision. The
+                        // poly-offset line used to print the GRAPH's fwd/bwd even when
+                        // the engine's were used, so no session could say which
+                        // experiment it had run.
+                        bool splitFromEngine = false;
                         if (laneW && i == 0 && roadFactsValid)
                         {
+                            splitFromEngine = true;
                             // Live counts only for the car's own segment: the road
                             // facts are sampled at the vehicle, and applying them to
                             // a vertex 60 m up the road would be a guess wearing a
@@ -38867,10 +43925,37 @@ namespace GrandTheftAccessibility
                                     + " usingGraphFwd=" + fwd + " usingGraphBwd=" + bwd);
                             }
                         }
-                        if (biasBwd > 0 && biasFwd > 0)
+                        // ---- iter-59 B1 (laneTargetV2): aim at a LANE, not at the
+                        // node line ----
+                        //
+                        // The legacy rule offsets only when BOTH directions are
+                        // present, on the reasoning that "a divided carriageway
+                        // (bwd==0) already runs per-roadway and gets no bias." That is
+                        // true for a ONE-LANE roadway, where the node line IS the lane
+                        // centre. It is false for a TWO-LANE roadway, where the node
+                        // line sits exactly on the divider between lane 1 and lane 2.
+                        //
+                        // driveassist-2026-08-15 spent 280 of 1017 samples (27.5%) at
+                        // fwd=2,bwd=0 with offset=0.00 — steering at a lane boundary by
+                        // design. snap-0022, the frame the PLAYER flagged as a lane
+                        // problem, is a bike riding the dashed line of a multi-lane road
+                        // with a semi-trailer alongside. That picture is this branch.
+                        //
+                        // Both arms target the centre of the innermost forward lane, so
+                        // the magnitude is the same half-lane; only the eligibility
+                        // changes. Gated OFF: this moves the car.
+                        segBiasFwd = biasFwd; segBiasBwd = biasBwd;
+                        segSplitFromEngine = splitFromEngine;
+
+                        bool laneTarget = getSetting("laneTargetV2") == 1;
+                        if (laneTarget) GateReach("laneTargetV2");
+                        bool undividedTwoWay = biasBwd > 0 && biasFwd > 0;
+                        bool multiLaneOneWay = laneTarget && biasBwd == 0 && biasFwd >= 2;
+                        if (undividedTwoWay || multiLaneOneWay)
                         {
                             offMag = laneWidth * 0.5f;
                             if (laneW) GateFire("laneWidthV2");
+                            if (multiLaneOneWay) GateFire("laneTargetV2");
                         }
                     }
                     // Junction blend: ramp the offset to 0 within the blend radius
@@ -38895,6 +43980,11 @@ namespace GrandTheftAccessibility
                     lastLaneOffsetFwd = fwd;
                     lastLaneOffsetBwd = bwd;
                     lastLaneOffsetJBlend = jblend;
+                    // iter-59 C1: the counts the DECISION used, and where they came
+                    // from. fwd/bwd above stay the graph's, so the two can be compared.
+                    lastLaneOffsetBiasFwd = segBiasFwd;
+                    lastLaneOffsetBiasBwd = segBiasBwd;
+                    lastLaneOffsetSplitEngine = segSplitFromEngine;
                 }
 
                 if (apply && offMag > 0f)
@@ -38904,11 +43994,21 @@ namespace GrandTheftAccessibility
                     // segment. A blind fixed offset on a narrow lane pushed the steer target
                     // past the road edge and dragged the car off (LATERAL-OFFROAD drift). Back
                     // off to half, then to the raw centreline point, rather than off-road.
-                    if (i == 0 && haveGraph && !IsPositionOnRoad(offPt))
+                    //
+                    // iter-59 B2: this guard ran for i==0 ONLY, but ComputeStanleySteer
+                    // aims at the LOOKAHEAD vertices (up to PATH_POLYLINE_HOPS / 80 m),
+                    // which took the full offset with no on-road check at all. That is
+                    // snap-0003: the bike at 33 mph on the dirt shoulder, right of the
+                    // solid white edge line, on a road curving away left. Same ladder,
+                    // every vertex. Gated with the rest of laneTargetV2 because refusing
+                    // an offset changes where the car goes.
+                    bool guardThisVertex = (i == 0) || getSetting("laneTargetV2") == 1;
+                    if (guardThisVertex && haveGraph && !IsPositionOnRoad(offPt))
                     {
                         GTA.Math.Vector3 halfPt = new GTA.Math.Vector3(
                             p.X + rx * offMag * 0.5f, p.Y + ry * offMag * 0.5f, p.Z);
                         offPt = IsPositionOnRoad(halfPt) ? halfPt : p;
+                        if (i != 0) laneTargetVertexBackoffs++;
                     }
                     steerPolyline.Add(offPt);
                 }
@@ -39147,6 +44247,108 @@ namespace GrandTheftAccessibility
                 / (2f * Math.Max(4f, dist));
             pullOverBrakeRequest = Math.Min(CurveFloorCap(speed),
                 Math.Max(0.20f, 0.20f + reqDecel / 8f * 0.5f));
+        }
+
+        // ---- San Andreas Wildfires: fire on the road ahead ----
+        private float wildfireBrakeRequest = 0f;
+        private float wildfireAheadDist = -1f;
+        private long  wildfireAnnounceTicks = 0;
+        private long  wildfireLogTicks = 0;
+        private const float WILDFIRE_CRAWL_SPEED = 3.0f;
+        private const float WILDFIRE_STANDOFF_M = 10f;
+        private const float WILDFIRE_CORRIDOR_M = 7f;
+
+        /// <summary>
+        /// Walks the path the assist is about to drive and finds the first point within
+        /// a lane-plus-cell corridor of a burning wildfire cell. The response is a brake
+        /// floor toward a crawl, not a stop, on the same only-raise terms as give way:
+        /// the player can still crawl through, and a burning road with no way round is
+        /// better driven slowly than refused. Without a path it looks straight ahead.
+        /// </summary>
+        private void UpdateWildfireHazard(Vehicle veh)
+        {
+            wildfireBrakeRequest = 0f;
+            wildfireAheadDist = -1f;
+            if (veh == null || wildfires == null || wildfires.BurningCount == 0) return;
+            if (getSetting("sanAndreasWildfires") != 1) return;
+            bool enabled = getSetting("wildfireDriveHazard") == 1;
+            GateReach("wildfireDriveHazard");
+
+            float speed = veh.Speed;
+            float lookahead = Math.Max(60f, speed * 5f);
+            GTA.Math.Vector3 vehPos = veh.Position;
+
+            if (pathPolyline.Count >= 2)
+            {
+                float along = 0f, sinceSample = 999f;
+                GTA.Math.Vector3 prev = vehPos;
+                int segStart = Math.Max(0, Math.Min(lastClosestPolySeg, pathPolyline.Count - 1));
+                for (int i = segStart; i < pathPolyline.Count && along < lookahead; i++)
+                {
+                    GTA.Math.Vector3 p = pathPolyline[i];
+                    float dxs = p.X - prev.X, dys = p.Y - prev.Y;
+                    float seg = (float)Math.Sqrt(dxs * dxs + dys * dys);
+                    // Sample inside long segments too: a highway vertex can be 50 m away.
+                    int steps = Math.Max(1, (int)(seg / 4f));
+                    for (int s = 1; s <= steps; s++)
+                    {
+                        float t = (float)s / steps;
+                        sinceSample += seg / steps;
+                        if (sinceSample < 4f) continue;
+                        sinceSample = 0f;
+                        GTA.Math.Vector3 q = prev + (p - prev) * t;
+                        if (wildfires.NearestBurningDistance(q, WILDFIRE_CORRIDOR_M) >= 0f)
+                        {
+                            wildfireAheadDist = along + seg * t;
+                            break;
+                        }
+                    }
+                    if (wildfireAheadDist >= 0f) break;
+                    along += seg;
+                    prev = p;
+                }
+            }
+            else
+            {
+                GTA.Math.Vector3 fwd = veh.ForwardVector;
+                for (float d = 4f; d <= lookahead; d += 4f)
+                {
+                    if (wildfires.NearestBurningDistance(vehPos + fwd * d, WILDFIRE_CORRIDOR_M) >= 0f)
+                    {
+                        wildfireAheadDist = d;
+                        break;
+                    }
+                }
+            }
+            if (wildfireAheadDist < 0f) return;
+
+            float room = Math.Max(3f, wildfireAheadDist - WILDFIRE_STANDOFF_M);
+            float b = 0f;
+            if (speed > WILDFIRE_CRAWL_SPEED + 1f)
+            {
+                float reqDecel = (speed * speed - WILDFIRE_CRAWL_SPEED * WILDFIRE_CRAWL_SPEED) / (2f * room);
+                if (wildfireAheadDist <= WILDFIRE_STANDOFF_M + 2f)
+                    b = CurveFloorCap(speed);
+                else if (reqDecel > 1.0f)
+                    b = Math.Min(CurveFloorCap(speed), 0.25f + (reqDecel - 1.0f) / 6f * 0.6f);
+            }
+            if (b > 0f) GateFire("wildfireDriveHazard");
+            if (enabled) wildfireBrakeRequest = b;
+
+            long now = DateTime.Now.Ticks;
+            if (enabled && wildfireAheadDist < 80f && now - wildfireAnnounceTicks > 150000000L) // 15 s
+            {
+                wildfireAnnounceTicks = now;
+                Speech.Info("Fire on the road, " + (int)wildfireAheadDist + " meters.");
+            }
+            if (driveLogger != null && driveLogger.IsRunning && now - wildfireLogTicks > 10000000L)
+            {
+                wildfireLogTicks = now;
+                driveLogger.Write("[F" + driveLogFrameCount + "] EVENT wildfire-ahead: dist="
+                    + wildfireAheadDist.ToString("F0") + " speed=" + speed.ToString("F1")
+                    + " brake=" + b.ToString("F2") + " applied=" + (enabled ? 1 : 0)
+                    + " path=" + pathPolyline.Count);
+            }
         }
 
         private void UpdateNodeHazards(Vehicle veh)
@@ -39800,7 +45002,7 @@ namespace GrandTheftAccessibility
             // the hold state and adopt the fresh polyline as-is.
             if (getSetting("laneStability") == 1 && veh != null
                 && lastLaneLateralErrorTicks > 0
-                && DateTime.Now.Ticks - lastLaneLateralErrorTicks > 50000000L
+                && ModClock.Ticks - lastLaneLateralErrorTicks > 50000000L
                 && veh.Speed > 0.5f
                 && (prevPathPolyline.Count > 0 || polylineHoldCount > 0))
             {
@@ -39809,7 +45011,7 @@ namespace GrandTheftAccessibility
                 {
                     lastPolyExpireLogTicks = DateTime.Now.Ticks;
                     driveLogger.Write("[F" + driveLogFrameCount + "] EVENT poly-hold-expire:"
-                        + " latAgeMs=" + ((DateTime.Now.Ticks - lastLaneLateralErrorTicks) / 10000)
+                        + " latAgeMs=" + ((ModClock.Ticks - lastLaneLateralErrorTicks) / 10000)
                         + " holdCount=" + polylineHoldCount
                         + " spd=" + veh.Speed.ToString("F1"));
                 }
@@ -40344,7 +45546,7 @@ namespace GrandTheftAccessibility
             // early-returns without updating lastLaneLateralError, so the value (and the
             // lookback ring that copies it) FREEZES during the exact wedge windows it
             // should capture. latAgeMs on the FRAME line makes a stale value visible.
-            lastLaneLateralErrorTicks = DateTime.Now.Ticks;
+            lastLaneLateralErrorTicks = ModClock.Ticks;   // iter-53 D9: ModClock, see :440
 
             // iter-18 B1 step 1: ~1 Hz polyline lateral-offset telemetry. The
             // negative of lateralError is where the CAR sits relative to the path.
@@ -40376,7 +45578,15 @@ namespace GrandTheftAccessibility
                     + " eRate=" + lastStanleyERate.ToString("F2")
                     + " cross=" + lastStanleyCross.ToString("F3")
                     + " damp=" + lastStanleyDamp.ToString("F3")
-                    + " ff=" + lastStanleyFf.ToString("F3"));
+                    + " ff=" + lastStanleyFf.ToString("F3")
+                    // iter-59 C2: saturation flags. On 08-15 the cross term was pinned
+                    // at its cap on 11.3% of scans and the feed-forward used 3.8% of
+                    // its budget — both had to be recovered in post by comparing a
+                    // float to a constant. A controller that has run out of authority
+                    // should say so on the line, not leave it to arithmetic.
+                    + " crossSat=" + (Math.Abs(lastStanleyCross) >= STANLEY_CROSS_MAX_RAD - 0.001f)
+                    + " ffSat=" + (Math.Abs(lastStanleyFf) >= STANLEY_FF_MAX_RAD - 0.001f)
+                    + " cteSat=" + (Math.Abs(lateralError) >= STANLEY_CTE_CAP_M - 0.01f));
                 // iter-26 B1: poly-offset calibration — the computed lane offset
                 // (whether or not applied) paired with the actual car-vs-path
                 // position (lat), so the dark-launch drive confirms magnitude and
@@ -40386,6 +45596,17 @@ namespace GrandTheftAccessibility
                     + " offset=" + lastLaneOffsetMag.ToString("F2")
                     + " fwd=" + lastLaneOffsetFwd
                     + " bwd=" + lastLaneOffsetBwd
+                    // iter-59 C1: fwd/bwd above are the SHIPPED GRAPH's. These are the
+                    // counts the offset decision actually used, and where they came
+                    // from. On 08-15 the graph and the engine agreed on only 63.2% of
+                    // samples, so which one drove the decision is not a detail.
+                    + " biasFwd=" + lastLaneOffsetBiasFwd
+                    + " biasBwd=" + lastLaneOffsetBiasBwd
+                    + " splitSrc=" + (lastLaneOffsetSplitEngine ? "engine" : "graph")
+                    // iter-59 B1/B2: which arm granted the offset, and how often a
+                    // lookahead vertex had to be pulled back off the road edge.
+                    + " laneTarget=" + (getSetting("laneTargetV2") == 1)
+                    + " vtxBackoff=" + laneTargetVertexBackoffs
                     + " jblend=" + lastLaneOffsetJBlend.ToString("F2")
                     // iter-39 L6: this used to publish -lateralError under the name
                     // "lat" — the opposite sign to the road:/marker lat= that every
@@ -40730,6 +45951,9 @@ namespace GrandTheftAccessibility
             //      only a brake floor. The player keeps the wheel and can drive out
             //      of it at any time, which is the whole Assistive-mode contract.
             if (pullOverBrakeRequest > skewBrakeFloor) skewBrakeFloor = pullOverBrakeRequest;
+            // (4d) Wildfire on the road ahead: a floor toward a crawl, already capped,
+            //      zero unless wildfireDriveHazard is on, only-raise.
+            if (wildfireBrakeRequest > skewBrakeFloor) skewBrakeFloor = wildfireBrakeRequest;
 
             // ---- iter-30 P1: DEGENERATE-PATH CURVE GOVERNOR ----
             // The polyline turn-scan below needs >=3 points, but the path routinely

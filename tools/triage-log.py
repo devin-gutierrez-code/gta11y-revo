@@ -28,6 +28,15 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+# Shared with triage-menulog.py. Both logs speak the same
+# "[F<n>] EVENT kind: k=v" grammar, so the field readers, the clock helpers and
+# the screenshot join are common code; only the MODEL each tool builds on top
+# differs. See tools/logfmt.py.
+from logfmt import (kv, fnum_of, hms_to_s, fmt_t, SAFE_TAG_RE,
+                    image_order_key as _image_order_key,
+                    frame_label as _frame_label,
+                    build_contact_sheet, capture_geometry_faults)
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MODSETTINGS = Path.home() / "Documents" / "Rockstar Games" / "GTA V" / "ModSettings"
 
@@ -47,6 +56,8 @@ MARKER_RE = re.compile(
 # player-indicated failure is ground truth and an auto tag is an inference.
 PLAYER_MARKER_TYPES = ("AUTO-COLLISION", "PLAYER-INDICATED-FAILURE")
 TIME_RE = re.compile(r"t=(\d{2}):(\d{2}):(\d{2})\.(\d{3})")
+
+# SAFE_TAG_RE (which mirrors SnapshotWriter.SanitizeTag) is imported from logfmt.
 
 NOTABLE_EVENT_KINDS = (
     "vehicle-death", "vehicle-swap", "vehicle-repair", "teleport", "autonav",
@@ -106,6 +117,11 @@ NOTABLE_EVENT_KINDS = (
     # wasted; intox-exit / intox-clip-missing = the outro played, or the clip name
     # was wrong; unrest-instigate* = the riot's combat seeds; unrest-scan = why the
     # recruit roster is the size it is, which is THE line the riot work turns on.
+    # iter-61: gate-drift names the config that changed since the previous session
+    # (the thing that made 08-16/08-17 unattributable); frontend-menu / frontend-suspend
+    # name a non-pause menu holding the player's input while the assist drove on. All
+    # three are transition-only, so they cost the verbatim budget almost nothing.
+    "gate-drift", "frontend-menu", "frontend-suspend",
     "lock-override", "gate-degraded", "speed-governor",
     "intox-exit", "intox-clip-missing",
     "unrest-instigate", "unrest-instigate-end", "unrest-scan",
@@ -135,13 +151,46 @@ ITER43_SETTINGS = ("vehicleGeometryV2",)
 # wants them. The epoch table's "gates on" column and its BASELINE detection both
 # key off this — a gate missing here is invisible in the only table that
 # attributes behaviour to a configuration.
-TRACKED_GATE_SETTINGS = ITER41_SETTINGS + ITER42_SETTINGS + ITER43_SETTINGS + (
+# iter-53's drive-assist baseline set: the eleven the mod stands down together
+# when driveAssistBaseline flips. Keep in sync with BASELINE_EXPERIMENTAL in
+# GTA11Y.cs — this is the list the *mod* flips, so a reader that does not know it
+# cannot tell a baseline epoch from an experimental one.
+#
+# iter-63: none of these were tracked, and 08-17-111533 is what that costs. That
+# session flipped the baseline NINE times, and because the eleven were invisible
+# here every one of its 17 epochs rendered an identical gate list and the digest
+# printed "No all-gates-off epoch in this session" at a player who had just driven
+# ten balanced minutes of exactly that. The experiment was on disk the whole time.
+BASELINE_EXPERIMENTAL = (
+    "roadFactsV2", "nodePropsV2", "kerbGeometryV2", "engineStuckTelemetryV2",
+    "nodeQueryArgsV2", "laneWidthV2", "nodeHazardV2", "pullOverAssist",
+    "engineStuckArmV2", "tempActionV2", "driveSequenceV2",
+)
+
+TRACKED_GATE_SETTINGS = ITER41_SETTINGS + ITER42_SETTINGS + ITER43_SETTINGS + BASELINE_EXPERIMENTAL + (
     "roadBoundaryV2", "groundNormalV2", "junctionDirectionsV2",
     "graceArbitrationV2",
     # iter-51. steerBiasV2 is listed because its sign was inverted for the whole
     # of iter-49/50 and the epoch table is where a session that flips it back on
     # has to be readable against one that did not.
     "steerBiasV2", "roadSpeedGovernorV2", "polyDistrustV2",
+    # iter-61: this tuple had fallen four gates behind, and the epoch table is the
+    # one place a configuration change is supposed to be visible. laneTargetV2 in
+    # particular was ON for the whole of 08-17 and the epoch table could not say so.
+    "reverseEmergCorroborateV2", "stuckEscalationV2", "giveupHazardV2",
+    "laneTargetV2", "frontendSuspendV2",
+    # iter-64: the one behaviour gate of the iteration, plus the settings that had escaped
+    # GATE_SETTINGS entirely. groundHeightV2 is the reason this list exists in its current
+    # form — 08-19 was run to A/B it and no artifact could say what it was set to.
+    "accLateralInterlockV2",
+    "steeringAssist", "adaptiveCruise", "autoResumeCreep", "laneOffsetPolyline",
+    "laneStability", "reverseRearV2", "stuckDamageArm", "standoffThreat",
+    "junctionAssist", "wrongWayAlert", "roadTeleport", "waypointDriveAssist",
+    "autodriveStyleV2", "shapeCasting", "detectionRadius", "groundHeightV2",
+    "xyDistanceFix", "vehicleGodMode", "intoxEnabled", "assistBeeps",
+    "trafficAwareness", "driveAssistBaseline",
+    # San Andreas Wildfires: the drive-assist road-fire brake floor.
+    "wildfireDriveHazard",
 )
 
 # Gates whose only proof of life is an event kind. A gate that is ON but silent
@@ -163,7 +212,17 @@ GATE_EXPECTED_EVENTS = {
     "stuckArmHysteresisV2": ("stuck-eval", "stuck-arm", "stuck-arm-budget-hit"),
     "offroadBrakeV2": ("offroad-floor",),
     "skewGateV2": ("lookahead-suppress", "lateral-eject"),
-    "handbrakeBandV2": ("brake-episode",),
+    # iter-64: the ACC lateral interlock. acc-interlock is its own event and nothing
+    # else emits it, so fire:0 with ev:0 means the veto genuinely never triggered.
+    "accLateralInterlockV2": ("acc-interlock",),
+    # iter-53 D8: brake-episode used to be listed here and is NOT handbrakeBandV2's.
+    # It is emitted for every brake episode whatever this gate is doing, so the digest
+    # printed "fire:0 (ev:88)" and the ev count was read as "the counter is missing,
+    # the feature works" — when in fact the gate's redefined trigger
+    # (emergencyBrakeActive && speed > 8, GTA11Y.cs:21698) never coincided all session
+    # and the top-band handbrake was ABSENT. An unrelated event count hid a real
+    # behaviour change. hb-band-skip is the gate's own event; nothing else is.
+    "handbrakeBandV2": ("hb-band-skip",),
     # iter-42. nodeStreamGuardV2 is the one gate whose SILENCE is the good
     # outcome — no event means no streaming gap was hit. The other two are pure
     # telemetry and prove themselves through FRAME fields, not events, so the
@@ -172,7 +231,12 @@ GATE_EXPECTED_EVENTS = {
     "actuationFeedbackV2": ("actuation-divergence",),
     # iter-43. junctionDirectionsV2 got its own skip-reason event because
     # "eval 4069 / fire 0" with four silent early returns was undiagnosable.
-    "junctionDirectionsV2": ("junction-disagree", "gen-dir-skip"),
+    # iter-53 D8: gen-dir-skip removed — it is a SKIP reason, the logical opposite of a
+    # fire, so counting it as one produced "fire:0 (ev:349)" for a gate that did nothing
+    # 349 times. All 349 read reason=no-route: the player never set a waypoint, so this
+    # gate has still never been tested. A session wanting a verdict on it must drive
+    # with a waypoint set.
+    "junctionDirectionsV2": ("junction-disagree",),
     "vehicleGeometryV2": ("vehicle-geometry",),
     # iter-51. steerBiasV2 emits at 0.5 Hz while it is steering, so its absence in
     # a session that ran it is a real finding. The other two are the new
@@ -202,32 +266,17 @@ MIN_BAND_N = 200
 # evals, because `reach` units are not comparable across gates until Stage 1.
 DEAD_GATE_FRAC = 0.6
 
-
-def kv(line, key):
-    """Value of key= in line, or None. Empty string is a valid value."""
-    m = re.search(re.escape(key) + r"=(\S*)", line)
-    return m.group(1) if m else None
-
-
-def fnum_of(line, key):
-    v = kv(line, key)
-    if v is None:
-        return None
-    try:
-        return float(v.rstrip(",)"))
-    except ValueError:
-        return None
+# iter-53 D8: gates whose event reports a FAULT, so silence is the pass condition.
+# Printing "ON-NEVER-FIRED" against these reads as a broken feature when it is the
+# opposite. Keep this list short and justified — a gate belongs here only if its
+# GateFire is inside an error branch.
+INVERSE_POLARITY_GATES = {
+    "nodeStreamGuardV2",   # fires only when ARE_NODES_LOADED_FOR_AREA returns false
+}
 
 
-def hms_to_s(h, m, s, ms):
-    return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000.0
-
-
-def fmt_t(t):
-    if t is None:
-        return "--:--:--"
-    t = t % 86400
-    return "%02d:%02d:%06.3f" % (t // 3600, (t % 3600) // 60, t % 60)
+# kv / fnum_of / hms_to_s / fmt_t now live in logfmt.py and are imported above —
+# triage-menulog.py needs the same readers, and two copies would drift.
 
 
 class Frame:
@@ -354,7 +403,8 @@ class Frame:
                 f"mode={self.mode or '-'} lat={n(self.lat)} skew={n(self.skew,'%.1f')} "
                 f"steer={n(self.steer)} brake={n(self.brake)} own={self.owner or '-'} "
                 f"decel={n(self.decel,'%.1f')} thr={n(self.thrA)}/{n(self.thrP)} "
-                f"navC={n(self.navC,'%.1f')} bh={n(self.bh,'%.0f')}{ctl}{ach} "
+                f"navC={n(self.navC,'%.1f')} bh={n(self.bh,'%.0f')} "
+                f"eh={n(self.eh,'%.0f')}{ctl}{ach} "
                 f"street={self.street or '-'} pos={self.pos or '-'}")
 
 
@@ -364,6 +414,7 @@ class Marker:
                  "failClass", "street", "latAgeMs", "mode", "layer",
                  # iter-39 L2/L3/L4
                  "peakSpeed", "perceptAgeMs", "settleBh", "settleEh",
+                 "costShadowed", "shadowedBy",
                  # iter-40 L2/L4: the real cost, and who was driving when it happened
                  "bodyDelta", "engineDelta",
                  "suspended", "suspendedMs", "grace", "wrongWay", "trueSpd",
@@ -374,11 +425,21 @@ class Marker:
                  # iter-52: the full snapshot tag (ENGINE-STUCK, STUCK-LAYER, ...).
                  # `typ` stays P/A for every existing consumer; `tag` is what actually
                  # names the failure now that snapshots fire at every emitter.
-                 "tag", "images")
+                 "tag", "images",
+                 # iter-53 D9: what the car actually touched, off marker-settle.
+                 # Outranks impact speed when deciding gunfire vs collision.
+                 "contact",
+                 # iter-71 C1: three header fields the mod has always written and this
+                 # parser has always read past. autodrive= is the important one — it
+                 # means GTA's task driving had the car, not the lane/ACC control loop,
+                 # and pooling those markers into the drive-assist rate makes the
+                 # headline measure two different systems at once.
+                 "autodrive", "menuOpen", "menuSusp")
 
     def __init__(self):
         self.num = self.f = self.t = self.delta = self.impactSpeed = None
         self.kind = self.typ = self.raw = self.tag = None
+        self.contact = None      # iter-53 D9: "L/world@2.5" etc., from marker-settle
         self.images = []
         self.line_no = self.snap0 = self.snap1 = None
         self.frame = None
@@ -389,6 +450,11 @@ class Marker:
         # totals joined from EVENT marker-settle.
         self.peakSpeed = self.perceptAgeMs = None
         self.settleBh = self.settleEh = None
+        # iter-64: set when this marker has no settle event of its own AND its frame lies
+        # inside another marker's settle window, so the header-delta fallback below would
+        # re-count damage already attributed to that other marker. See cost().
+        self.costShadowed = False
+        self.shadowedBy = None
         # iter-40 L2/L4
         self.bodyDelta = self.engineDelta = None
         self.suspended = self.suspendedMs = self.grace = self.wrongWay = None
@@ -397,6 +463,8 @@ class Marker:
         self.vehDead = self.intoxSusp = self.wanted = None
         # iter-49 D
         self.bullet = self.proj = None
+        # iter-71 C1
+        self.autodrive = self.menuOpen = self.menuSusp = None
 
     def authority(self):
         """Who was actually driving when this marker fired.
@@ -412,6 +480,14 @@ class Marker:
         # after the vehicle was destroyed.
         if self.vehDead == "True":
             return "DEAD"
+        # iter-71 C1: auto-drive outranks everything below it. When GTA's own task
+        # driving has the car, the lane controller and ACC are not running at all —
+        # the assist block is gated on !isAutodriving — so a marker here says nothing
+        # about the thing every drive-assist session is measuring. It read `ON`,
+        # identically to a human drive-assist failure, and went straight into the
+        # headline rate. 08-19-074058's three worst incidents were all AUTODRIVE.
+        if self.autodrive == "True":
+            return "AUTO"
         if self.intoxSusp == "True":
             return "INTOX"
         if self.suspended == "True":
@@ -465,6 +541,15 @@ class Marker:
         """
         if self.settleBh is not None or self.settleEh is not None:
             return (self.settleBh or 0.0) + (self.settleEh or 0.0)
+        # iter-64: DO NOT fall back while another marker's settle window already owns
+        # this damage. 08-19 incident 29 was reported at 838.7 against a true 418 (2.0x)
+        # and incident 38 at 1448.4 against 1184, purely from settle-less markers inside a
+        # neighbour's window taking the header delta as if it were their own. The ranking
+        # survived, but every absolute number downstream — the cost column, the incident
+        # ranking's share percentages, the session total, and the trend row that lands in
+        # log-index.json — was inflated, and the trend is what future sessions compare to.
+        if self.costShadowed:
+            return None
         # iter-40 L2: fall back to the header's own body+engine deltas before
         # healthDelta. Those are exact; healthDelta is a saturating overall-health
         # scalar that reported -0.0 for a 248.2-point event on 07-28.
@@ -650,6 +735,12 @@ def parse_log(path):
                 # damage units were police gunfire counted as driving failures.
                 mk.bullet = kv(rest, "bullet")
                 mk.proj = kv(rest, "proj")
+                # iter-71 C1: present on every marker header since the field was added,
+                # and dropped here every time. On 08-19-074058 nine of fourteen markers
+                # carry failClass=AUTODRIVE and all fourteen reported assist=ON.
+                mk.autodrive = kv(rest, "autodrive")
+                mk.menuOpen = kv(rest, "menuOpen")
+                mk.menuSusp = kv(rest, "menuSusp")
                 mk.trueSpd = fnum_of(rest, "trueSpd")
                 # iter-36 P0-1: lift the self-classifying header kv
                 mk.failClass = kv(rest, "failClass")
@@ -695,16 +786,31 @@ def _pos_xy(m):
         return None
 
 
-def attach_snapshot_images(log_path, out_dir, markers):
-    """Joins <log-stem>-snaps/*.jpg onto markers by sequence number and copies them
-    into <out_dir>/snaps/. Returns the number copied.
+# _image_order_key / _frame_label / build_contact_sheet moved to logfmt.py, so the
+# menu tool composites its frames with the identical layout and labelling.
 
-    Silent when the directory does not exist — the images are a default-OFF feature,
-    so their absence is the normal case and is not worth a warning."""
+
+def attach_snapshot_images(log_path, out_dir, markers, clusters=None):
+    """Joins <log-stem>-snaps/*.jpg onto markers by sequence number, copies them into
+    <out_dir>/snaps/, builds one contact sheet per marker, and writes a manifest that
+    RANKS the images so an agent knows which few to open.
+
+    The ranking is the point. A capped session is up to 120 images across 40+
+    incidents; "read the screenshots" without a budget spends an agent's whole context
+    on JPEGs. The manifest names a recommended set of at most RECOMMENDED_MAX, chosen
+    for cost and then for tag DIVERSITY — eight frames of the same failure kind teach
+    less than eight frames of eight different ones.
+
+    Returns a dict of stats. Silent when the directory does not exist: images are an
+    opt-in feature, so their absence is the normal case and not a fault.
+    """
     import shutil
+    RECOMMENDED_MAX = 8
+
+    stats = {"copied": 0, "sheets": 0, "markers_with_images": 0, "recommended": []}
     src = log_path.parent / (log_path.stem + "-snaps")
     if not src.is_dir():
-        return 0
+        return stats
     by_seq = {}
     for img in sorted(src.glob("snap-*.jpg")):
         m = re.match(r"snap-(\d+)-", img.name)
@@ -712,10 +818,10 @@ def attach_snapshot_images(log_path, out_dir, markers):
             continue
         by_seq.setdefault(int(m.group(1)), []).append(img)
     if not by_seq:
-        return 0
+        return stats
+
     dst = out_dir / "snaps"
     dst.mkdir(parents=True, exist_ok=True)
-    copied = 0
     for mk in markers:
         for img in by_seq.get(mk.num, []):
             target = dst / img.name
@@ -723,10 +829,110 @@ def attach_snapshot_images(log_path, out_dir, markers):
                 if not target.exists() or target.stat().st_size != img.stat().st_size:
                     shutil.copy2(img, target)
                 mk.images.append(img.name)
-                copied += 1
+                stats["copied"] += 1
             except Exception:
                 pass
-    return copied
+
+    # Which incident each marker belongs to, so the manifest can point at the right
+    # excerpt file instead of leaving the reader to find it.
+    incident_of = {}
+    if clusters:
+        for ci, cl in enumerate(clusters, 1):
+            for m in cl:
+                incident_of[m.num] = ci
+
+    shot = []
+    for mk in markers:
+        if not mk.images:
+            continue
+        stats["markers_with_images"] += 1
+        sheet = build_contact_sheet(dst, mk.num, mk.tag or "UNTAGGED", mk.images)
+        if sheet:
+            stats["sheets"] += 1
+        shot.append({
+            "num": mk.num, "tag": mk.tag or "UNTAGGED",
+            "cost": mk.cost(), "typ": mk.typ,
+            "incident": incident_of.get(mk.num),
+            "images": sorted(mk.images, key=_image_order_key),
+            "sheet": sheet,
+            "street": mk.street, "failClass": mk.failClass,
+        })
+
+    # Rank: cost first (None sorts last), then player-indicated over auto-detected —
+    # a failure the player flagged by hand is one they judged worth flagging.
+    shot.sort(key=lambda d: (-(d["cost"] or 0.0), 0 if d["typ"] == "P" else 1, d["num"]))
+
+    # Round-robin over tags so the recommended set spans failure KINDS. Within a tag
+    # the highest-cost marker still comes first, so this costs nothing in severity.
+    by_tag, order = {}, []
+    for d in shot:
+        if d["tag"] not in by_tag:
+            by_tag[d["tag"]] = []
+            order.append(d["tag"])
+        by_tag[d["tag"]].append(d)
+    recommended, guard = [], 0
+    while len(recommended) < RECOMMENDED_MAX and guard < 1000:
+        guard += 1
+        progressed = False
+        for t in order:
+            if by_tag[t]:
+                recommended.append(by_tag[t].pop(0))
+                progressed = True
+                if len(recommended) >= RECOMMENDED_MAX:
+                    break
+        if not progressed:
+            break
+    rec_nums = {d["num"] for d in recommended}
+    stats["recommended"] = [
+        {"num": d["num"], "tag": d["tag"], "cost": d["cost"], "incident": d["incident"],
+         "open": d["sheet"] or (d["images"][-1] if d["images"] else None)}
+        for d in recommended
+    ]
+
+    # ---- manifest ----
+    man = ["# Snapshot manifest — {}".format(log_path.name), ""]
+    man.append("{} marker(s) produced images; {} contact sheet(s) built.".format(
+        stats["markers_with_images"], stats["sheets"]))
+    man.append("")
+    man.append("## Read these first (max {})".format(RECOMMENDED_MAX))
+    man.append("")
+    man.append("Ranked by settled damage, then spread across failure tags so the set covers")
+    man.append("different KINDS of failure rather than repeating the worst one. Open the sheet")
+    man.append("where there is one — it carries the run-up frames and the failure in a single")
+    man.append("image. Escalate to the individual frames only for a question the sheet cannot")
+    man.append("answer.")
+    man.append("")
+    if recommended:
+        man.append("| # | open | tag | cost | incident | street |")
+        man.append("|---|------|-----|------|----------|--------|")
+        for d in recommended:
+            opener = d["sheet"] or (d["images"][-1] if d["images"] else "-")
+            man.append("| {} | `snaps/{}` | {} | {} | {} | {} |".format(
+                d["num"], opener, d["tag"],
+                "-" if d["cost"] is None else "{:.1f}".format(d["cost"]),
+                "{:02d}".format(d["incident"]) if d["incident"] else "-",
+                d["street"] or "-"))
+    else:
+        man.append("_No marker produced an image._")
+    man.append("")
+    man.append("## Everything captured")
+    man.append("")
+    man.append("| # | tag | cost | incident | sheet | frames |")
+    man.append("|---|-----|------|----------|-------|--------|")
+    for d in sorted(shot, key=lambda d: d["num"]):
+        star = " ⭐" if d["num"] in rec_nums else ""
+        man.append("| {}{} | {} | {} | {} | {} | {} |".format(
+            d["num"], star, d["tag"],
+            "-" if d["cost"] is None else "{:.1f}".format(d["cost"]),
+            "{:02d}".format(d["incident"]) if d["incident"] else "-",
+            "`{}`".format(d["sheet"]) if d["sheet"] else "-",
+            len(d["images"])))
+    man.append("")
+    try:
+        (dst / "manifest.md").write_text("\n".join(man), encoding="utf-8")
+    except Exception:
+        pass
+    return stats
 
 
 def cluster_traps(clusters, radius=20.0, gap=90.0):
@@ -801,21 +1007,40 @@ def decimate(frs, hz=10.0):
     return out
 
 
+# iter-57: a wall-clock discontinuity is not just lost driving time — it is a hole in
+# every rolling reading the mod keeps, and it can splice a contact sheet. 08-14's 11.49 s
+# menu stall produced a SCAN-STALLED marker, a 1313 m teleport, a vehicle swap, an
+# 11-gate change and one spliced sheet; the digest reported it only as a 0.2-minute
+# discrepancy between "10.0 min wall" and "9.8 min driving". The 5 s threshold also let a
+# 3.76 s gap that spanned a vehicle change count as ordinary driving.
+CONTINUITY_GAP_S = 1.0
+DRIVING_GAP_S = 5.0
+
+
 def driving_stats(frames):
-    """(driving_seconds, gaps>5s list, per-second fps counts)."""
+    """(driving_seconds, gaps>CONTINUITY_GAP_S list, per-second fps counts).
+
+    Driving time still excludes only gaps over DRIVING_GAP_S — changing that would
+    silently move every historical rate in log-index.json. The returned gap list is the
+    finer-grained one, because it feeds the Continuity section rather than the maths.
+    """
     driving, gaps, fps = 0.0, [], {}
     prev = None
+    prev_frame = None
     for fr in frames:
         if fr.t is None:
             continue
         if prev is not None:
             d = fr.t - prev
-            if d > 5.0:
-                gaps.append((prev, d))
+            if d > CONTINUITY_GAP_S:
+                gaps.append((prev, d, prev_frame, fr))
+            if d > DRIVING_GAP_S:
+                pass
             else:
                 driving += max(d, 0)
         fps[int(fr.t)] = fps.get(int(fr.t), 0) + 1
         prev = fr.t
+        prev_frame = fr
     return driving, gaps, sorted(fps.values())
 
 
@@ -887,7 +1112,12 @@ def frame_drops(frames):
 # STOPGAP: it segregates, never deletes, so a real collision during a chase
 # stays visible and only stops being counted as a drive-assist failure.
 WANTED_RE = re.compile(r"[Ww]anted level is now (\d+)")
-HOSTILE_RE = re.compile(r"(\d+) hostiles? detected")
+# iter-64: was r"(\d+) hostiles? detected" and had never matched a single line in the
+# archive. The mod speaks "1 hostile." and "2 hostiles, police among them." — never the
+# word "detected" — so the wanted-window block reported "0 hostile-detected cue(s)" for a
+# window whose own speech log carried one. A detector reporting zero because it is looking
+# for words the mod does not say is worse than no detector.
+HOSTILE_RE = re.compile(r"(\d+) hostiles?\b")
 SPEECH_TEXT_RE = re.compile(r'text="([^"]*)"')
 
 
@@ -1244,6 +1474,62 @@ def session_model(rest):
     return kv(rest, "newModel") or kv(rest, "model")
 
 
+# ---- iter-71 C2: the vehicle CLASS dimension ----
+# Segmentation has always been by raw model string, so a CLIFFHANGER and a BATI sit
+# in the per-vehicle table beside a DUBSTA3 with nothing marking them as a different
+# kind of vehicle. That matters more here than in most projects: sessions have run up
+# to 84% two-wheeled, and the mod has NO motorcycle-specific code path anywhere - not
+# in recovery, not in geometry, not in the stuck ladder. A bike row and a car row are
+# measurements of different experiments and the digest presented them as one.
+#
+# Deliberately a small hand table rather than a lookup against the shipped model data:
+# the question is "is this thing balanced on two wheels", which is a handful of models
+# in practice, and a wrong answer here silently re-merges the two populations. Unknown
+# models report "car" and are listed, so the gap is visible rather than assumed.
+TWO_WHEEL_MODELS = {
+    "AKUMA", "BAGGER", "BATI", "BATI2", "BF400", "CARBONRS", "CHIMERA", "CLIFFHANGER",
+    "DAEMON", "DAEMON2", "DEFILER", "DEATHBIKE", "DIABLOUS", "DIABLOUS2", "DOUBLE",
+    "ENDURO", "ESSKEY", "FAGGIO", "FAGGIO2", "FAGGIO3", "FCR", "FCR2", "GARGOYLE",
+    "HAKUCHOU", "HAKUCHOU2", "HEXER", "INNOVATION", "LECTRO", "MANCHEZ", "MANCHEZ2",
+    "MANCHEZ3", "NEMESIS", "NIGHTBLADE", "OPPRESSOR", "OPPRESSOR2", "PCJ", "RATBIKE",
+    "RUFFIAN", "SANCHEZ", "SANCHEZ2", "SANCTUS", "SHOTARO", "SOVEREIGN", "STRYDER",
+    "THRUST", "VADER", "VINDICATOR", "VORTEX", "WOLFSBANE", "ZOMBIEA", "ZOMBIEB",
+    "BMX", "CRUISER", "FIXTER", "SCORCHER", "TRIBIKE", "TRIBIKE2", "TRIBIKE3",
+}
+BIG_VEHICLE_MODELS = {
+    "BENSON", "BIFF", "HAULER", "HAULER2", "PHANTOM", "PHANTOM2", "PHANTOM3",
+    "PACKER", "POUNDER", "POUNDER2", "MULE", "MULE2", "MULE3", "MULE4",
+    "FLATBED", "FLATBED2", "STOCKADE", "TIPTRUCK", "TIPTRUCK2", "DUMP", "RUBBLE",
+    "BARRACKS", "BARRACKS2", "BARRACKS3", "BUS", "COACH", "AIRBUS", "RENTALBUS",
+    "TRASH", "TRASH2", "FIRETRUK", "TANKER", "TANKER2", "CEMENT", "MIXER", "MIXER2",
+}
+
+
+_LOG_STAMP_RE = re.compile(r"(\d{4}-\d{2}-\d{2}-\d{6})")
+
+
+def _log_stamp(name):
+    """iter-71 C3: the session timestamp out of a log filename, as a sortable string.
+
+    Returns None when the name carries no stamp, so callers can tell "older" from
+    "cannot tell" rather than silently treating an unknown as the earliest.
+    """
+    m = _LOG_STAMP_RE.search(name or "")
+    return m.group(1) if m else None
+
+
+def vehicle_class(model):
+    """two-wheel / big / car. Unknown models are 'car' and the caller says so."""
+    if not model:
+        return "?"
+    m = model.strip().upper()
+    if m in TWO_WHEEL_MODELS:
+        return "two-wheel"
+    if m in BIG_VEHICLE_MODELS:
+        return "big"
+    return "car"
+
+
 def build_epochs(frames, events, markers, episodes, immobiles):
     """iter-41 T8: split a session into (gate config x vehicle model) epochs.
 
@@ -1341,6 +1627,23 @@ def build_epochs(frames, events, markers, episodes, immobiles):
     base = next((ep for ep in eps if not ep["on"] and not ep["tooShort"]), None)
     for ep in eps:
         ep["baseline"] = (base is not None and ep is base)
+    # iter-63: the DRIVE-ASSIST baseline, which is a different question from the
+    # all-gates-off epoch above. The mod flips BASELINE_EXPERIMENTAL as one unit,
+    # so an epoch is BASE when all eleven read 0 and EXP when all eleven read 1.
+    # "mixed" is not a normal state — it means the eleven were flipped apart, and
+    # the epoch is not attributable to either arm.
+    for ep in eps:
+        present = [g for g in BASELINE_EXPERIMENTAL if g in ep["gates"]]
+        on = [g for g in present if ep["gates"][g] == "1"]
+        if not present:
+            ep["baseState"] = "-"          # log predates the baseline set
+        elif not on:
+            ep["baseState"] = "BASE"
+        elif len(on) == len(present):
+            ep["baseState"] = "EXP"
+        else:
+            ep["baseState"] = "mixed"
+        ep["baseOn"], ep["basePresent"] = len(on), len(present)
     return eps
 
 
@@ -1476,9 +1779,40 @@ def cluster_summary(frames, events, cluster, idx):
     return out
 
 
+def incident_health_delta(frames, cluster):
+    """iter-64: what the car ACTUALLY lost across one incident, from the FRAME lines.
+
+    Independent of every marker attribution, which is the point: marker costs come from
+    three different sources and their sum has never been checked against reality.
+
+    Returns None when the window has no usable health samples, and None when a vehicle
+    CHANGE happened inside it — a fresh car resets bh/eh to 1000, so a delta across that
+    boundary is meaningless rather than merely noisy. Never guess in that case; a wrong
+    bound would be worse than no bound.
+    """
+    ts = [m.t for m in cluster if m.t is not None]
+    if not ts:
+        return None
+    t0, t1 = min(ts) - 0.5, max(ts) + 2.0     # +2 s covers the settle tail
+    win = [f for f in frames
+           if f.t is not None and t0 <= f.t <= t1 and f.bh is not None]
+    if len(win) < 2:
+        return None
+    bhs = [f.bh for f in win]
+    ehs = [f.eh for f in win if f.eh is not None]
+    # A rise of more than a few points means a repair or a new vehicle mid-window.
+    if max(bhs) - bhs[0] > 5.0 or (ehs and max(ehs) - ehs[0] > 5.0):
+        return None
+    drop = max(0.0, bhs[0] - min(bhs))
+    if ehs:
+        drop += max(0.0, ehs[0] - min(ehs))
+    return drop
+
+
 def build_digest(log_path, lines, frames, events, markers, header, clusters,
                  unmarked, index_rows, args, gap_skips=0, traps=None,
-                 episodes=None, immobiles=None, epochs=None, sclusters=None):
+                 episodes=None, immobiles=None, epochs=None, sclusters=None,
+                 snap_stats=None):
     out = [f"# Triage digest — {log_path.name}", ""]
     out.append(f"Generated {datetime.now():%Y-%m-%d %H:%M} by tools/triage-log.py; "
                f"raw log {log_path.stat().st_size/1048576:.1f} MB / {len(lines)} lines. "
@@ -1592,6 +1926,63 @@ def build_digest(log_path, lines, frames, events, markers, header, clusters,
     if n_static:
         out.append(f"- shapecast STATIC diagnostic lines: {n_static} "
                    f"(grep the raw log for 'shapecast: STATIC' — normalZ/relZ samples)")
+
+    # iter-53 S3: say out loud whether failure screenshots happened. The 08-11-182121
+    # session ran with all four snapshot gates on, produced 82 markers and ZERO images,
+    # and nothing anywhere said so — the absence was discovered by listing a directory
+    # by hand. A capture failure now announces itself at the top of the digest, in the
+    # session it happened in.
+    _sel = [e for e in events if e["kind"] == "capture-selftest"]
+    _unavail = [e for e in events if e["kind"] == "capture-unavailable"]
+    _cap = [e for e in events if e["kind"] == "capture-cap-hit"]
+    _fin = [e for e in events if e["kind"] == "capture-final"]
+    # iter-57: capture-recovered was added in iter-56 and NOTHING here parsed it. On
+    # 08-14 the writer self-tested black at F0, dropped one capture at F1241, recovered
+    # at F1371 after two retries and then wrote 300 files — and this section reported
+    # "the writer was not running", because it printed the F0 census and fired the alarm
+    # off _unavail[0] unconditionally. A digest that tells you to discard a good
+    # artifact set is worse than one that says nothing.
+    _rec = [e for e in events if e["kind"] == "capture-recovered"]
+    if _sel or _unavail or _cap or _fin or _rec:
+        # Print the LAST census of any kind, in log order — capture-final if the session
+        # ended cleanly, else the recovery, else the startup selftest.
+        # iter-63: capture-census — the PERIODIC one — was never in this chain, and it
+        # is the only census that survives a hard exit. 08-17-111533 quit without the
+        # abort path, so it has no capture-final; it does have 44 capture-census lines
+        # whose last (F70150) reads written=335 against 340 files on disk. The digest
+        # instead printed the recovery census, written=0, and told the reader to go
+        # look for a capture-final that a hard exit can never write.
+        _per = [e for e in events if e["kind"] == "capture-census"]
+        _ordered = [e for e in events
+                    if e["kind"] in ("capture-final", "capture-census",
+                                     "capture-recovered", "capture-selftest")]
+        _last_census = [_ordered[-1]] if _ordered else []
+        if _last_census:
+            _k = _last_census[0]["kind"]
+            _lbl = {"capture-final": "at session end",
+                    "capture-census": "last periodic census",
+                    "capture-recovered": "after recovery",
+                    "capture-selftest": "at startup"}.get(_k, _k)
+            out.append(f"- failure screenshots ({_lbl}): {_last_census[-1]['rest'].strip()}")
+        if _sel and _last_census is not _sel:
+            out.append(f"- failure screenshots at startup: {_sel[-1]['rest'].strip()}")
+        if _unavail and _rec:
+            out.append(f"- capture was down and RECOVERED: {len(_unavail)} capture(s) dropped "
+                       f"before the writer came up — `{_unavail[0]['rest'].strip()[:120]}`. "
+                       f"Images after that point are complete.")
+        elif _unavail:
+            out.append(f"- **screenshots were requested but the writer was not running** — "
+                       f"{_unavail[0]['rest'].strip()}")
+        if _cap:
+            out.append(f"- **screenshot cap hit — later failures have NO image**: "
+                       f"{_cap[0]['rest'].strip()}")
+    elif markers:
+        out.append("- failure screenshots: **none — no EVENT capture-selftest in this log**. "
+                   "The writer never started, so every capture was dropped in silence. "
+                   "Enable snapshotImage, run the game borderless windowed (exclusive "
+                   "fullscreen captures black and the writer refuses), and confirm "
+                   "`EVENT capture-selftest: selfTest=ok running=True` near the top of the "
+                   "next log before trusting the absence of images.")
     out.append("")
 
     # iter-39 Stage 1B: THE VERDICT SECTION. Achieved deceleration per braking
@@ -1685,6 +2076,19 @@ def build_digest(log_path, lines, frames, events, markers, header, clusters,
             age = m.perceptAgeMs if m.perceptAgeMs is not None else m.latAgeMs
             if age is not None and age > 250:
                 fc += f"!stale{age:.0f}ms"
+                # iter-56: name the FREEZE ORIGIN, not just the age. A stale marker's
+                # `t - age` is the instant perception stopped, and markers sharing that
+                # instant are ONE event seen N times, not N events.
+                #
+                # On 08-12-214825 all 23 stale markers collapsed onto exactly two
+                # origins, with spreads of 28 ms and 132 ms — yet they were counted as
+                # 23 of the 67 markers behind a "7.79/driving-min vs median 2.76, WELL
+                # ABOVE baseline" headline. De-duplicated the session is ~46 markers and
+                # ~5.35/min. Eleven of those 23 were not a failure at all: auto-drive
+                # held the car from F10405 to F18901 and the assist block is gated on
+                # !isAutodriving, so every perception field froze by design.
+                if m.t is not None:
+                    fc += f"@{fmt_t(m.t - age / 1000.0)}"
             cost = m.cost()
             if m.settleBh is not None and m.settleEh is not None:
                 cost_s = f"{cost:.1f} ({m.settleBh:.0f}b/{m.settleEh:.0f}e)"
@@ -1696,6 +2100,56 @@ def build_digest(log_path, lines, frames, events, markers, header, clusters,
                        f"{m.peakSpeed if m.peakSpeed is not None else (m.impactSpeed if m.impactSpeed is not None else '-')} | "
                        f"{street} | {ci:02d} |")
     out.append("")
+
+    # ---- iter-56: PERCEPTION FREEZES (stale markers are ONE event seen N times) ----
+    #
+    # A marker whose perception is stale by N ms froze at `t - N`. Markers sharing that
+    # instant describe the same freeze, and counting them separately inflates both the
+    # marker count and the per-driving-minute rate that the digest leads with. Grouping
+    # is what turns "23 independent failures, WELL ABOVE baseline" into "two perception
+    # freezes", which is a completely different session and a completely different fix.
+    stale_mk = [m for m in (markers or [])
+                if m.typ != "S" and m.t is not None
+                and (m.perceptAgeMs if m.perceptAgeMs is not None else m.latAgeMs) is not None
+                and (m.perceptAgeMs if m.perceptAgeMs is not None else m.latAgeMs) > 250]
+    if stale_mk:
+        groups = []   # [origin_t, [marker, ...]]
+        for m in sorted(stale_mk, key=lambda x: x.t):
+            age = m.perceptAgeMs if m.perceptAgeMs is not None else m.latAgeMs
+            origin = m.t - age / 1000.0
+            for g in groups:
+                if abs(g[0] - origin) <= 1.0:   # same freeze within 1 s
+                    g[1].append(m)
+                    break
+            else:
+                groups.append([origin, [m]])
+        real_mk = sum(1 for m in (markers or []) if m.typ != "S")
+        dedup = real_mk - len(stale_mk) + len(groups)
+        out.append("## Perception freezes (stale markers collapsed to their origin)")
+        out.append("_A stale marker froze at `time - perceptAgeMs`. Markers sharing that "
+                   "instant are ONE freeze seen many times. **Rate and marker counts "
+                   "elsewhere in this digest do NOT de-duplicate these** — use the "
+                   "de-duplicated figure below when comparing sessions._")
+        out.append("")
+        out.append("| freeze origin | markers | count | spread |")
+        out.append("|---|---|---|---|")
+        for origin, ms in groups:
+            spread = max(
+                abs((m.t - (m.perceptAgeMs if m.perceptAgeMs is not None
+                            else m.latAgeMs) / 1000.0) - origin) for m in ms) * 1000.0
+            nums = ", ".join(f"#{m.num}" for m in ms[:6])
+            if len(ms) > 6:
+                nums += f" … #{ms[-1].num}"
+            out.append(f"| {fmt_t(origin)} | {nums} | {len(ms)} | {spread:.0f} ms |")
+        out.append("")
+        out.append(f"- **{len(stale_mk)} stale marker(s) describe {len(groups)} actual "
+                   f"freeze(s)** — de-duplicated marker count **{dedup}** of {real_mk}")
+        if any(len(g[1]) >= 3 for g in groups):
+            out.append("- a group of 3+ with a sub-second spread is not three failures; "
+                       "look for an authority handoff (auto-drive, suspend, dead vehicle) "
+                       "or a scan stall at the origin instant, not for a driving fault at "
+                       "the marker times")
+        out.append("")
 
     # iter-39 L7: physical traps — incidents that are one place, not N events.
     multi = [tr for tr in (traps or []) if len(tr["idx"]) > 1]
@@ -1752,8 +2206,23 @@ def build_digest(log_path, lines, frames, events, markers, header, clusters,
     # session — and on 07-31 that hand-derivation was done against a total that
     # was 60% police gunfire. Rank by cost, with wanted-window markers excluded
     # from the ranking but still shown, so the ordering is visible and auditable.
+    #
+    # iter-53 D2: death markers are excluded here for the same reason the damage
+    # attribution excludes them — a hull that goes from healthy to zero in one frame
+    # is not a driving cost, and the drawdown this ranking is meant to explain does
+    # not contain it. On 08-11-182121 the death sat at rank 1 with 86% of the total,
+    # so "fix in this order" pointed at an event drive assist did not cause and could
+    # not have prevented. The death still has its own failure-table row and its own
+    # memo line; it is EVENT vehicle-death that is supposed to explain it.
     ranked = []
+    deaths = []
     for ci, cl in enumerate(clusters, 1):
+        for m in cl:
+            if m.kind == "death" and (dc := m.cost()) is not None and dc > 0:
+                deaths.append((ci, m, dc))
+        cl = [m for m in cl if m.kind != "death"]
+        if not cl:
+            continue
         clean = [m for m in cl if not marker_in_combat(m, cspans)]
         c = sum(x for m in clean if (x := m.cost()) is not None)
         cflag = sum(x for m in cl if marker_in_combat(m, cspans)
@@ -1765,21 +2234,63 @@ def build_digest(log_path, lines, frames, events, markers, header, clusters,
             # the table on cl[0] labelled the session's single worst incident
             # "OTHER", which is exactly the wrong pointer to hand a reader.
             worst = max(clean or cl, key=lambda m: (m.cost() or 0.0))
-            ranked.append((c, cflag, ci, worst, cl[0]))
+            # ---- iter-64: the independent bound on this incident's cost ----
+            # Marker costs come from three different sources (EVENT marker-settle, the
+            # header's body/engine deltas, and a legacy reconstruction) and nothing has
+            # ever checked their SUM against the car's actual health loss. On 08-19
+            # incident 38 the sum read 1448.4 while the vehicle went bh 988->755 and
+            # eh 932->21, i.e. 1144 points really left the car — a 27% overcount, and
+            # that inflated number is what lands in log-index.json as the trend every
+            # future session is compared against.
+            #
+            # This is reported, never silently substituted. The overlap is real but its
+            # attribution between markers is not recoverable from the artifacts, so the
+            # honest move is to show both numbers and let the reader see the gap.
+            actual = incident_health_delta(frames, cl)
+            ranked.append((c, cflag, ci, worst, cl[0], actual))
     if ranked:
         tot = sum(r[0] for r in ranked)
         ranked.sort(key=lambda r: -r[0])
         out.append("## Drive-assist cost ranking (fix in this order)")
         out.append(f"_Wanted-window markers are excluded from the `cost` column and shown "
                    f"separately. Total rankable drive-assist cost: **{tot:.1f}**._")
-        out.append("| rank | incident | cost | share | combat-susp | worst marker | failClass | assist | street |")
-        out.append("|------|----------|------|-------|-------------|--------------|-----------|--------|--------|")
-        for rk, (c, cflag, ci, worst, first) in enumerate(ranked, 1):
-            out.append(f"| {rk} | {ci:02d} | {c:.1f} | "
+        out.append("_`actual` is the vehicle health the car really lost across the "
+                   "incident (bh+eh, from the FRAME lines) — an INDEPENDENT bound on "
+                   "`cost`, which is summed from per-marker attributions. `cost` "
+                   "meaningfully above `actual` means markers are double-counting the same "
+                   "damage; rank on the pair, not on `cost` alone._")
+        out.append("| rank | incident | cost | actual | over | share | combat-susp | worst marker | failClass | assist | street |")
+        out.append("|------|----------|------|--------|------|-------|-------------|--------------|-----------|--------|--------|")
+        for rk, (c, cflag, ci, worst, first, actual) in enumerate(ranked, 1):
+            if actual is None:
+                act_s, over_s = "-", "-"
+            else:
+                act_s = f"{actual:.1f}"
+                over_s = ("**+%.0f%%**" % (100 * (c - actual) / actual)
+                          if actual > 1.0 and c > actual * 1.05 else "-")
+            out.append(f"| {rk} | {ci:02d} | {c:.1f} | {act_s} | {over_s} | "
                        f"{(100*c/tot if tot else 0):.0f}% | "
                        f"{cflag:.1f} | #{worst.num}{worst.typ} F{worst.f} | "
                        f"{worst.failClass or '-'} | {worst.authority()} | "
                        f"{worst.street or first.street or '-'} |")
+        _over = [r for r in ranked
+                 if r[5] is not None and r[5] > 1.0 and r[0] > r[5] * 1.05]
+        if _over:
+            _sum_c = sum(r[0] for r in _over)
+            _sum_a = sum(r[5] for r in _over)
+            out.append("")
+            out.append(f"- **{len(_over)} incident(s) cost more than the car actually lost** "
+                       f"({_sum_c:.1f} attributed vs {_sum_a:.1f} real). The per-marker split "
+                       f"is not recoverable, so treat those rows' `cost` as an upper bound "
+                       f"and rank on `actual`.")
+        if deaths:
+            out.append("")
+            for ci, m, dc in deaths:
+                out.append(f"- _NOT RANKED — vehicle destroyed in incident {ci:02d} "
+                           f"(#{m.num} F{m.f}, {dc:.1f}). Not a drive-assist cost unless "
+                           f"EVENT vehicle-death names a driving cause; check onFire, "
+                           f"petrolTank and lastDamagedBy on that line before assuming "
+                           f"it was._")
         out.append("")
 
     # iter-41 T3: a session with zero markers used to produce zero trace files,
@@ -1809,8 +2320,18 @@ def build_digest(log_path, lines, frames, events, markers, header, clusters,
         # ("every damage episode has a marker") printed a clean bill of health
         # for a session with 0 markers and 26 points of damage.
         total_dd = sum(e["drop"] for e in (episodes or []))
-        out.append(f"- none — no window reached either tier "
-                   f"(session drawdown {total_dd:.1f})")
+        # iter-64: the two cases are different facts and were printed with one sentence.
+        # 08-19 had 13 damage episodes, ALL of them within 3 s of a marker, and the digest
+        # said "no window reached either tier (session drawdown 2110.0)" — which reads as
+        # "nothing happened" beside a 2110-point drawdown, and contradicts the Damage
+        # attribution block below that correctly says "unmarked damage episodes: 0.0".
+        if episodes:
+            out.append(f"- none — all {len(episodes)} damage episode(s) "
+                       f"(total {total_dd:.1f}) are within 3s of a marker, so every one is "
+                       f"already attributed above")
+        else:
+            out.append(f"- none — no damage episode reached either tier "
+                       f"(session drawdown {total_dd:.1f})")
     out.append("")
 
     # ---- iter-41 T6: DISCARDED DAMAGE ----
@@ -1823,13 +2344,20 @@ def build_digest(log_path, lines, frames, events, markers, header, clusters,
 
     # iter-46 0a-4: a "discarded" row that shares a frame with a marker, or lands
     # inside that marker's ~1 s settle window, is the SAME damage counted twice.
-    # GTA11Y.cs:7452 chains `else if` to the marker-SETTLE test at :7434 rather
-    # than to the marker test at :7401, so on the frame a marker fires
-    # (markerSettleStartTicks == geNow, delta 0) control falls straight into the
-    # suppressed branch and :7463 stamps reason=cooldown — true precisely
-    # BECAUSE the marker fired. 07-31 printed sinceLastMs=604690 (10 minutes)
-    # next to reason=cooldown, disproving its own reason. Segregate rather than
-    # drop, so a genuine second impact inside a settle window stays visible.
+    # Segregate rather than drop, so a genuine second impact inside a settle
+    # window stays visible.
+    #
+    # iter-56: this used to blame an `else if` mis-chaining bug at GTA11Y.cs:7452 and
+    # print that citation into every digest. The bug was fixed by iter-46 0b-1 — the
+    # current code hoists `markedThisFrame` and uses three INDEPENDENT ifs — and line
+    # 7452 is now `if (driveLogger.IsRunning)` inside the log banner, as are :7401,
+    # :7434 and :7463. Every digest was sending an analyst to the wrong 60 lines of a
+    # 41,700-line file.
+    #
+    # The dedupe still reaches the right answer, for a different reason than the old
+    # note gave: the flagged rows overlap a marker's settle or grind window on the same
+    # frame. DO NOT reintroduce a C# line number here — they rot silently, and nothing
+    # in this file can notice when they do.
     mk_win = [(m.f, m.t) for m in (markers or []) if m.t is not None]
 
     def _dup_marker(ev):
@@ -1878,8 +2406,14 @@ def build_digest(log_path, lines, frames, events, markers, header, clusters,
 
     if real:
         out.append("## Discarded damage (detector saw it and threw it away)")
-        out.append("| src | frame | time | bhDrop | ehDrop | spd | contact | reason |")
-        out.append("|-----|-------|------|--------|--------|-----|---------|--------|")
+        # iter-59 C7: carry the nearest marker. The join is free — the row already
+        # has the frame — and without it the reader cannot see the single most
+        # important thing about this table. On 08-15, 5.2 of the session's 5.4
+        # unexplained damage was ONE discarded damage-tally at F39160 marked
+        # `window-expired`, and marker #18 sits at F39160 too, same frame, ranked
+        # `cost = -`. Two detectors looking at one event, each recording nothing.
+        out.append("| src | frame | time | bhDrop | ehDrop | spd | contact | reason | nearestMarker |")
+        out.append("|-----|-------|------|--------|--------|-----|---------|--------|---------------|")
         dtot = 0.0
         for ev in real:
             r = ev["rest"]
@@ -1888,11 +2422,26 @@ def build_digest(log_path, lines, frames, events, markers, header, clusters,
             ed = (fnum_of(r, "ehDrop") if ev["kind"] == "damage-tally"
                   else abs(fnum_of(r, "engineDelta") or 0.0))
             dtot += (bd or 0.0) + (ed or 0.0)
+            near = min((markers or []), key=lambda m: abs(m.f - ev["f"]), default=None)
+            if near is not None and abs(near.f - ev["f"]) <= 180:   # ~3 s at 60 Hz
+                d = near.f - ev["f"]
+                nm = (f"#{near.num}{near.typ} F{near.f}"
+                      + (" **SAME FRAME**" if d == 0 else f" ({d:+d}f)"))
+            else:
+                nm = "-"
             out.append(f"| {ev['kind']} | F{ev['f']} | {fmt_t(ev['t'])} | "
                        f"{bd or 0:.1f} | {ed or 0:.1f} | "
                        f"{kv(r,'spd') or '-'} | {kv(r,'contact') or '-'} | "
-                       f"{kv(r,'reason') or 'window-expired'} |")
+                       f"{kv(r,'reason') or 'window-expired'} | {nm} |")
         out.append(f"- discarded total: {dtot:.1f}")
+        _same = [ev for ev in real
+                 if any(m.f == ev["f"] for m in (markers or []))]
+        if _same:
+            out.append(f"- **{len(_same)} of these share a frame with a marker.** The damage "
+                       f"detector and the marker looked at the same event and neither "
+                       f"recorded the cost — that is a join the emitters should be making "
+                       f"(marker-settle adopting an in-span tally), not a coincidence for "
+                       f"the reader to notice.")
     else:
         dtot = 0.0
 
@@ -1900,8 +2449,8 @@ def build_digest(log_path, lines, frames, events, markers, header, clusters,
         dsum = sum(abs(fnum_of(ev["rest"], "bodyDelta") or 0.0)
                    + abs(fnum_of(ev["rest"], "engineDelta") or 0.0) for ev in dup)
         out.append(f"- _[{len(dup)} collision-suppressed row(s) totalling {dsum:.1f} "
-                   f"were duplicates of a marker on the same frame (GTA11Y.cs:7452 "
-                   f"`else if` mis-chaining) and are NOT counted as discarded: "
+                   f"overlap a marker's settle/grind window on the same frame and are "
+                   f"NOT counted as discarded: "
                    f"{', '.join('F' + str(ev['f']) for ev in dup[:12])}"
                    f"{' ...' if len(dup) > 12 else ''}]_")
 
@@ -1931,9 +2480,20 @@ def build_digest(log_path, lines, frames, events, markers, header, clusters,
     if real or dup or episodes:
         eps_all = episodes or []
         sess_dd = sum(e["drop"] for e in eps_all)
-        marked = sum(c for m in (markers or []) if (c := m.cost()) is not None)
+        # iter-53 D2: the death marker must be held to the SAME definition the
+        # drawdown uses. `sess_dd` deliberately excludes the killing blow along with
+        # the wreck decay that follows it, so counting the death marker's cost in
+        # `marked` compares two different ledgers and reports the difference as
+        # "unexplained". On 08-11-182121 that one marker was 1392.9 of a 1606.2
+        # residual — the whole warning, for damage the tool had already decided not
+        # to count. The death is still reported: it has its own row in the failure
+        # table, its own line below, and it is what `vehicle-death` is for.
+        rankable = [m for m in (markers or []) if m.kind != "death"]
+        death_cost = sum(c for m in (markers or [])
+                         if m.kind == "death" and (c := m.cost()) is not None)
+        marked = sum(c for m in rankable if (c := m.cost()) is not None)
         unmarked_tot = sum(e["drop"] for e in eps_all if not e.get("marked"))
-        combat_mk = [m for m in (markers or []) if marker_in_combat(m, cspans)]
+        combat_mk = [m for m in rankable if marker_in_combat(m, cspans)]
         combat = sum(c for m in combat_mk if (c := m.cost()) is not None)
         _, _, wreck = frame_drops(frames)
         out.append("")
@@ -1952,6 +2512,12 @@ def build_digest(log_path, lines, frames, events, markers, header, clusters,
                        "high cost at 1-3 m/s is weapon damage, cost that scales with "
                        "impact speed is a collision._")
         out.append(f"- unmarked damage episodes: {unmarked_tot:.1f}")
+        if death_cost > 0:
+            out.append(f"- _[memo] vehicle destruction, excluded from `marked` for the same "
+                       f"reason the drawdown excludes it: {death_cost:.1f}. It is the `death` "
+                       f"row in the failure table. A hull going from healthy to zero in one "
+                       f"frame is not a drive-assist cost — read EVENT vehicle-death for what "
+                       f"did it._")
         residual = sess_dd - marked - unmarked_tot
         if residual < -0.05:
             # marked + unmarked slightly exceeding the drawdown means a small
@@ -1966,10 +2532,25 @@ def build_digest(log_path, lines, frames, events, markers, header, clusters,
                    f"total above, not an additional loss_")
         if wreck > 0:
             out.append(f"- _[memo] post-destruction wreck decay, excluded entirely: {wreck:.1f}_")
-        if sess_dd > 0 and abs(residual) > max(5.0, 0.05 * sess_dd):
-            out.append(f"- **MISMATCH**: {residual:.1f} of {sess_dd:.1f} is unexplained by "
-                       f"markers or episodes. The attribution is incomplete — investigate "
-                       f"before ranking anything on these numbers.")
+        # iter-56: a NEGATIVE residual is an EXCESS, not a shortfall, and this line used
+        # to describe both the same way. On 08-12-214825 it printed "-90.6 of 664.0 is
+        # unexplained by markers or episodes. The attribution is incomplete", two lines
+        # below its own correct hedge saying the opposite — and the direction matters,
+        # because "unexplained" sends an analyst hunting for hidden damage that does not
+        # exist. There, marker #21's cost (67.8) sat inside marker #20's settle window and
+        # marker #36's (38.2) inside a grind window that also covered #35, so the same
+        # health was counted twice. De-duplicating moved the ranking materially: incident
+        # 12 and incident 22 went from 105 vs 80 to a tie at ~70.
+        if sess_dd > 0 and residual > max(5.0, 0.05 * sess_dd):
+            out.append(f"- **MISMATCH (shortfall)**: {residual:.1f} of {sess_dd:.1f} is "
+                       f"unexplained by markers or episodes. Damage is MISSING from the "
+                       f"attribution — investigate before ranking anything on these numbers.")
+        elif sess_dd > 0 and -residual > max(5.0, 0.05 * sess_dd):
+            out.append(f"- **OVER-ATTRIBUTED**: markers+episodes exceed the drawdown by "
+                       f"{-residual:.1f} of {sess_dd:.1f}. Nothing is missing; the same "
+                       f"health is counted more than once where a marker falls inside "
+                       f"another marker's settle window or a grind window. Rank on "
+                       f"de-duplicated cost, not on the `cost` column as printed.")
     out.append("")
 
     # ---- iter-46 0a-5: COMBAT-ATTRIBUTED DAMAGE ----
@@ -1993,10 +2574,22 @@ def build_digest(log_path, lines, frames, events, markers, header, clusters,
                        f"cost {mcost:.1f}")
             for m in mk:
                 c = m.cost()
-                spd = m.impactSpeed
+                # iter-53 D9: fall back to peakSpd300 exactly as the main failure table
+                # does. This read m.impactSpeed alone — a field only the legacy
+                # AUTO-COLLISION emitter writes — so on 08-11-182121 it was -1 for 20 of
+                # 25 rows, and the weapon-vs-collision call below was being made on a
+                # column that mostly had no data. It labelled a 96.6-degree rollover
+                # "weapon signature (high cost, near-stationary)" and excluded the
+                # session's worst crash from the ranking on that basis.
+                spd = m.peakSpeed if m.peakSpeed is not None else m.impactSpeed
                 # The discriminator, stated per marker rather than assumed.
+                # iter-53 D9: contact outranks speed. A logged world/vehicle/ped contact
+                # says the car HIT something; no amount of low speed makes that a bullet.
+                hit = (m.contact or "").lower()
                 tag = ""
-                if c and c > 20 and spd is not None and spd < 3.0:
+                if c and hit and ("/world" in hit or "/vehicle" in hit or "/ped" in hit):
+                    tag = f" <- collision signature (contact {m.contact})"
+                elif c and c > 20 and spd is not None and spd < 3.0:
                     tag = " **<- weapon signature (high cost, near-stationary)**"
                 elif c and spd is not None and spd >= 8.0:
                     tag = " <- collision signature (cost at speed)"
@@ -2104,6 +2697,42 @@ def build_digest(log_path, lines, frames, events, markers, header, clusters,
                        "those rows measure the speed profile, not the brake channel. "
                        "Only 5+ m/s is evidence. The mod's own divergence detector is "
                        "speed-gated at 3 m/s for exactly this reason.]_")
+            # iter-56: split the dead frames by OWNER, because "5+ m/s is evidence" was
+            # not enough of a caveat and the table produced a false headline anyway.
+            #
+            # On 08-12-214825 the 5-10 m/s row read 65.1% dead and was reported as a real
+            # defect. It is not: 470 of the 472 dead frames are owner=none with ctrlB=1.00,
+            # contact=1111, and 469 of those 470 sit between 5.0 and 6.0 m/s. That is the
+            # PLAYER holding control 72 while GTA has already re-read it as reverse-pending
+            # — the same readback artifact as the 0-5 m/s rows, one metre-per-second wide,
+            # sitting just above the 3 m/s gate the caveat above relies on. Every brake the
+            # mod actually owns actuates (ramped 1.3% dead; curve, acc, recovery and
+            # lanedepart all 0%).
+            #
+            # A row the mod does not own cannot be evidence about the mod's brake channel.
+            # Break it out so the artifact is visible instead of averaged in.
+            if dead:
+                by_owner = {}
+                for fr in dead:
+                    by_owner[fr.owner or "none"] = by_owner.get(fr.owner or "none", 0) + 1
+                tot_owner = {}
+                for fr in bcmd:
+                    tot_owner[fr.owner or "none"] = tot_owner.get(fr.owner or "none", 0) + 1
+                rows = sorted(by_owner.items(), key=lambda kv: -kv[1])
+                out.append("  - dead frames by brake owner (iter-56 — a frame the mod does "
+                           "NOT own is not evidence about the mod's brake channel):")
+                for own, n in rows:
+                    tn = tot_owner.get(own, 0)
+                    pct = f"{100*n/tn:.1f}%" if tn else "-"
+                    note = ("  <-- player on control 72, not the mod"
+                            if own == "none" else "")
+                    out.append(f"    - {own}: {n}/{tn} dead ({pct}){note}")
+                mod_dead = sum(n for o, n in by_owner.items() if o != "none")
+                mod_tot = sum(n for o, n in tot_owner.items() if o != "none")
+                if mod_tot:
+                    out.append(f"  - **mod-owned brake commands: {mod_dead}/{mod_tot} dead "
+                               f"({100*mod_dead/mod_tot:.1f}%)** — rank on THIS, not the "
+                               f"session-wide bands")
 
         scmd = [fr for fr in acted
                 if fr.steer is not None and fr.steerAch is not None and abs(fr.steer) > 0.3]
@@ -2244,8 +2873,48 @@ def build_digest(log_path, lines, frames, events, markers, header, clusters,
         # Failure rate is the gate: a native that refuses most of the time is a
         # fallback case, not a replacement for the modelled lane width.
         denom = len(onroad) or 1
-        out.append(f"- B1 road boundary: {len(rw)} readings on {len(onroad)} on-road "
-                   f"frames (**refusal rate {100*(denom-len(rw))/denom:.1f}%**)")
+        # iter-59 C6: this said "refusal rate", which was wrong and sent the reader
+        # looking for a native that declines to answer. On 08-15 `edgeStat=refused`
+        # occurred ZERO times: the native answered every call, and the mod threw the
+        # answer away. Call it what it is — no usable reading — and let the cause
+        # breakdown below say why.
+        out.append(f"- B1 road boundary: {len(rw)} usable readings on {len(onroad)} "
+                   f"on-road frames (**no-reading rate "
+                   f"{100*(denom-len(rw))/denom:.1f}%** — see the cause split below; "
+                   f"this is NOT the same as the native refusing)")
+        # iter-53 D9: break the refusal rate down by CAUSE. Before edgeStat existed this
+        # percentage was inferred purely from the absence of edgeL/edgeR, so "the native
+        # refused", "one kerb answered", "the width was implausible" and "not on a road"
+        # were one indistinguishable number. Absent on pre-iter-53 logs, which is why
+        # this is conditional rather than a always-printed zero.
+        _es = {}
+        for ln in lines:
+            i = ln.find("edgeStat=")
+            if i < 0:
+                continue
+            v = ln[i + 9:].split()[0] if ln[i + 9:].split() else "?"
+            # iter-59 C6: DO NOT collapse implausible:<w> to a bare "implausible".
+            # That single line of tidying hid the most actionable fact in the 08-15
+            # session: all 33,128 discards were exactly `implausible:0.0`, i.e. the
+            # native returned the SAME POINT for the h+90 and h-90 queries every
+            # time. Collapsed, it read as a spread of bad measurements — a data
+            # quality problem. Split by value, it is one reproducible native-usage
+            # fault with a specific suspect (the heading argument). Keep the value.
+            if v.startswith("implausible:"):
+                v = "implausible:" + v.split(":", 1)[1]
+            _es[v] = _es.get(v, 0) + 1
+        if _es:
+            out.append("- edgeStat breakdown: "
+                       + ", ".join(f"{k} {v}" for k, v in
+                                   sorted(_es.items(), key=lambda kv: -kv[1])))
+            _zero = _es.get("implausible:0.0", 0)
+            if _zero and _zero > 0.5 * sum(_es.values()):
+                out.append(f"  - **{_zero} of these are exactly `implausible:0.0`** — both "
+                           f"boundary calls returned the SAME POINT, so the width is "
+                           f"degenerate rather than wrong. That is a native-usage fault "
+                           f"(heading argument is the leading suspect, GTA11Y.cs "
+                           f"TryRoadBoundary), not noisy data. Fixing it is what turns "
+                           f"roadBoundaryV2 from dark into a live lane reference.")
         out.append(f"- measured width p05={widths[int(len(widths)*0.05)]:.1f} "
                    f"p50={widths[len(widths)//2]:.1f} "
                    f"p95={widths[int(len(widths)*0.95)]:.1f} "
@@ -2503,11 +3172,37 @@ def build_digest(log_path, lines, frames, events, markers, header, clusters,
         out.append("## Immobility under throttle (driver asking, car not moving)")
         tot = sum(sp["dur"] for sp in immobiles)
         out.append(f"- spans >=3s: {len(immobiles)}, total {tot:.1f}s")
+        # ---- iter-64: say WHY the car was not moving, not just that it was not ----
+        # 08-19 S12 rendered as `pedalHeld=66% own=none:87,reverse:57,ramped:31`, which
+        # reads as controller thrash. The mod had already logged the real answer in the
+        # same frames: contact=0000 on 246 of 329 wheel blocks — all four wheels clear of
+        # the ground, full throttle, slip 11.94 — i.e. the car was high-centred, which is
+        # neither a controller failure nor an engine failure. Meanwhile S06 ran 35.2 s at
+        # eh=1000 with contact intact, a completely different failure, and the two printed
+        # identically. The join costs nothing: the span already carries its frames.
+        out.append("_`offGround` is the share of the span with NO wheel touching (a "
+                   "high-centred or airborne car, not a controller fault). `eh` is the "
+                   "engine-health range across the span — obedience and engine condition "
+                   "were never on the same line before._")
         for sp in sorted(immobiles, key=lambda s: -s["dur"])[:10]:
             own = ", ".join(f"{k}:{v}" for k, v in
                             sorted(sp["owners"].items(), key=lambda x: -x[1])[:4])
+            spf = sp.get("frames") or []
+            wf = [fr for fr in spf if fr.whlContact]
+            off = sum(1 for fr in wf if set(fr.whlContact) == {"0"})
+            off_s = (f" offGround={100*off/len(wf):.0f}%" if wf else "")
+            ehs = [fr.eh for fr in spf if fr.eh is not None]
+            bhs = [fr.bh for fr in spf if fr.bh is not None]
+            h_s = ""
+            if ehs:
+                h_s += (f" eh={ehs[0]:.0f}" if ehs[0] == min(ehs)
+                        else f" eh={ehs[0]:.0f}->{min(ehs):.0f}")
+            if bhs:
+                h_s += (f" bh={bhs[0]:.0f}" if bhs[0] == min(bhs)
+                        else f" bh={bhs[0]:.0f}->{min(bhs):.0f}")
             out.append(f"- {sp['dur']:.1f}s at {fmt_t(sp['t0'])} F{sp['f0']}-F{sp['f1']} "
-                       f"pedalHeld={sp['heldFrac']*100:.0f}% street={sp['street'] or '-'} "
+                       f"pedalHeld={sp['heldFrac']*100:.0f}%{off_s}{h_s} "
+                       f"street={sp['street'] or '-'} "
                        f"pos={sp['pos'] or '-'}" + (f" own={own}" if own else ""))
         out.append("")
 
@@ -2614,12 +3309,54 @@ def build_digest(log_path, lines, frames, events, markers, header, clusters,
                     verdict = ("**COUNTER-MISSING** — gate ran but has no GateReach()"
                                if fire_ev else "**NO COUNTER** — cannot distinguish "
                                "unreached from uninstrumented")
+            elif veto and fire is not None and veto > max(fire, 0) * 4:
+                # iter-53 D8: a permission gate that is REFUSING is not a gate that has
+                # died. creepClearV2 read DEAD-MID-SESSION on 08-11-182121 while its veto
+                # counter climbed monotonically to 1416 — it was working exactly as
+                # designed and reporting that the forward cast had no answer on 1416
+                # frames, which is a perception finding worth acting on and the opposite
+                # of what the verdict said. The veto count is the evidence; surface it.
+                verdict = (f"**VETOED** — refused {veto}x vs {fire} fire(s); the gate is "
+                           f"working and its CONDITION is what to investigate")
+            elif fire == 0 and g in INVERSE_POLARITY_GATES:
+                # iter-53 D8: for these, not firing is the HEALTHY result — the event
+                # exists to report a fault. nodeStreamGuardV2 fires only when
+                # ARE_NODES_LOADED_FOR_AREA comes back false, so 20260 reaches and zero
+                # fires is a clean session, not a dead gate, and printing
+                # ON-NEVER-FIRED next to it invited exactly the wrong conclusion.
+                verdict = "PASS (0 fires = healthy for this gate)"
+            elif fire == 0 and fire_ev:
+                # iter-59 C5: NEVER assert absence over the tool's own contrary
+                # evidence. The footnote under this table has always said that
+                # `fire:0 (ev:N)` means a missing counter rather than a quiet gate —
+                # but the verdict column went on printing ON-NEVER-FIRED beside it,
+                # and a reader who reads the table and not the footnote gets the
+                # opposite of the truth.
+                #
+                # On 08-15 this table said `tempActionV2 — QUIET, never-reached,
+                # 0/rung` while the log carried `EVENT temp-action: action=22 ms=1500
+                # site=layer2-reverse` — iter-57's central fix, working, reported as
+                # never having run. The cause was not a missing counter at all: the
+                # census samples every 30 s and the last one (F55372) simply predated
+                # the fire (F55985). iter-59 adds a final census at session end, but
+                # the verdict must stop overclaiming regardless.
+                verdict = (f"**NO-FIRE-COUNTED** — but {fire_ev} matching event(s) exist; "
+                           f"read events.log before concluding anything")
             elif fire == 0:
                 verdict = "**ON-NEVER-FIRED**"
             elif (last_fire_f is not None and reach is not None
                   and reach_at_last_fire is not None
                   and reach > reach_at_last_fire
-                  and census_end and last_fire_f < DEAD_GATE_FRAC * census_end):
+                  and census_end and last_fire_f < DEAD_GATE_FRAC * census_end
+                  # iter-53 D8: only meaningful for gates counted per FRAME or per SCAN.
+                  # A gate counted per transition/episode/rung stops firing the moment
+                  # its condition stops recurring, which is normal — and the heuristic
+                  # called engineStuckArmV2, engineStuckTelemetryV2 and reverseV2 dead in
+                  # 08-11-182121 when all three were still evaluating at the last census
+                  # and none of them can latch (offroadBrakeV2's arm flag is a per-frame
+                  # local; the stuck-arm budget is a rolling window that self-clears).
+                  # Three false verdicts on one page is worse than no verdict.
+                  and unit in ("frame", "scan", "vertex", "call", "write", "query")):
                 # The gate kept being evaluated long after it last did anything.
                 # Two things matter here:
                 #  - compare against reach AT THE LAST FIRE, not the first census:
@@ -2699,26 +3436,129 @@ def build_digest(log_path, lines, frames, events, markers, header, clusters,
     # number above is an average across several different experiments.
     if epochs and len(epochs) > 1:
         out.append("## Epoch comparison (gate config x vehicle — one row per experiment)")
-        out.append("| # | span | drv-min | model | gates on | holdFrac | drawdown | dmgEp | mk | immobS | stuckArm | modeChg | aPeak |")
-        out.append("|---|------|---------|-------|------------------|----------|----------|-------|----|--------|----------|---------|-------|")
+        out.append("| # | span | drv-min | model | base | gates on | holdFrac | drawdown | dmgEp | mk | immobS | stuckArm | modeChg | aPeak |")
+        out.append("|---|------|---------|-------|------|------------------|----------|----------|-------|----|--------|----------|---------|-------|")
         for ep in epochs:
-            gates_on = ",".join(ep["on"]) if ep["on"] else "(none = BASELINE)"
+            # Collapse the eleven into one token when they move as a unit, which is
+            # the only way they are supposed to move. Spelling them out makes every
+            # row 30-odd names wide and hides the gates that actually differ.
+            shown = list(ep["on"])
+            if ep.get("baseState") == "EXP":
+                shown = [g for g in shown if g not in BASELINE_EXPERIMENTAL]
+                shown.append("baseline11")
+            gates_on = ",".join(shown) if shown else "(none = BASELINE)"
             if ep["tooShort"]:
                 gates_on += " _(too short to judge)_"
             hf = f"{ep['holdFrac']*100:.0f}%" if ep["holdFrac"] is not None else "-"
             ap = f"{ep['medAPeak']:.1f}" if ep["medAPeak"] is not None else "-"
             out.append(
                 f"| E{ep['n']:02d} | {fmt_t(ep['t0'])} | {ep['drvMin']:.1f} | "
-                f"{ep['model']} | {gates_on} | {hf} | {ep['bhDrawdown']:.1f} | "
+                f"{ep['model']} | {ep.get('baseState', '-')} | {gates_on} | "
+                f"{hf} | {ep['bhDrawdown']:.1f} | "
                 f"{ep['damageEpisodes']} | {ep['markers']} | "
                 f"{ep['immobileSeconds']:.0f} | {ep['stuckArms']} | "
                 f"{ep['modeChanges']} | {ap} |")
         base = next((e for e in epochs if e.get("baseline")), None)
-        if base is None:
+        has_base = any(e.get("baseState") == "BASE" for e in epochs)
+        has_exp = any(e.get("baseState") == "EXP" for e in epochs)
+        if base is None and not has_base:
             out.append("")
             out.append("_No all-gates-off epoch in this session: nothing to read the other "
                        "epochs against. Drive the BASELINE first, every session._")
+        if any(e.get("baseState") == "mixed" for e in epochs):
+            out.append("")
+            out.append("_At least one epoch has the eleven baseline gates flipped APART "
+                       "(`mixed`). Those rows belong to neither arm — read them as their own "
+                       "configuration, not as baseline or experimental._")
         out.append("")
+
+        # ---- iter-63: vehicle x baseline. The comparison the flips were FOR. ----
+        # 08-17-111533 flipped the baseline nine times across seven vehicles and
+        # this table did not exist, so the one question the session was designed to
+        # answer had to be rebuilt by hand from the gate-toggle frames.
+        if has_base and has_exp:
+            agg = {}
+            for e in epochs:
+                st = e.get("baseState")
+                if st not in ("BASE", "EXP"):
+                    continue
+                k = (e["model"], st)
+                a = agg.setdefault(k, {"min": 0.0, "mk": 0, "dd": 0.0})
+                a["min"] += e["drvMin"]
+                a["mk"] += e["markers"]
+                a["dd"] += e["bhDrawdown"]
+            models = sorted({m for m, _ in agg}, key=lambda m: -sum(
+                agg.get((m, s), {"min": 0.0})["min"] for s in ("BASE", "EXP")))
+            out.append("## Baseline vs experimental (iter-53 baseline set x vehicle)")
+            out.append("_BASE = the eleven OFF, EXP = the eleven ON. `ratio` is EXP marker "
+                       "rate over BASE marker rate for the SAME vehicle, which is the only "
+                       "comparison free of the vehicle confound. Cells under 0.3 drv-min are "
+                       "shown as `-`: a rate built on twenty seconds is not a rate._")
+            out.append("| model | class | BASE min | mk | /min | EXP min | mk | /min | ratio | BASE dmg | EXP dmg |")
+            out.append("|-------|-------|----------|----|------|---------|----|------|-------|----------|---------|")
+            tot = {"BASE": {"min": 0.0, "mk": 0, "dd": 0.0}, "EXP": {"min": 0.0, "mk": 0, "dd": 0.0}}
+            # iter-71 C2: accumulate by class as well as by model, so a session that
+            # mixed bikes and cars can be read as the two experiments it actually was.
+            cls_tot = {}
+            for m in models:
+                cells = {}
+                for st in ("BASE", "EXP"):
+                    a = agg.get((m, st), {"min": 0.0, "mk": 0, "dd": 0.0})
+                    for f in ("min", "mk", "dd"):
+                        tot[st][f] += a[f]
+                    cells[st] = (a, (a["mk"] / a["min"]) if a["min"] >= 0.3 else None)
+                    kls = vehicle_class(m)
+                    cb = cls_tot.setdefault(kls, {
+                        "BASE": {"min": 0.0, "mk": 0, "dd": 0.0},
+                        "EXP": {"min": 0.0, "mk": 0, "dd": 0.0}})
+                    for f in ("min", "mk", "dd"):
+                        cb[st][f] += a[f]
+                (ba, br), (ea, er) = cells["BASE"], cells["EXP"]
+                ratio = f"{er / br:.2f}x" if (br and er and br > 0) else "-"
+                out.append(
+                    f"| {m} | {vehicle_class(m)} | {ba['min']:.1f} | {ba['mk']} | "
+                    f"{f'{br:.2f}' if br is not None else '-'} | "
+                    f"{ea['min']:.1f} | {ea['mk']} | "
+                    f"{f'{er:.2f}' if er is not None else '-'} | {ratio} | "
+                    f"{ba['dd']:.1f} | {ea['dd']:.1f} |")
+            br = (tot["BASE"]["mk"] / tot["BASE"]["min"]) if tot["BASE"]["min"] >= 0.3 else None
+            er = (tot["EXP"]["mk"] / tot["EXP"]["min"]) if tot["EXP"]["min"] >= 0.3 else None
+            ratio = f"{er / br:.2f}x" if (br and er and br > 0) else "-"
+            # iter-71 C2: the class rollups sit between the models and the ALL row,
+            # because they are the level most of these comparisons should be read at.
+            if len(cls_tot) > 1:
+                for kls in sorted(cls_tot):
+                    cb = cls_tot[kls]
+                    cbr = (cb["BASE"]["mk"] / cb["BASE"]["min"]) if cb["BASE"]["min"] >= 0.3 else None
+                    cer = (cb["EXP"]["mk"] / cb["EXP"]["min"]) if cb["EXP"]["min"] >= 0.3 else None
+                    cratio = f"{cer / cbr:.2f}x" if (cbr and cer and cbr > 0) else "-"
+                    out.append(
+                        f"| _all {kls}_ | **{kls}** | {cb['BASE']['min']:.1f} | {cb['BASE']['mk']} | "
+                        f"{f'{cbr:.2f}' if cbr is not None else '-'} | "
+                        f"{cb['EXP']['min']:.1f} | {cb['EXP']['mk']} | "
+                        f"{f'{cer:.2f}' if cer is not None else '-'} | {cratio} | "
+                        f"{cb['BASE']['dd']:.1f} | {cb['EXP']['dd']:.1f} |")
+            out.append(
+                f"| **ALL** | - | {tot['BASE']['min']:.1f} | {tot['BASE']['mk']} | "
+                f"{f'{br:.2f}' if br is not None else '-'} | "
+                f"{tot['EXP']['min']:.1f} | {tot['EXP']['mk']} | "
+                f"{f'{er:.2f}' if er is not None else '-'} | {ratio} | "
+                f"{tot['BASE']['dd']:.1f} | {tot['EXP']['dd']:.1f} |")
+            if min(tot["BASE"]["min"], tot["EXP"]["min"]) > 0:
+                skew = max(tot["BASE"]["min"], tot["EXP"]["min"]) / min(tot["BASE"]["min"], tot["EXP"]["min"])
+                if skew > 1.5:
+                    out.append("")
+                    out.append(f"_Arms are unbalanced ({skew:.1f}x more driving in one than the "
+                               "other). The ALL row is a blend of the vehicle mix; read the "
+                               "per-vehicle ratios, not the total._")
+            if "two-wheel" in cls_tot and len(cls_tot) > 1:
+                out.append("")
+                out.append("_This session mixed two-wheeled and four-wheeled vehicles. The mod "
+                           "has no motorcycle-specific code path — not in recovery, not in "
+                           "geometry, not in the stuck ladder — so the two class rows are "
+                           "separate experiments and the ALL row averages them into a number "
+                           "that describes neither._")
+            out.append("")
 
     # ---- iter-40 L2: DAMAGE LEDGER ----
     # The sweep above is a consecutive-FRAME difference that also skips anything
@@ -2737,9 +3577,26 @@ def build_digest(log_path, lines, frames, events, markers, header, clusters,
         if repairs:
             out.append(f"- repaired ({len(repairs)} x vehicle-repair): "
                        f"{rep_b:.1f} body + {rep_e:.1f} engine = {rep_b + rep_e:.1f}")
+            # iter-63: this verdict had its sign backwards and cried wolf on every
+            # long session. A repair only restores the damage standing at that moment,
+            # so `repaired` is a FLOOR on damage that existed, never a total. Damage
+            # the player never repaired makes marked >> repaired, which is normal and
+            # says nothing about coverage; 08-17-111533 read "-990.8 UNACCOUNTED
+            # DAMAGE — the detectors missed something" while the Damage attribution
+            # block below it correctly reported 0.0 attributed to nothing.
+            # Only the OTHER direction is evidence of a miss: repairs restoring more
+            # than the detectors ever recorded.
             resid = (rep_b + rep_e) - marked
-            verdict = ("coverage looks complete" if abs(resid) < 10
-                       else "UNACCOUNTED DAMAGE — the detectors missed something")
+            if resid > 10:
+                verdict = ("UNACCOUNTED DAMAGE — repairs restored more than the "
+                           "detectors ever recorded, so something damaged the car "
+                           "that no marker saw")
+            elif abs(resid) <= 10:
+                verdict = "consistent (repairs and markers agree)"
+            else:
+                verdict = ("expected — marked damage exceeds what was repaired "
+                           "because most of it was never repaired. This is NOT a "
+                           "coverage gap; see `Damage attribution` for the real check")
             out.append(f"- residual (repaired - marked): {resid:+.1f} — {verdict}")
         else:
             out.append("- no vehicle-repair events: ledger cannot be closed this "
@@ -2815,9 +3672,59 @@ def build_digest(log_path, lines, frames, events, markers, header, clusters,
         out.append("")
 
     if gaps:
-        out.append("## Wall-clock gaps > 5s (idle/pause — rate noise)")
-        for t, d in gaps[:20]:
-            out.append(f"- at {fmt_t(t)}: {d:.1f}s gap")
+        # iter-57: this list was computed, used to correct driving time, and then never
+        # printed. The one thing 08-14 most needed surfaced — an 11.49 s hole containing
+        # a teleport, a vehicle swap, an 11-gate change and a spliced contact sheet —
+        # was visible only as a 0.2-minute discrepancy between two numbers on one line.
+        out.append(f"## Continuity — wall-clock gaps > {CONTINUITY_GAP_S:.0f}s")
+        out.append("_A gap is a hole in every rolling reading the mod keeps. Markers "
+                   "inside a gap's shadow carry perception ages spanning it; contact "
+                   "sheets whose pre-roll straddles one may splice two moments. Gaps "
+                   f"over {DRIVING_GAP_S:.0f}s are also excluded from driving time._")
+        out.append("")
+        out.append("| at | gap | frames | jump | vehicle | markers in shadow |")
+        out.append("|---|---|---|---|---|---|")
+        for g in gaps[:20]:
+            t, d = g[0], g[1]
+            a = g[2] if len(g) > 2 else None
+            b = g[3] if len(g) > 3 else None
+            fr_txt = f"F{a.f}->F{b.f}" if (a is not None and b is not None) else "-"
+            jump = "-"
+            veh = "-"
+            try:
+                if a is not None and b is not None and a.pos and b.pos:
+                    pa = [float(x) for x in a.pos.strip("()").split(",")]
+                    pb = [float(x) for x in b.pos.strip("()").split(",")]
+                    jump = f"{math.hypot(pb[0] - pa[0], pb[1] - pa[1]):.0f} m"
+            except Exception:
+                jump = "-"
+            # A vehicle change inside a gap is the single most misleading thing a gap
+            # can hide — every per-vehicle number either side of it belongs to a
+            # different car. Read it from the events, which carry old/new model.
+            try:
+                if a is not None and b is not None:
+                    for ev in events:
+                        if ev["kind"] in ("vehicle-session", "teleport") and \
+                                ev.get("t") is not None and a.t <= ev["t"] <= b.t:
+                            mm = re.search(r"newModel=(\S+)", ev.get("rest", ""))
+                            if mm:
+                                veh = mm.group(1)
+                                break
+            except Exception:
+                veh = "-"
+            # Any marker whose own frame lands inside the 4 s pre-roll shadow after the
+            # gap is a marker whose run-up frames may predate it.
+            shadow = "-"
+            try:
+                if b is not None:
+                    hit = [m for m in markers
+                           if m.t is not None and b.t is not None
+                           and 0 <= (m.t - b.t) <= 4.0]
+                    if hit:
+                        shadow = ", ".join(f"#{m.seq}" for m in hit[:4])
+            except Exception:
+                shadow = "-"
+            out.append(f"| {fmt_t(t)} | {d:.2f}s | {fr_txt} | {jump} | {veh} | {shadow} |")
         out.append("")
 
     if index_rows:
@@ -2847,7 +3754,302 @@ def build_digest(log_path, lines, frames, events, markers, header, clusters,
                        f"{r.get('damageEpisodes','-')} | {hf} | "
                        f"{r.get('immobileSeconds','-')} |")
         out.append("")
-    return "\n".join(out) + "\n"
+
+    # ---- iter-54 C2: the lead block ----
+    # CLAUDE.md says the main session reads ONLY digest.md, and digest.md is 700 lines.
+    # So the single most-read artifact in the whole pipeline is also the largest fixed
+    # context cost of every session, and it opens with a build banner rather than with
+    # what happened. This block answers "how did it go, what should I look at, and did
+    # the instrumentation work" in ~20 lines; everything below it is detail.
+    #
+    # It is built LAST and spliced in, not written first, so it can quote figures the
+    # sections below already computed (ranked, snap_stats, the trend table) instead of
+    # recomputing them and risking two numbers that disagree.
+    lead = ["## Read this first", ""]
+
+    _drv = driving / 60.0 if driving else 0.0
+    # iter-57: DE-DUPLICATE THE DENOMINATOR. SnapshotWriter already collapses markers
+    # that share an engine tick for the IMAGE budget (TryAliasSameFrame); nothing did so
+    # for the rate. On 08-14 five frames carried two markers each — same frame, same
+    # failClass, 33-80 ms apart — which is one event seen twice, not two events.
+    _seen_fc = set()
+    _dedup = 0
+    for m in markers:
+        key = (m.f, m.failClass or m.tag)
+        if key in _seen_fc:
+            _dedup += 1
+        else:
+            _seen_fc.add(key)
+    _nmark = len(markers) - _dedup
+    _rate = (_nmark / _drv) if _drv else None
+    # iter-71 C1: auto-drive is a SEPARATE POPULATION, not a slice of this one. Those
+    # markers exercise GTA's task driving; the lane controller and ACC are not running.
+    # Pooling them means the headline rate answers no single question, and on a session
+    # like 08-19-074058 - fourteen markers, nine of them AUTODRIVE, the three worst
+    # incidents all AUTODRIVE on a runway - the number it produces is about the wrong
+    # system entirely. Count both, lead with the drive-assist one, and say so.
+    _auto_marks = [m for m in markers if m.authority() == "AUTO"]
+    _n_auto = len(_auto_marks)
+    _n_human = _nmark - _n_auto
+    _rate_human = (_n_human / _drv) if _drv else None
+    if _rate is None:
+        lead.append(f"- **{len(markers)} markers / {len(clusters)} incidents** (no driving time measured)")
+    else:
+        bit = (f"- **{_nmark} markers / {len(clusters)} incidents** in {_drv:.1f} driving min"
+               f" — **{_rate:.2f}/driving-min**")
+        if _dedup:
+            bit += (f" _(de-duplicated: {_dedup} same-frame same-class duplicate(s) "
+                    f"dropped from {len(markers)} raw = "
+                    f"{len(markers) / _drv:.2f}/min raw)_")
+        # Compare against the MEDIAN of recent driven sessions, not against the single
+        # previous one. Sessions here are not interchangeable: a menu-reader test drives
+        # gently for ten minutes and scores 0.68, a drive-assist test goes looking for
+        # trouble and scores 12.7. Differencing two adjacent rows of that mixture
+        # manufactures a "regression" out of a change of subject. A median over several
+        # sessions is not fooled by one atypical neighbour, and the range is printed so a
+        # wide spread is visible as the weak evidence it is.
+        prior = []
+        for r in (index_rows or []):
+            if r.get("log") == log_path.name:
+                continue
+            try:
+                if float(r.get("minutes") or 0) >= 2.0 and r.get("ratePerMin") is not None:
+                    prior.append(float(r["ratePerMin"]))
+            except (TypeError, ValueError):
+                continue
+        prior = prior[-6:]
+        if len(prior) >= 3:
+            s = sorted(prior)
+            med = s[len(s) // 2] if len(s) % 2 else (s[len(s)//2 - 1] + s[len(s)//2]) / 2.0
+            if med <= 0:
+                verdict = "no baseline rate to compare against"
+            elif _rate > med * 1.5:
+                verdict = "WELL ABOVE baseline"
+            elif _rate > med * 1.1:
+                verdict = "above baseline"
+            elif _rate < med * 0.67:
+                verdict = "well below baseline"
+            elif _rate < med * 0.9:
+                verdict = "below baseline"
+            else:
+                verdict = "in line with baseline"
+            bit += (f" vs median **{med:.2f}** across the last {len(prior)} driven sessions"
+                    f" (range {min(prior):.2f}-{max(prior):.2f}) — {verdict}")
+        else:
+            bit += " (too few comparable sessions for a baseline)"
+        lead.append(bit)
+
+    # iter-71 C1: state the split whenever auto-drive markers are present. Silence here
+    # would leave the reader with the pooled number and no reason to doubt it, which is
+    # exactly the state every digest before this one was in.
+    if _n_auto and _drv:
+        share = 100.0 * _n_auto / _nmark if _nmark else 0.0
+        lead.append(
+            f"- **population split: {_n_human} drive-assist marker(s) at "
+            f"{_rate_human:.2f}/driving-min, and {_n_auto} auto-drive marker(s) "
+            f"({share:.0f}% of the total)** _(auto-drive markers exercise GTA's task "
+            f"driving, not the lane/ACC control loop — the assist block is gated on "
+            f"`!isAutodriving`. Do not tune Stanley or ACC on them. "
+            f"**{_rate_human:.2f}/driving-min is this session's real drive-assist "
+            f"figure**, not the pooled rate above.)_")
+        if share >= 50.0:
+            lead.append(
+                "- **caveat: auto-drive is the MAJORITY of this session's markers.** "
+                "The headline rate is not evidence about drive assist either way")
+
+    # ---- iter-61: THE THRASH RATES ----
+    # On 08-17 the mod changed drive mode 82 times in 3.7 driving min (22.2/min)
+    # against iter-57's 10 in 20.8 (0.48/min), and poly-distrust fired at the same
+    # 22.2/min against 1.68 — a 46x and a 13x that appeared NOWHERE in a 57 KB digest.
+    # Neither is a marker, so the rate above is blind to both, and both LEAD the
+    # markers: the mod loses its lane reference, ping-pongs between LaneKeeping and
+    # RecoveringToRoad, and only later produces a failure worth photographing. A
+    # mode-change rate far above baseline means recovery is aborting and re-entering
+    # rather than recovering — read the `why=`/`distWhy=` fields on the transitions.
+    _nmode = sum(1 for e in events if e["kind"] == "mode-change")
+    _npoly = sum(1 for e in events if e["kind"] == "poly-distrust")
+    if _drv >= 0.5:
+        _parts = []
+        for _label, _n, _key in (("mode-change", _nmode, "modeChangePerMin"),
+                                 ("poly-distrust", _npoly, "polyDistrustPerMin")):
+            _r = _n / _drv
+            _med = prior_median(index_rows, log_path.name, _key)
+            if _med is None:
+                _parts.append(f"{_label} **{_r:.1f}/min** (no baseline yet — "
+                              f"re-run triage over archived logs to backfill)")
+            elif _med <= 0:
+                _parts.append(f"{_label} **{_r:.1f}/min** (baseline 0)")
+            else:
+                _parts.append(f"{_label} **{_r:.1f}/min** vs median {_med:.1f} "
+                              f"— {_r / _med:.1f}x")
+        lead.append("- **thrash:** " + "; ".join(_parts))
+
+    # ---- iter-61: WHAT CHANGED SINCE THE LAST DRIVEN SESSION ----
+    # Finding the 08-17 regression took three greps across two logs to notice that
+    # three driving-model gates were ON that iter-57 had OFF. `gatesAtStart` has been
+    # in the index since iter-57; nothing was reading it across rows.
+    _cur_gates = {}
+    for _e in events:
+        if _e["kind"] == "gate-manifest":
+            _cur_gates = {m.group(1): m.group(2)
+                          for m in re.finditer(r"(\w+)=([01])\b", _e.get("rest") or "")}
+            break
+    # iter-71 C3: "previous" means EARLIER IN THE SESSION TIMELINE, not lower down the
+    # index file. The index is append-ordered by triage-run time, so re-running triage
+    # over an older log files it last and it becomes everyone's "previous session".
+    # That is how the two 08-19 digests ended up naming each other as predecessor, each
+    # reporting the same eleven gates flipping in opposite directions - a gate-drift
+    # line that points the wrong way is worse than none, because it is acted on.
+    # The session timestamp is in the stem, which is the only ordering that cannot
+    # drift: driveassist-YYYY-MM-DD-HHMMSS.log.
+    _cur_stamp = _log_stamp(log_path.name)
+    _candidates = []
+    for _r in (index_rows or []):
+        if _r.get("log") == log_path.name or not _r.get("gatesAtStart"):
+            continue
+        try:
+            if float(_r.get("minutes") or 0) < 2.0:
+                continue
+        except (TypeError, ValueError):
+            continue
+        _st = _log_stamp(_r.get("log") or "")
+        # An unparseable stem sorts before everything, so it can still serve as a
+        # fallback predecessor but can never displace a genuinely dated one.
+        if _cur_stamp and _st and _st >= _cur_stamp:
+            continue
+        _candidates.append((_st or "", _r))
+    _prev_gates, _prev_log = None, None
+    if _candidates:
+        _candidates.sort(key=lambda p: p[0])
+        _prev_gates = _candidates[-1][1]["gatesAtStart"]
+        _prev_log = _candidates[-1][1]["log"]
+    if _cur_gates and _prev_gates:
+        # A gate absent from the older row is a NEW gate, not drift — saying otherwise
+        # would cry wolf every iteration that adds one.
+        _diff = sorted(k for k in _cur_gates
+                       if k in _prev_gates and str(_prev_gates[k]) != str(_cur_gates[k]))
+        if _diff:
+            lead.append("- **gates changed since `" + _prev_log + "`:** "
+                        + ", ".join(f"`{k}` {_prev_gates[k]}→{_cur_gates[k]}" for k in _diff)
+                        + " _(a behaviour gate that moved between sessions is the first"
+                          " thing to suspect for any change in the rates above)_")
+
+    if ranked:
+        lead.append("- **worst incidents by settled cost:** " + "; ".join(
+            f"{ci:02d} ({c:.0f}, {worst.failClass or worst.tag or '?'}"
+            + (f", {worst.street}" if worst.street else "") + ")"
+            for c, cflag, ci, worst, first, _actual in ranked[:3]))
+
+    # Images: say what to OPEN, or why there is nothing to open. A bare count is not
+    # actionable and an absent count reads as "no failures worth photographing".
+    _cap_sel = [e for e in events if e["kind"] == "capture-selftest"]
+    # iter-57: the census to believe is the LAST one, not the startup sample. Printing
+    # the startup line when a capture-recovered exists is how 08-14's digest reported
+    # written=0 beside 300 files on disk.
+    _cap_ordered = [e for e in events
+                    if e["kind"] in ("capture-final", "capture-census",
+                                     "capture-recovered", "capture-selftest")]
+    _cap_last = [_cap_ordered[-1]] if _cap_ordered else list(_cap_sel)
+    if snap_stats and snap_stats.get("copied"):
+        rec = snap_stats.get("recommended") or []
+        lead.append(f"- **images: {snap_stats['copied']} frames, {snap_stats['sheets']} contact sheet(s)** "
+                    f"across {snap_stats['markers_with_images']} marker(s). "
+                    f"Start at `snaps/manifest.md`" + (f" — top picks: "
+                    + ", ".join(f"`snaps/{d['open']}`" for d in rec[:3]) if rec else ""))
+        # iter-57: cheap backstop for the whole class of "the census disagrees with the
+        # directory" bugs. If files exist and the census we chose still claims none were
+        # written, say so loudly instead of printing both facts calmly in one digest.
+        _written = None
+        if _cap_last:
+            _m = re.search(r"written=(\d+)", _cap_last[-1].get("rest", ""))
+            if _m:
+                _written = int(_m.group(1))
+        if _written == 0:
+            lead.append(f"- **CONTRADICTION: {snap_stats['copied']} image(s) are on disk but the "
+                        f"latest capture census says `written=0`.** Trust the directory. Every "
+                        f"census kind in this log predates the writes, which means the writer "
+                        f"never reported again after starting — treat the census as unreliable "
+                        f"for this session and rank on the directory.")
+    elif not _cap_sel:
+        lead.append("- **images: NONE, and the writer never started** (no `EVENT capture-selftest`). "
+                    "Snapshots are on by default from iter-54, so on a newer build this means the "
+                    "drive-assist debug log was off, or the build predates the change.")
+    else:
+        lead.append(f"- **images: none captured** despite the writer starting — "
+                    f"`{_cap_sel[0]['line'].strip()[:150]}`")
+
+    # Anything that makes the rest of this digest less trustworthy than it looks.
+    faults = []
+    # iter-57: geometry from the LAST census, not the startup sample — a window resized
+    # after startup made the old reading two minutes stale.
+    faults.extend(capture_geometry_faults(_cap_last or _cap_sel))
+    for k, why in (("capture-unavailable", "captures were requested and dropped"),
+                   ("capture-cap-hit", "image budget ran out mid-session"),
+                   ("map-data-mismatch", "bundled map data does not match the game")):
+        n = sum(1 for e in events if e["kind"] == k)
+        if n:
+            faults.append(f"{why} (`{k}` x{n})")
+    if gap_skips:
+        faults.append(f"{gap_skips} damage episode(s) discarded across wall-clock gaps")
+    # iter-57: a mid-session gate change makes the headline rate uncomparable — with
+    # itself as much as with the baseline. This belongs in the caveats, at the top,
+    # not inferred from an epoch table 400 lines down. 08-14 flipped ELEVEN gates at
+    # F8130 and the digest said nothing about it above the fold.
+    _mans = [e for e in events if e["kind"] == "gate-manifest"]
+    if len(_mans) > 1:
+        def _pm(rest):
+            return {m.group(1): m.group(2)
+                    for m in re.finditer(r"(\w+)=([01])\b", rest or "")}
+        _a, _b = _pm(_mans[0]["rest"]), _pm(_mans[-1]["rest"])
+        _chg = sorted(k for k in set(_a) | set(_b) if _a.get(k) != _b.get(k))
+        if _chg:
+            # iter-63: a change that is EXACTLY the baseline set is the experiment
+            # working, not a spoiled session. Telling the player to "re-run a session
+            # with a manifest that does not change" after nine deliberate flips is
+            # advice against the feature the mod ships for this purpose.
+            if set(_chg) <= set(BASELINE_EXPERIMENTAL):
+                faults.append(
+                    f"the gate manifest changed mid-session, and the change is EXACTLY "
+                    f"the drive-assist baseline set ({len(_chg)} gate(s)) — that is the "
+                    "experiment, not a fault. The headline markers/driving-min figure is "
+                    "still a blend of both arms; read `Baseline vs experimental` instead")
+            else:
+                faults.append(
+                    f"**the gate manifest CHANGED mid-session ({len(_chg)} gate(s): "
+                    + ", ".join(_chg[:6]) + ("..." if len(_chg) > 6 else "")
+                    + "). This session is not one configuration — the markers/driving-min "
+                      "figure above is a blend and must not be compared against the "
+                      "baseline or against itself. Use the epoch table, and re-run a "
+                      "session with a manifest that does not change**")
+    # iter-63: if the session ran both arms of the drive-assist baseline, that IS the
+    # result — it belongs above the fold, not 400 lines down. 08-17-111533 ran ten
+    # balanced minutes of each and the lead said only "below baseline".
+    _eb = [e for e in (epochs or []) if e.get("baseState") in ("BASE", "EXP")]
+    if _eb and {e["baseState"] for e in _eb} == {"BASE", "EXP"}:
+        _arm = {}
+        for e in _eb:
+            a = _arm.setdefault(e["baseState"], {"min": 0.0, "mk": 0, "dd": 0.0})
+            a["min"] += e["drvMin"]
+            a["mk"] += e["markers"]
+            a["dd"] += e["bhDrawdown"]
+        _b, _x = _arm["BASE"], _arm["EXP"]
+        if _b["min"] >= 0.3 and _x["min"] >= 0.3:
+            _br, _xr = _b["mk"] / _b["min"], _x["mk"] / _x["min"]
+            _bal = (max(_b["min"], _x["min"]) / min(_b["min"], _x["min"])) if min(_b["min"], _x["min"]) else 99.0
+            lead.append(
+                f"- **baseline set: BASE {_br:.2f}/min ({_b['min']:.1f} min, {_b['dd']:.0f} dmg) "
+                f"vs EXP {_xr:.2f}/min ({_x['min']:.1f} min, {_x['dd']:.0f} dmg)"
+                + (f" — {_xr / _br:.2f}x**" if _br else "**")
+                + (" _(arms balanced)_" if _bal <= 1.5 else f" _(arms {_bal:.1f}x unbalanced — read the per-vehicle ratios)_")
+                + " — see `Baseline vs experimental`")
+    if faults:
+        lead.append("- **caveats:** " + "; ".join(faults))
+    lead.append("")
+    lead.append("_Everything below is detail. Agent 1 reads it all; the main session need not._")
+    lead.append("")
+
+    # Splice after the "Generated ..." preamble (title, blank, generated, blank).
+    return "\n".join(out[:4] + lead + out[4:]) + "\n"
 
 
 def index_row(log_path, frames, markers, clusters, header,
@@ -2886,6 +4088,26 @@ def index_row(log_path, frames, markers, clusters, header,
             v = fnum_of(ev["rest"], "frames")
             if v is not None:
                 eng = int(v)
+    # ---- iter-57: PERSIST THE GATE MANIFEST ----
+    # Without this the trend table cannot be read at all. On 08-14, 30 of 84 markers
+    # came from tags whose gates were OFF for the first 28% of the session
+    # (ENGINE-STUCK, STUCK-ARM, IMMOBILE, RECOVERY-GIVEUP, TELEPORT-JUMP, DAMAGE, and
+    # 4 of 5 STUCK-LAYER), so "8.54 vs median 5.66, WELL ABOVE baseline" was comparing a
+    # session against sessions that could not emit a third of its markers. Like-for-like
+    # the rate was ~5.5 — AT the median. The index had no way to know that, because it
+    # recorded no gate state, and CLAUDE.md forbids re-scanning old logs to find out.
+    #
+    # Same discipline the menulog tool already applies to reader version.
+    manifests = [e for e in (events or []) if e["kind"] == "gate-manifest"]
+
+    def _parse_manifest(rest):
+        return {m.group(1): m.group(2)
+                for m in re.finditer(r"(\w+)=([01])\b", rest or "")}
+
+    gates_first = _parse_manifest(manifests[0]["rest"]) if manifests else {}
+    gates_last = _parse_manifest(manifests[-1]["rest"]) if manifests else {}
+    gates_changed = sorted(k for k in set(gates_first) | set(gates_last)
+                           if gates_first.get(k) != gates_last.get(k))
     return {
         "log": log_path.name,
         "iter": header.get("iter"),
@@ -2918,6 +4140,23 @@ def index_row(log_path, frames, markers, clusters, header,
             sum(e["drop"] for e in eps if not e.get("marked")), 1),
         "holdFrac": round(held / len(rated), 3) if rated else None,
         "immobileSeconds": round(sum(sp["dur"] for sp in (immobiles or [])), 1),
+        # iter-61: the two thrash rates, stored per-minute so they are directly
+        # comparable across sessions of different lengths (the counts are not).
+        # Marker-independent, like holdFrac — a session that produces no markers can
+        # still be thrashing, and on 08-17 these moved 46x and 13x while the marker
+        # rate moved 8x.
+        "modeChangePerMin": round(
+            sum(1 for e in (events or []) if e["kind"] == "mode-change") / (driving / 60), 2)
+            if driving > 0 else None,
+        "polyDistrustPerMin": round(
+            sum(1 for e in (events or []) if e["kind"] == "poly-distrust") / (driving / 60), 2)
+            if driving > 0 else None,
+        # iter-57: the gate manifest as shipped, and whether it survived the session.
+        # `gatesChanged` non-empty means the session is NOT one configuration and its
+        # ratePerMin must not be compared with anything, including itself.
+        "gatesAtStart": gates_first or None,
+        "gatesChanged": gates_changed or None,
+        "gateManifests": len(manifests),
         "gateEpochs": len(epochs or []),
         "epochs": [
             {"n": e["n"], "model": e["model"], "on": e["on"],
@@ -2932,6 +4171,38 @@ def index_row(log_path, frames, markers, clusters, header,
         "endEh": frames[-1].eh if frames and frames[-1].eh is not None else None,
         "generated": datetime.now().strftime("%Y-%m-%d %H:%M"),
     }
+
+
+def prior_median(index_rows, exclude_log, key, min_minutes=2.0, window=6):
+    """iter-61: median of `key` over recent comparable sessions, or None.
+
+    Same contract as the marker-rate baseline above it: exclude this log, ignore
+    sessions too short to have a meaningful per-minute rate, take the last `window`
+    rows, and refuse to answer on fewer than three — two samples is not a baseline,
+    and printing one as if it were is how a change of subject reads as a regression.
+    Rows written before the key existed simply do not contribute.
+    """
+    vals = []
+    for r in (index_rows or []):
+        if r.get("log") == exclude_log:
+            continue
+        try:
+            if float(r.get("minutes") or 0) < min_minutes:
+                continue
+        except (TypeError, ValueError):
+            continue
+        v = r.get(key)
+        if v is None:
+            continue
+        try:
+            vals.append(float(v))
+        except (TypeError, ValueError):
+            continue
+    vals = vals[-window:]
+    if len(vals) < 3:
+        return None
+    s = sorted(vals)
+    return s[len(s) // 2] if len(s) % 2 else (s[len(s) // 2 - 1] + s[len(s) // 2]) / 2.0
 
 
 def load_index(path):
@@ -2993,6 +4264,41 @@ def process(log_path, args, index):
             mk.settleEh = fnum_of(ev["rest"], "ehDrop")
             if mk.peakSpeed is None:
                 mk.peakSpeed = fnum_of(ev["rest"], "peakSpd")
+            # iter-53 D9: carry WHAT THE CAR TOUCHED. The mod has always logged it
+            # (contact=L/world@2.5, B/vehicle@10.6) and triage has never read it, so the
+            # weapon-vs-collision call was made on speed alone — which is how a 96.6
+            # degree rollover into terrain got labelled "weapon signature". A world
+            # contact is not a gunshot, whatever the speed says.
+            mk.contact = kv(ev["rest"], "contact")
+
+    # ---- iter-64: mark settle-less markers that sit inside a neighbour's settle window ----
+    # A marker with its own EVENT marker-settle owns a [t, t+winMs] slice of damage. Any
+    # OTHER marker landing in that slice without a settle of its own would otherwise take
+    # the header delta and double-count the same points. Uses each settling marker's real
+    # winMs where the event carries one, so a long settle is not truncated to a guess.
+    settle_spans = []
+    for ev in events:
+        if ev["kind"] != "marker-settle" or ev["t"] is None:
+            continue
+        num = fnum_of(ev["rest"], "marker")
+        if num is None:
+            continue
+        win_ms = fnum_of(ev["rest"], "winMs") or 1000.0
+        # The event fires at the END of the window, so the slice it owns precedes it.
+        settle_spans.append((int(num), ev["t"] - win_ms / 1000.0, ev["t"]))
+    for mk in markers:
+        if mk.settleBh is not None or mk.settleEh is not None:
+            continue                      # owns its own damage
+        if mk.t is None:
+            continue
+        for onum, t0, t1 in settle_spans:
+            if onum == mk.num:
+                continue
+            if t0 <= mk.t <= t1:
+                mk.costShadowed = True
+                mk.shadowedBy = onum
+                break
+
     # iter-39 L2 (legacy reconstruction): logs written before marker-settle
     # existed can still be costed, because the damage the marker header missed
     # was recorded elsewhere — the grind episode's own cumBhDrop/cumEhDrop, and
@@ -3001,24 +4307,84 @@ def process(log_path, args, index):
     # totals already include the frames that were separately suppressed, so
     # adding them would double-count. This is what makes the pre-iter-39
     # sessions comparable to the new ones.
+    # iter-53 D2: a damage episode is ONE loss and must be charged to ONE marker.
+    # This loop used to be written the other way round — for every marker, scan every
+    # episode within 3 s — so a cluster of N markers each claimed the SAME grind-end
+    # total and the incident sum reported N times the real cost. In the 08-11-182121
+    # session that turned 8.2 into 41.0 (incident 03, five markers), 121.7 into 486.8
+    # (incident 20, four markers) and 514.9 into 1544.7 (incident 12), and it was the
+    # entire source of the digest's "MISMATCH: -2951.7 unexplained". iter-52 did not
+    # introduce the bug, but by adding snapshot markers at seven more emitters it put
+    # 4-6 markers where there used to be one and made a rounding error into a fiction.
+    #
+    # Now each episode picks its OWN marker — the nearest one preceding it — and no
+    # other marker may claim it. If that nearest marker already carries a real
+    # marker-settle the episode is dropped entirely rather than re-charged to a
+    # neighbour, because the settle already counted it.
+    ge_claim = {}
+    supp_claim = {}
+
+    # A grind episode and the marker-settle that accounts for it are the SAME loss
+    # reported twice: the settle fires when its ~1 s window closes, the grind-end when
+    # the grind stops, so they can be a second or more apart (08-11-182121 incident 20:
+    # settle marker=44 at F6539, grind-end at F6575, both 70.6b + 51.1e). Matching on
+    # time alone missed that and reconstructed the episode onto a neighbouring marker,
+    # reporting 243.4 for a 121.7 event. Match on the DROP TOTALS instead — an exact
+    # bh/eh pair is a signature, and a settle carrying it means the episode is already
+    # charged to its rightful marker.
+    settled_sigs = [(fnum_of(ev["rest"], "bhDrop") or 0.0,
+                     fnum_of(ev["rest"], "ehDrop") or 0.0,
+                     ev["t"])
+                    for ev in events
+                    if ev["kind"] == "marker-settle" and ev["t"] is not None]
+
+    def _already_settled(t, bh, eh):
+        for sbh, seh, st in settled_sigs:
+            if abs(t - st) <= 5.0 and abs(bh - sbh) <= 0.5 and abs(eh - seh) <= 0.5:
+                return True
+        return False
+
+    def _episode_owner(t, window):
+        """The marker an episode belongs to: the closest one before it, or None."""
+        best, best_dt = None, None
+        for m in markers:
+            if m.t is None:
+                continue
+            dt = t - m.t
+            if dt < 0 or dt > window:
+                continue
+            if best_dt is None or dt < best_dt:
+                best, best_dt = m, dt
+        return best
+
+    for ev in events:
+        if ev["t"] is None:
+            continue
+        if ev["kind"] == "grind-end":
+            gbh = fnum_of(ev["rest"], "cumBhDrop") or 0.0
+            geh = fnum_of(ev["rest"], "cumEhDrop") or 0.0
+            if _already_settled(ev["t"], gbh, geh):
+                continue
+            owner = _episode_owner(ev["t"], 3.0)
+            if owner is None or owner.settleBh is not None:
+                continue
+            val = gbh + geh
+            ge_claim[id(owner)] = max(ge_claim.get(id(owner), 0.0), val)
+        elif (ev["kind"] == "collision-suppressed"
+              and kv(ev["rest"], "reason") == "cooldown"):
+            owner = _episode_owner(ev["t"], 1.2)
+            if owner is None or owner.settleBh is not None:
+                continue
+            supp_claim[id(owner)] = (supp_claim.get(id(owner), 0.0)
+                                     + abs(fnum_of(ev["rest"], "bodyDelta") or 0.0)
+                                     + abs(fnum_of(ev["rest"], "engineDelta") or 0.0))
+
     for mk in markers:
         if mk.settleBh is not None or mk.t is None:
             continue
         hdr = abs(mk.delta) if mk.delta is not None else 0.0
-        ge = 0.0
-        for ev in events:
-            if ev["kind"] != "grind-end" or ev["t"] is None:
-                continue
-            if 0 <= ev["t"] - mk.t <= 3.0:
-                ge = max(ge, (fnum_of(ev["rest"], "cumBhDrop") or 0.0)
-                             + (fnum_of(ev["rest"], "cumEhDrop") or 0.0))
-        supp = 0.0
-        for ev in events:
-            if ev["kind"] != "collision-suppressed" or ev["t"] is None:
-                continue
-            if 0 <= ev["t"] - mk.t <= 1.2 and kv(ev["rest"], "reason") == "cooldown":
-                supp += abs(fnum_of(ev["rest"], "bodyDelta") or 0.0)
-                supp += abs(fnum_of(ev["rest"], "engineDelta") or 0.0)
+        ge = ge_claim.get(id(mk), 0.0)
+        supp = supp_claim.get(id(mk), 0.0)
         best = max(hdr, ge, hdr + supp)
         if best > hdr:
             mk.settleBh = best      # reconstructed COMBINED body+engine total
@@ -3065,9 +4431,11 @@ def process(log_path, args, index):
     # collisionMarkerSeq printed in the marker header — so the join needs no extra
     # bookkeeping. Copy them in beside the excerpts, because the whole point is that
     # an analysis agent can open them without being told where to look.
-    n_img = attach_snapshot_images(log_path, out_dir, markers)
-    if n_img:
-        print(f"   copied {n_img} failure screenshots into snaps/")
+    snap_stats = attach_snapshot_images(log_path, out_dir, markers, clusters)
+    if snap_stats["copied"]:
+        print(f"   copied {snap_stats['copied']} failure screenshots into snaps/"
+              f" ({snap_stats['sheets']} contact sheet(s),"
+              f" {len(snap_stats['recommended'])} flagged in snaps/manifest.md)")
 
     # iter-43 D6: 07-31 was 266.7 MB and produced a 18 MB events.log — bigger than
     # some whole logs. Cap the spammiest kinds rather than the tail, so the rare
@@ -3132,7 +4500,7 @@ def process(log_path, args, index):
 
     digest = build_digest(log_path, lines, frames, events, markers, header,
                           clusters, unmarked, index, args, gap_skips, traps,
-                          episodes, immobiles, epochs, sclusters)
+                          episodes, immobiles, epochs, sclusters, snap_stats)
     dp = out_dir / "digest.md"
     dp.write_text(digest, encoding="utf-8")
     print(f"   wrote {dp} ({dp.stat().st_size/1024:.1f} KB), events.log "
@@ -3320,6 +4688,100 @@ def selftest():
     check("epochs: the model change is carried into the last epoch",
           len(eps3) > 2 and eps3[2]["model"] == "SULTAN",
           f"model={eps3[2]['model'] if len(eps3) > 2 else '?'}")
+
+    # --- iter-63: the drive-assist baseline must be VISIBLE -----------------
+    # 08-17-111533 flipped it nine times and every epoch rendered identically,
+    # because none of the eleven were tracked. These three checks are the
+    # regression guard for that: the contract is that the mod's own baseline
+    # set is knowable from the epoch table.
+    check("baseline: every BASELINE_EXPERIMENTAL gate is tracked",
+          all(g in TRACKED_GATE_SETTINGS for g in BASELINE_EXPERIMENTAL),
+          f"missing={[g for g in BASELINE_EXPERIMENTAL if g not in TRACKED_GATE_SETTINGS]}")
+
+    def _bs(gates):
+        ep = {"gates": gates}
+        present = [g for g in BASELINE_EXPERIMENTAL if g in ep["gates"]]
+        on = [g for g in present if ep["gates"][g] == "1"]
+        if not present:
+            return "-"
+        return "BASE" if not on else ("EXP" if len(on) == len(present) else "mixed")
+
+    _all_off = {g: "0" for g in BASELINE_EXPERIMENTAL}
+    _all_on = {g: "1" for g in BASELINE_EXPERIMENTAL}
+    _split = dict(_all_on)
+    _split[BASELINE_EXPERIMENTAL[0]] = "0"
+    check("baseline: the eleven all 0 reads BASE", _bs(_all_off) == "BASE", _bs(_all_off))
+    check("baseline: the eleven all 1 reads EXP", _bs(_all_on) == "EXP", _bs(_all_on))
+    check("baseline: the eleven flipped APART reads mixed, not EXP",
+          _bs(_split) == "mixed", _bs(_split))
+    check("baseline: a log predating the set reads '-', never BASE",
+          _bs({"creepClearV2": "1"}) == "-", _bs({"creepClearV2": "1"}))
+
+    # --- iter-71 C1: auto-drive is its own authority, not ON ---------------
+    # The failure this guards against is silent and total: the field was written by
+    # the mod on every marker header and read past by the parser, so nine of
+    # 08-19-074058's fourteen markers were auto-drive and every one reported
+    # `assist=ON` and landed in the drive-assist rate.
+    def _auth(**kw):
+        mk = Marker()
+        for k, v in kw.items():
+            setattr(mk, k, v)
+        return mk.authority()
+
+    check("C1: autodrive=True reads AUTO, not ON",
+          _auth(autodrive="True", suspended="False", grace="False") == "AUTO",
+          _auth(autodrive="True", suspended="False", grace="False"))
+    check("C1: autodrive=False still reads ON",
+          _auth(autodrive="False", suspended="False", grace="False") == "ON",
+          _auth(autodrive="False", suspended="False", grace="False"))
+    check("C1: a dead vehicle still outranks autodrive",
+          _auth(autodrive="True", vehDead="True") == "DEAD",
+          _auth(autodrive="True", vehDead="True"))
+    check("C1: a pre-autodrive log is unchanged (no field => ON)",
+          _auth(suspended="False", grace="False") == "ON",
+          _auth(suspended="False", grace="False"))
+    _hdr = ('kind=grind failClass=AUTODRIVE mode=LaneKeeping suspended=False '
+            'grace=False vehDead=False intoxSusp=False menuOpen=False menuSusp=True '
+            'autodrive=True wanted=0 bullet=False proj=False')
+    check("C1: autodrive/menuOpen/menuSusp lift off a real header",
+          (kv(_hdr, "autodrive"), kv(_hdr, "menuOpen"), kv(_hdr, "menuSusp"))
+          == ("True", "False", "True"),
+          str((kv(_hdr, "autodrive"), kv(_hdr, "menuOpen"), kv(_hdr, "menuSusp"))))
+
+    # --- iter-71 C2: vehicle class ----------------------------------------
+    check("C2: a CLIFFHANGER is two-wheel, not a car",
+          vehicle_class("CLIFFHANGER") == "two-wheel", vehicle_class("CLIFFHANGER"))
+    check("C2: a BATI is two-wheel", vehicle_class("BATI") == "two-wheel",
+          vehicle_class("BATI"))
+    check("C2: a TEZERACT is a car", vehicle_class("TEZERACT") == "car",
+          vehicle_class("TEZERACT"))
+    check("C2: a FLATBED2 is big", vehicle_class("FLATBED2") == "big",
+          vehicle_class("FLATBED2"))
+    check("C2: classification is case-insensitive",
+          vehicle_class("bati") == "two-wheel", vehicle_class("bati"))
+    check("C2: an unknown model falls back to car, never '?'",
+          vehicle_class("SOMEDLCCAR2027") == "car", vehicle_class("SOMEDLCCAR2027"))
+    check("C2: a missing model is '?', not silently a car",
+          vehicle_class(None) == "?", vehicle_class(None))
+
+    # --- iter-71 C3: "previous log" means earlier SESSION, not lower index --
+    # The two 08-19 digests each named the other as predecessor because the index is
+    # ordered by triage-run time and 051310 was re-run after 074058.
+    _rows = [{"log": "driveassist-2026-08-19-074058.log"},
+             {"log": "driveassist-2026-08-19-051310.log"}]
+    _cur = "driveassist-2026-08-19-074058.log"
+    _earlier = [r for r in _rows
+                if r["log"] != _cur
+                and _log_stamp(r["log"]) < _log_stamp(_cur)]
+    check("C3: 051310 is the predecessor of 074058 despite index order",
+          len(_earlier) == 1 and _earlier[0]["log"] == "driveassist-2026-08-19-051310.log",
+          str([r["log"] for r in _earlier]))
+    check("C3: 074058 is NOT a predecessor of 051310",
+          _log_stamp("driveassist-2026-08-19-074058.log")
+          > _log_stamp("driveassist-2026-08-19-051310.log"))
+    check("C3: a stampless name yields None, not a bogus ordering",
+          _log_stamp("some-other-file.log") is None,
+          str(_log_stamp("some-other-file.log")))
 
     print()
     if fails:

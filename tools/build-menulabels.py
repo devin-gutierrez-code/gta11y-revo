@@ -73,18 +73,27 @@ TABS = [
 # SP phone home grid (decompiled cellphone_flashhand sub_5c67). v1.2: the
 # CELL_32/CELL_16 keys for slots 3/5 were paired BACKWARDS in v1.1 — runtime
 # GXT resolution proved CELL_16->'Settings' and CELL_32->'Quick Save'.
-# Quick Save's script is unconfirmed (both decomp slots said appsettings);
-# null until an activation ground-truths it.
+#
+# iter-53 P4: that fixed the KEY->LABEL pairing but left the SLOT->KEY assignment
+# inverted, and the 08-11-182121 menulog ground-truths it from two directions:
+# the live grid read row 3 as "Quick Save" and row 5 as "Settings", and selecting
+# row 5 started appsettings (F55758 "Settings" -> F55840 phone-app on=appsettings).
+# So slot 3 is Quick Save and slot 5 is Settings. With phoneRowTextV2 off, the
+# fallback was naming the wrong tile on both.
+#
+# Note this is also why phone-slot-corrected never fired on it: the old slot 5 had
+# script=None, and a null expectation compares equal to anything.
 PHONE_HOME_SLOTS = [
     {"slot": 0, "gxt": "CELL_5", "label": "Email", "script": "appemail",
      "overrides": [{"gxt": "CELL_25", "script": "appcontacts",
                     "note": "mission-context override (flag _f58)"}]},
     {"slot": 1, "gxt": "CELL_1", "label": "Texts", "script": "apptextmessage"},
     {"slot": 2, "gxt": "CELL_23", "label": "Checklist", "script": "appchecklist"},
-    {"slot": 3, "gxt": "CELL_16", "label": "Settings", "script": "appsettings"},
+    {"slot": 3, "gxt": "CELL_32", "label": "Quick Save", "script": None,
+     "note": "iter-53: ground-truthed from the live grid; no script activation seen"},
     {"slot": 4, "gxt": "CELL_0", "label": "Contacts", "script": "appcontacts"},
-    {"slot": 5, "gxt": "CELL_32", "label": "Quick Save", "script": None,
-     "note": "script unconfirmed; decomp listed appsettings for both 3 and 5"},
+    {"slot": 5, "gxt": "CELL_16", "label": "Settings", "script": "appsettings",
+     "note": "iter-53: row 5 -> appsettings observed in menulog-2026-08-11-182121"},
     {"slot": 6, "gxt": "CELL_7", "label": "Snapmatic", "script": "appcamera"},
     {"slot": 7, "gxt": "CELL_2", "label": "Internet", "script": "appinternet"},
     {"slot": 8, "gxt": "CELL_28", "label": "Trackify", "script": "apptrackify",

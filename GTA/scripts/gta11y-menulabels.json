@@ -4522,9 +4522,10 @@
    },
    {
     "slot": 3,
-    "gxt": "CELL_16",
-    "label": "Settings",
-    "script": "appsettings"
+    "gxt": "CELL_32",
+    "label": "Quick Save",
+    "script": null,
+    "note": "iter-53: ground-truthed from the live grid; no script activation seen"
    },
    {
     "slot": 4,
@@ -4534,10 +4535,10 @@
    },
    {
     "slot": 5,
-    "gxt": "CELL_32",
-    "label": "Quick Save",
-    "script": null,
-    "note": "script unconfirmed; decomp listed appsettings for both 3 and 5"
+    "gxt": "CELL_16",
+    "label": "Settings",
+    "script": "appsettings",
+    "note": "iter-53: row 5 -> appsettings observed in menulog-2026-08-11-182121"
    },
    {
     "slot": 6,
@@ -4587,9 +4588,10 @@
    },
    {
     "slot": 3,
-    "gxt": "CELL_16",
-    "label": "Settings",
-    "script": "appsettings"
+    "gxt": "CELL_32",
+    "label": "Quick Save",
+    "script": null,
+    "note": "iter-53: ground-truthed from the live grid; no script activation seen"
    },
    {
     "slot": 4,
@@ -4599,10 +4601,10 @@
    },
    {
     "slot": 5,
-    "gxt": "CELL_32",
-    "label": "Quick Save",
-    "script": null,
-    "note": "script unconfirmed; decomp listed appsettings for both 3 and 5"
+    "gxt": "CELL_16",
+    "label": "Settings",
+    "script": "appsettings",
+    "note": "iter-53: row 5 -> appsettings observed in menulog-2026-08-11-182121"
    },
    {
     "slot": 6,
@@ -4652,9 +4654,10 @@
    },
    {
     "slot": 3,
-    "gxt": "CELL_16",
-    "label": "Settings",
-    "script": "appsettings"
+    "gxt": "CELL_32",
+    "label": "Quick Save",
+    "script": null,
+    "note": "iter-53: ground-truthed from the live grid; no script activation seen"
    },
    {
     "slot": 4,
@@ -4664,10 +4667,10 @@
    },
    {
     "slot": 5,
-    "gxt": "CELL_32",
-    "label": "Quick Save",
-    "script": null,
-    "note": "script unconfirmed; decomp listed appsettings for both 3 and 5"
+    "gxt": "CELL_16",
+    "label": "Settings",
+    "script": "appsettings",
+    "note": "iter-53: row 5 -> appsettings observed in menulog-2026-08-11-182121"
    },
    {
     "slot": 6,

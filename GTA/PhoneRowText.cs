@@ -196,13 +196,28 @@ namespace GrandTheftAccessibility
             catch { errors++; return false; }
         }
 
+        /// <summary>App closed: drop the page, KEEP the cross-app evidence.
+        ///
+        /// iter-53 P2: this used to clear the signature cache too, and that is why the
+        /// "identical signature under two apps" tell — the conclusive one, per the
+        /// comment in Probe() — almost never fired. The cache was wiped on every
+        /// app-close, so the next app always probed with nothing to compare against and
+        /// `global` came back 0. On 08-11-182121 that let page 2 (the theme-colour list,
+        /// signature `CELL_820|CELL_820|CELL_821|CELL_822`) win for appemail AND
+        /// appsettings AND appcontacts, and Email read out "Blue, Blue, Green, Red".
+        ///
+        /// The evidence is only meaningful ACROSS apps, so it has to outlive one.</summary>
+        public static void ResetForApp()
+        {
+            page = -1;
+        }
+
+        /// <summary>Phone closed (or script reload): drop everything, including the
+        /// signature cache. Keeping "page 2 is global" across a reload would be a
+        /// permanent, invisible refusal.</summary>
         public static void Reset()
         {
             page = -1;
-            // iter-51: the signature cache describes THIS phone session's globals.
-            // The page verdicts are cheap to rebuild (one probe per app open) and
-            // keeping a stale "page 4 is global" across a script reload would be a
-            // permanent, invisible refusal.
             pageSig.Clear();
             pageSigOwner.Clear();
             pageGlobal.Clear();

@@ -50,6 +50,34 @@ ahead" and it fans out in eight directions. Hold it for "where am I".
 You can turn the ambient beeping down without losing the warnings — see
 `Navigation Assist Detail` in settings.
 
+**NumPad 4, 5, 6 and 8** ask directly: nearby vehicles, doors and gates, people, objects.
+Each one reads a list nearest-first — how far, which way, and what it is.
+
+Those four used to have a problem worth knowing about, because it was invisible. Names
+came from a lookup table that was placed by hand in December 2022 and never updated, and
+anything not in that table was not merely left unnamed — it was dropped from the list
+entirely. The table contained no ordinary pedestrian models at all, and half of it was
+unreachable through a sign bug, so a crowded pavement and an empty street sounded exactly
+the same. That is fixed. Nothing is ever dropped for want of a name now: vehicles are
+named by the game itself (so DLC cars work, in your language), people by the game's own
+character names where they exist, and anything genuinely unknown gets described rather
+than silently skipped.
+
+Turn on **`Say what nearby people and vehicles are doing`** in settings and those four
+keys say considerably more:
+
+- **People** — what they are doing, and whether they are armed.
+  *"5.2 meters north, Marine, walking east, armed with a Carbine Rifle."*
+- **Vehicles** — speed, which way they are heading, how many people are in them, siren.
+  *"5.2 meters north, Tornado, 15 miles per hour east, with 2 occupants."*
+- **Doors and gates** — open, closed or locked. If the game will not tell us, it says
+  "state unknown" rather than guessing.
+- **Objects** — roughly how big, and whether it is attached to something.
+
+It ships off, because it makes every line about three times longer. **`Nearby Scan
+Length`** controls how many results a scan reads before it stops; it defaults to the
+nearest 10 and always tells you how many it left out.
+
 ### Driving
 
 The original couldn't help you drive at all. This can.
@@ -76,6 +104,21 @@ rather than dropping you into a wall in silence.
 Turn on `Controller Haptic Feedback` if you want the pad involved. The rumble native has
 no left/right motor, so it's done with patterns instead: one short pulse is left, a
 double pulse is right, and a long low buzz is the edge of the road.
+
+### The three warning tones
+
+Drive assist makes three sounds that aren't speech. They're worth learning, because each
+one tells you something the speech won't get to in time:
+
+- **A clean tone that rises in pitch — steer around something ahead.** The higher the
+  pitch, the less time you have; it also repeats faster the more urgent it gets.
+- **A buzzing tone at a fixed pitch — brake now.** Faster and louder means sooner. It
+  starts about 1.8 seconds before impact.
+- **A low growl — the road is blocked and the assist is holding the car.** You're on the
+  throttle and it isn't going to move until the way clears.
+
+`Drive assist warning beeps` turns all three off. It does **not** touch speech, and it
+doesn't touch the obstacle scanner's beeps — those have their own settings.
 
 **Pull Over** is in the Auto-Drive menu. It stops you at the kerb on your own side of the
 road, without crossing oncoming traffic to get there. If the mod is driving it parks you
@@ -318,7 +361,7 @@ NumPad 7 and 9 move between these. NumPad 1 and 3 move within one.
 
 ## settings
 
-There are 136. All but one of the original 21 are still in there. The full list with
+There are 143. All but one of the original 21 are still in there. The full list with
 defaults is in [CHANGELOG.md](CHANGELOG.md); the short version:
 
 - **On out of the box:** the obstacle scanner, shape casting, turn-by-turn navigation, the
@@ -328,7 +371,8 @@ defaults is in [CHANGELOG.md](CHANGELOG.md); the short version:
 - **Off out of the box:** drive assist itself, haptics, cruise control, lane centring,
   riot weapon handouts, every riot escalation switch (fight intensity, riot ambience,
   police response, aggressive traffic, street fires and dynamic escalation), drinking and
-  smoking, all debug logging, and any drive-assist change still being evaluated.
+  smoking, all debug logging, detailed nearby scans, and any drive-assist change still
+  being evaluated.
 
 Anything that changes how the car behaves ships off on purpose, and gets turned on one at
 a time. That way when something goes wrong it's obvious what caused it. If a session goes
@@ -346,20 +390,49 @@ You will need these things to hopefully get this thing to run.
 - [.NET SDK](https://dotnet.microsoft.com/download) — any recent version. The project
   targets .NET Framework 4.8. You do **not** need Visual Studio any more.
 - [Script Hook V](https://www.dev-c.com/gtav/scripthookv/)
-- [Script Hook V dotnet](https://github.com/crosire/scripthookvdotnet) — **v3.6 or later.**
-  Every native call in here is checked against 3.6; older versions will not work.
+- [Script Hook V dotnet](https://github.com/scripthookvdotnet/scripthookvdotnet) —
+  **a 3.7.0 nightly build, not the 3.6 stable release.** Get it from the
+  [nightly downloads](https://github.com/scripthookvdotnet/scripthookvdotnet-nightly/releases).
+  This is a hard requirement: 3.6 cannot load this mod at all. It doesn't degrade or run
+  with bits missing — it refuses to load the script, and the only sign is silence.
+  If the mod seems completely absent, this is the first thing to check.
 - [NAudio](https://github.com/naudio/NAudio) — comes from NuGet, you don't fetch it
   yourself
 - [Newtonsoft.Json](https://github.com/JamesNK/Newtonsoft.Json) — same
 - [CSCore](https://github.com/filoe/cscore) — same
 - [tolk](https://github.com/dkager/tolk) — the screen reader bridge. This one is native
+
+### Developer diagnostic bridge
+
+Live development builds can expose player, vehicle, scanner, shapecast, drive-assist,
+input, screenshot, log-attribution, and separate SAPI speech commands on loopback. See
+`docs/research/diagnostic-bridge.md`. Local test-bed deployment enables it; public `dist`
+packages ship it disabled.
   and it's bundled, see below.
 
 ## building it
 
+Once, on a fresh clone — fetch the Script Hook V .NET nightly the project builds against:
+
+```bash
+powershell -File tools\fetch-shvdn.ps1
+```
+
+There is no NuGet package for the nightly (the newest published one is 3.6.0 from 2022), so
+the assembly is vendored into `external\shvdn\` instead. The exact nightly is pinned by the
+`<ShvdnNightlyTag>` property in the csproj, so everyone builds against the same one; the
+script reads the tag from there. Build without running this first and you get a single
+error telling you to run it.
+
+Then:
+
 ```bash
 dotnet build GTA\GrandTheftAccessibilityRevo.csproj
 ```
+
+It builds with a few hundred deprecation warnings. That is expected and not a problem —
+they're catalogued in [docs/shvdn-nightly-migration.md](docs/shvdn-nightly-migration.md),
+they're all warnings rather than errors, and they get cleaned up gradually.
 
 Output lands in `GTA\bin\<Debug|Release>\net48\`, and a post-build step copies it straight
 into your GTA V `scripts` folder. It defaults to
@@ -370,16 +443,27 @@ variable.
 For an explicit deploy:
 
 ```bash
-pwsh tools\deploy.ps1 -ScriptsDir "D:\Games\GTAV\scripts" -IncludeData
+powershell -File tools\deploy.ps1 -ScriptsDir "D:\Games\GTAV\scripts"
 ```
 
-Use `-IncludeData` on a first install. It copies the map data, the menu label tables, the
-handling meta, `hashes.txt` and all the sound files, and it puts the native DLLs where
-they actually need to go.
+Every deploy copies the map data, the menu label tables, the handling meta,
+`gta11y-modelnames.tsv.gz` and all the sound files whenever they differ from what is
+installed, and puts the native DLLs where they actually need to go. It then prints what
+is *installed* and warns loudly about anything absent.
+
+This used to be opt-in behind `-IncludeData`, which is how iteration 58's model-name
+table went weeks without ever reaching the game — every ordinary rebuild skipped it, and
+the only symptom was that people and objects stopped being named. The flag still exists
+and now means "re-copy even the files that already match".
+
+Note it is `powershell`, not `pwsh`. The script has no PowerShell 7-only syntax, so the
+Windows PowerShell 5.1 that ships with Windows runs it fine; `pwsh` is the separate
+PowerShell 7 install most machines do not have.
 
 ## installing it
 
-1. Install Script Hook V and Script Hook V .NET 3.6+ into your GTA V folder.
+1. Install Script Hook V, and a **Script Hook V .NET 3.7.0 nightly** (not 3.6), into your
+   GTA V folder. See dependencies above — 3.6 will not load this mod.
 2. Build it, or take a built copy.
 3. `GrandTheftAccessibilityRevo.dll`, `CSCore.dll`, `NAudio.dll` and
    `Newtonsoft.Json.dll` go in `scripts\`.
@@ -389,20 +473,23 @@ they actually need to go.
    because there's an old copy sitting in the root already. Without `Tolk.dll` you get no
    speech whatsoever.
 5. The data files (`gta11y-map.json`, `gta11y-nodes.json.gz`,
-   `gta11y-junctions.json.gz`, `gta11y-menulabels.json`), `vehicleaihandlinginfo.meta`,
-   `hashes.txt` and the `.wav` files go in `scripts\`.
+   `gta11y-junctions.json.gz`, `gta11y-menulabels.json`,
+   `gta11y-modelnames.tsv.gz`), `vehicleaihandlinginfo.meta` and the `.wav` files go
+   in `scripts\`.
 6. Start the game.
 
 The build and `deploy.ps1` both do steps 3 to 5 for you. Step 4 in particular is easy to
 get wrong by hand.
 
-If you're missing `hashes.txt` or the sounds, the mod will tell you out loud at startup
-rather than just quietly not naming things at you.
+If you're missing `gta11y-modelnames.tsv.gz` or the sounds, the mod will tell you out loud
+at startup rather than just quietly not naming things at you. Without the name table
+nothing goes silent — people, objects and doors are still announced, just described
+generically ("man", "unknown object, about 2 metres across") instead of named.
 
 ### sounds it wants in the scripts folder
 
 `pickup.wav`, `cover.wav`, `interact.wav`, `hit.wav`, `headshot.wav`, `kill.wav`,
-`door.wav`, `ladder.wav`, `tped.wav`, `tvehicle.wav`, `tprop.wav`, and `hashes.txt`.
+`door.wav`, `ladder.wav`, `tped.wav`, `tvehicle.wav`, and `tprop.wav`.
 Mono is better for the ones that get panned. These all ship with the build now — they
 didn't used to, which is why a clean install used to be strangely quiet.
 
@@ -412,10 +499,20 @@ Every subsystem is wrapped in its own error handling, so one thing falling over 
 take the whole mod down with it. That said:
 
 - **No speech at all** — `Tolk.dll` isn't in the GTA V root. See step 4 above.
-- **Nothing is named** — `hashes.txt` isn't in `scripts\`.
+- **Things are described but not named** ("man", "unknown object") —
+  `gta11y-modelnames.tsv.gz` isn't in `scripts\`. Regenerate it with
+  `python tools\build-modelnames.py` and redeploy.
+- **A specific thing is named wrongly, or not at all** — check
+  `gta11y-modelgaps-<date>.log` in your GTA V folder; the mod records every model it met
+  and could not name. Re-run `python tools\build-modelnames.py --refresh` to pick up new
+  DLC content, and correct anything it still gets wrong in
+  `tools\modelnames-overrides.json`.
 - **Drive assist is making things worse** — turn off the last drive-assist setting you
   switched on. They're all individually revertible in-game for exactly this reason.
-- **It doesn't load at all** — check your Script Hook V .NET version. It needs 3.6+.
+- **It doesn't load at all** — check your Script Hook V .NET version. It needs a **3.7.0
+  nightly**; the 3.6 stable release cannot load this build and fails silently. SHVDN's own
+  log (`ScriptHookVDotNet.log`, next to `GTA5.exe`) will say
+  `Unable to resolve API version 3.7.0` if this is what happened.
 - **You want to report a driving problem** — turn on `Drive Assist Debug Logging` in
   settings, press **F1** at the moment it goes wrong, and the log will have a marker in it.
 
