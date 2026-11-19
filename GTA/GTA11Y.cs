@@ -1095,8 +1095,22 @@ namespace GrandTheftAccessibility
                         else if (currentTarget != null && !currentTarget.IsDead && currentTarget != autolockTarget)
                         {
                             autolockTarget = currentTarget;
-                            autolockPartIndex = 0;
                             autolockActive = true;
+
+                            // Find first available part (for vehicles, skip bones that don't exist on this model)
+                            autolockPartIndex = 0;
+                            if (currentTarget.EntityType == EntityType.Vehicle)
+                            {
+                                int maxParts = VEHICLE_TARGET_PARTS.Length;
+                                for (int i = 0; i < maxParts; i++)
+                                {
+                                    if (IsVehiclePartAvailable(i))
+                                    {
+                                        autolockPartIndex = i;
+                                        break;
+                                    }
+                                }
+                            }
 
                             if (currentTarget != lastAnnouncedTarget)
                             {
@@ -4663,16 +4677,8 @@ namespace GrandTheftAccessibility
                 else if (autolockTarget.EntityType == EntityType.Vehicle)
                 {
                     Vehicle vehicle = (Vehicle)autolockTarget;
-                    string boneName = VEHICLE_TARGET_PARTS[autolockPartIndex].bone;
-                    int boneIndex = Function.Call<int>(Hash.GET_ENTITY_BONE_INDEX_BY_NAME, vehicle, boneName);
-
-                    if (boneIndex != -1)
-                    {
-                        GTA.Math.Vector3 bonePos = Function.Call<GTA.Math.Vector3>(
-                            Hash.GET_WORLD_POSITION_OF_ENTITY_BONE, vehicle, boneIndex);
-                        if (bonePos != GTA.Math.Vector3.Zero) return bonePos;
-                    }
-                    return vehicle.Position;
+                    GTA.Math.Vector3 bonePos = GetVehicleBonePosition(vehicle, autolockPartIndex);
+                    return bonePos != GTA.Math.Vector3.Zero ? bonePos : vehicle.Position;
                 }
             }
             catch { }
@@ -4681,7 +4687,66 @@ namespace GrandTheftAccessibility
         }
 
         /// <summary>
-        /// Handles right stick input for cycling through target parts
+        /// Gets the world position of a vehicle bone by part index.
+        /// Uses GET_ENTITY_BONE_POSITION_2 (0x44A8FCB8ED227738) which reliably returns
+        /// bone positions regardless of whether the vehicle has occupants.
+        /// GET_WORLD_POSITION_OF_ENTITY_BONE can return the vehicle origin (not the actual
+        /// bone position) for unoccupied vehicles whose bone transforms aren't fully computed.
+        /// </summary>
+        private GTA.Math.Vector3 GetVehicleBonePosition(Vehicle vehicle, int partIndex)
+        {
+            string boneName = VEHICLE_TARGET_PARTS[partIndex].bone;
+            int boneIndex = Function.Call<int>(Hash.GET_ENTITY_BONE_INDEX_BY_NAME, vehicle, boneName);
+
+            if (boneIndex == -1) return GTA.Math.Vector3.Zero;
+
+            // GET_ENTITY_BONE_POSITION_2 returns correct world-space bone positions
+            // even when the vehicle has no occupants
+            GTA.Math.Vector3 bonePos = Function.Call<GTA.Math.Vector3>(
+                (Hash)0x44A8FCB8ED227738, vehicle, boneIndex);
+
+            // Validate: if bonePos equals entity position exactly, the bone transform
+            // likely wasn't resolved — treat as invalid so we don't aim at the origin
+            if (bonePos == GTA.Math.Vector3.Zero) return GTA.Math.Vector3.Zero;
+            if (bonePos.DistanceTo(vehicle.Position) < 0.05f) return GTA.Math.Vector3.Zero;
+
+            return bonePos;
+        }
+
+        /// <summary>
+        /// Checks whether a vehicle bone exists and has a valid position for a given part index.
+        /// Always returns true for ped targets (ped bones are always present).
+        /// </summary>
+        private bool IsVehiclePartAvailable(int partIndex)
+        {
+            if (autolockTarget == null) return false;
+            if (autolockTarget.EntityType == EntityType.Ped) return true;
+            if (autolockTarget.EntityType != EntityType.Vehicle) return false;
+
+            Vehicle vehicle = (Vehicle)autolockTarget;
+            return GetVehicleBonePosition(vehicle, partIndex) != GTA.Math.Vector3.Zero;
+        }
+
+        /// <summary>
+        /// Finds the next available part index in the given direction, skipping parts
+        /// whose bones don't exist on the current vehicle model.
+        /// Returns -1 if no valid part is found.
+        /// </summary>
+        private int FindNextAvailablePart(int currentIndex, int direction, int maxParts)
+        {
+            for (int i = 1; i <= maxParts; i++)
+            {
+                int candidateIndex = (currentIndex + direction * i + maxParts) % maxParts;
+                if (autolockTarget.EntityType == EntityType.Ped || IsVehiclePartAvailable(candidateIndex))
+                    return candidateIndex;
+            }
+            return -1;
+        }
+
+        /// <summary>
+        /// Handles right stick input for cycling through target parts.
+        /// For vehicles, skips parts whose bones don't exist on the model and announces
+        /// "no other parts" if no valid part is found in the flick direction.
         /// </summary>
         private void HandlePartCycling()
         {
@@ -4696,13 +4761,12 @@ namespace GrandTheftAccessibility
                 ? PED_TARGET_PARTS.Length
                 : VEHICLE_TARGET_PARTS.Length;
 
-            bool changed = false;
+            int direction = 0;
 
             if (rightStickX < -0.5f && !autolockPartCycleLeft)
             {
                 autolockPartCycleLeft = true;
-                autolockPartIndex = (autolockPartIndex - 1 + maxParts) % maxParts;
-                changed = true;
+                direction = -1;
             }
             else if (rightStickX >= -0.5f)
             {
@@ -4712,17 +4776,32 @@ namespace GrandTheftAccessibility
             if (rightStickX > 0.5f && !autolockPartCycleRight)
             {
                 autolockPartCycleRight = true;
-                autolockPartIndex = (autolockPartIndex + 1) % maxParts;
-                changed = true;
+                direction = 1;
             }
             else if (rightStickX <= 0.5f)
             {
                 autolockPartCycleRight = false;
             }
 
-            if (changed)
+            if (direction != 0)
             {
                 autolockPartCycleTicks = DateTime.Now.Ticks;
+
+                int nextPart = FindNextAvailablePart(autolockPartIndex, direction, maxParts);
+
+                if (nextPart == -1 || nextPart == autolockPartIndex)
+                {
+                    // No other valid parts — play low "blocked" tone
+                    outPartCycle.Stop();
+                    partCycleBeep.Frequency = 300;
+                    var blockedSample = partCycleBeep.Take(TimeSpan.FromSeconds(0.05));
+                    outPartCycle.Init(blockedSample);
+                    outPartCycle.Play();
+                    Tolk.Speak("No other parts", true);
+                    return;
+                }
+
+                autolockPartIndex = nextPart;
 
                 outPartCycle.Stop();
                 partCycleBeep.Frequency = 600 + (autolockPartIndex * 80);
