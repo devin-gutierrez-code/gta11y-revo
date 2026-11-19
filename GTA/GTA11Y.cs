@@ -332,7 +332,7 @@ namespace GrandTheftAccessibility
         private GTA.Math.Vector3 autodriveDestination = GTA.Math.Vector3.Zero;
         private long autodriveCheckTicks = 0;
         private float autodriveStartDistance = 0f;
-        private float autodriveSpeed = 20f; // Speed in m/s (adjustable with arrow keys)
+        private float autodriveSpeed = 20.1168f; // Speed in m/s (adjustable with arrow keys, 45 mph)
         private int autodriveFlagMenuIndex = 0; // Which flag is selected in menu
         private bool[] autodriveFlags = new bool[32]; // Individual flag states
 
@@ -836,7 +836,7 @@ namespace GrandTheftAccessibility
                             string currentStreet = World.GetStreetName(Game.Player.Character.Position);
                             string currentZone = World.GetZoneLocalizedName(Game.Player.Character.Position);
                             float speed = Game.Player.Character.CurrentVehicle != null ?
-                                Game.Player.Character.CurrentVehicle.Speed * 2.237f : 0f;
+                                Game.Player.Character.CurrentVehicle.Speed * 2.23694f : 0f;
 
                             Tolk.Speak("Wandering through " + currentStreet + ", " + currentZone + ". " + (int)speed + " mph.", true);
                         }
@@ -4023,9 +4023,12 @@ namespace GrandTheftAccessibility
                     keyState[13] = true;
                     if (mainMenuIndex == 3 && !isAutodriving)
                     {
-                        autodriveSpeed = Math.Max(5f, autodriveSpeed - 5f);
-                        int speedMph = (int)Math.Round(autodriveSpeed * 2.237);
-                        Tolk.Speak("Speed: " + speedMph + " mph");
+                        // Convert current m/s to mph, round to nearest 5, subtract 5, convert back
+                        int currentMph = (int)Math.Round(autodriveSpeed * 2.23694);
+                        int snappedMph = ((int)Math.Round(currentMph / 5.0)) * 5;
+                        int newMph = Math.Max(5, snappedMph - 5);
+                        autodriveSpeed = (float)(newMph / 2.23694);
+                        Tolk.Speak("Speed: " + newMph + " mph");
                     }
                 }
 
@@ -4034,9 +4037,12 @@ namespace GrandTheftAccessibility
                     keyState[14] = true;
                     if (mainMenuIndex == 3 && !isAutodriving)
                     {
-                        autodriveSpeed = Math.Min(100f, autodriveSpeed + 5f);
-                        int speedMph = (int)Math.Round(autodriveSpeed * 2.237);
-                        Tolk.Speak("Speed: " + speedMph + " mph");
+                        // Convert current m/s to mph, round to nearest 5, add 5, convert back
+                        int currentMph = (int)Math.Round(autodriveSpeed * 2.23694);
+                        int snappedMph = ((int)Math.Round(currentMph / 5.0)) * 5;
+                        int newMph = Math.Min(225, snappedMph + 5);
+                        autodriveSpeed = (float)(newMph / 2.23694);
+                        Tolk.Speak("Speed: " + newMph + " mph");
                     }
                 }
 
@@ -4103,7 +4109,7 @@ namespace GrandTheftAccessibility
                             autodriveWanderMode = false;
                             autodriveCheckTicks = DateTime.Now.Ticks;
 
-                            int speedMph = (int)Math.Round(autodriveSpeed * 2.237);
+                            int speedMph = (int)Math.Round(autodriveSpeed * 2.23694);
                             Tolk.Speak("Auto-driving to waypoint at " + speedMph + " mph. " + (int)autodriveStartDistance + " meters.");
                         }
                         else
@@ -4120,7 +4126,7 @@ namespace GrandTheftAccessibility
                                 autodriveWanderMode = true;
                                 autodriveCheckTicks = DateTime.Now.Ticks;
 
-                                int speedMph = (int)Math.Round(autodriveSpeed * 2.237);
+                                int speedMph = (int)Math.Round(autodriveSpeed * 2.23694);
                                 Tolk.Speak("Wandering at " + speedMph + " mph.");
                             }
                             catch (Exception ex)
@@ -4409,7 +4415,7 @@ namespace GrandTheftAccessibility
                 {
                     // Show current flag and state, plus speed
                     string flagState = autodriveFlags[autodriveFlagMenuIndex] ? "ON" : "OFF";
-                    int speedMph = (int)Math.Round(autodriveSpeed * 2.237); // Convert m/s to mph
+                    int speedMph = (int)Math.Round(autodriveSpeed * 2.23694); // Convert m/s to mph
                     result = result + "Flag " + (autodriveFlagMenuIndex + 1) + " of 32: " + autodriveFlagNames[autodriveFlagMenuIndex] + ", " + flagState + ". Speed: " + speedMph + " mph. NumPad Multiply to start. Arrows to adjust speed. Drives to waypoint if set, otherwise wanders.";
                 }
             }
